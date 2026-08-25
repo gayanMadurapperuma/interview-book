@@ -14,6 +14,7 @@
     --tick:#F26B6B; --tickbg:#2C1717;
     --micro:#C58CF2; --microbg:#241A2E;
     --pool:#5BD6D6; --poolbg:#12292C;
+    --ts:#4FA8F2; --tsbg:#132840;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
@@ -43,6 +44,7 @@
   .tab{padding:8px 18px;border-radius:8px;font-size:13.5px;font-weight:600;cursor:pointer;border:1px solid transparent;color:var(--sub);transition:all .25s}
   .tab.js.active{background:var(--jsbg);color:var(--js);border-color:#6B551F}
   .tab.node.active{background:var(--nodebg);color:var(--node);border-color:#2C5C46}
+  .tab.ts.active{background:var(--tsbg);color:var(--ts);border-color:#2C5578}
   .tab:not(.active):hover{color:var(--text)}
 
   .shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:calc(100vh - 56px)}
@@ -57,6 +59,7 @@
   .side-item:hover{background:var(--panel2);color:var(--text)}
   .side-item.active.js{background:var(--jsbg);color:var(--js)}
   .side-item.active.node{background:var(--nodebg);color:var(--node)}
+  .side-item.active.ts{background:var(--tsbg);color:var(--ts)}
 
   /* Main content */
   main{padding:28px 30px 80px;max-width:760px}
@@ -66,7 +69,7 @@
   @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 
   .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px}
-  .eyebrow.js{color:var(--js)} .eyebrow.node{color:var(--node)}
+  .eyebrow.js{color:var(--js)} .eyebrow.node{color:var(--node)} .eyebrow.ts{color:var(--ts)}
   h2{font-size:22px;font-weight:600;margin:0 0 10px}
   h2::before{content:'> ';color:var(--node)}
   .lede{color:var(--sub);font-size:14.5px;line-height:1.65;margin:0 0 22px}
@@ -87,6 +90,7 @@
   .kw{color:#7EA6F2}.fn{color:#F2C879}.str{color:#C6E27C}.cm{color:#5F6B7A}
 
   .callout{border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.6;margin:16px 0;border:1px solid}
+  .callout-label{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;margin-right:6px;opacity:.8}
   .callout.warn{background:#2C2413;border-color:#6B551F;color:#F6D999}
   .callout.info{background:#182335;border-color:#2E4A82;color:#BFD3FF}
 
@@ -239,6 +243,84 @@
   .nb-pipe i:nth-child(3){animation-delay:.8s}
   @keyframes nbflow{to{left:calc(100% + 16px)}}
 
+  .typeflow-anim{display:flex;align-items:center;gap:12px}
+  .tf2-value{padding:8px 14px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:13px;color:var(--sub);animation:tf2in 2.4s ease-in-out infinite}
+  .tf2-arrow{color:var(--sub);animation:tf2arrow 2.4s ease-in-out infinite}
+  .tf2-type{padding:8px 14px;border-radius:6px;background:var(--tsbg);border:1px solid #2C5578;color:var(--ts);font-family:var(--mono);font-size:13px;opacity:0;animation:tf2type 2.4s ease-in-out infinite}
+  @keyframes tf2in{0%,100%{opacity:.5}50%{opacity:1}}
+  @keyframes tf2arrow{0%,40%{opacity:.3}60%,100%{opacity:1}}
+  @keyframes tf2type{0%,45%{opacity:0;transform:translateX(-4px)}70%,100%{opacity:1;transform:translateX(0)}}
+
+  .narrow-anim{display:flex;flex-direction:column;align-items:center;gap:2px}
+  .nw-wide{padding:6px 14px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--sub)}
+  .nw-funnel{width:0;height:0;border-left:40px solid transparent;border-right:40px solid transparent;border-top:20px solid var(--line);margin:2px 0}
+  .nw-narrow{padding:6px 14px;border-radius:6px;background:var(--tsbg);border:1px solid #2C5578;color:var(--ts);font-family:var(--mono);font-size:11px;animation:nwpulse 2.4s ease-in-out infinite}
+  @keyframes nwpulse{0%,100%{opacity:.5}50%{opacity:1}}
+
+  .aliasvs-anim{position:relative;width:200px;height:70px}
+  .av-box{position:absolute;top:8px;padding:8px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;border:1px solid}
+  .av-box.a{left:0;background:var(--accentbg);border-color:#2E4A82;color:#BFD3FF;animation:avmove1 3s ease-in-out infinite}
+  .av-box.b{right:0;background:var(--tsbg);border-color:#2C5578;color:var(--ts);animation:avmove2 3s ease-in-out infinite}
+  .av-result{position:absolute;bottom:0;left:50%;transform:translateX(-50%);padding:6px 12px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--sub);opacity:0;animation:avresult 3s ease-in-out infinite}
+  @keyframes avmove1{0%,20%{left:0}45%,55%{left:38%}80%,100%{left:0}}
+  @keyframes avmove2{0%,20%{right:0}45%,55%{right:38%}80%,100%{right:0}}
+  @keyframes avresult{0%,40%{opacity:0}55%,75%{opacity:1}100%{opacity:0}}
+
+  .access-anim{display:flex;flex-direction:column;gap:6px}
+  .acc-chip{padding:6px 12px;border-radius:6px;font-family:var(--mono);font-size:10.5px;border:1px solid}
+  .acc-chip.pub{background:var(--nodebg);border-color:#2C5C46;color:var(--node)}
+  .acc-chip.prot{background:var(--jsbg);border-color:#6B551F;color:var(--js);animation:accflicker 2.6s ease-in-out infinite}
+  .acc-chip.priv{background:var(--tickbg);border-color:#6B2E2E;color:var(--tick);animation:accflicker 2.6s ease-in-out infinite .5s}
+  @keyframes accflicker{0%,100%{opacity:1}45%,55%{opacity:.25}}
+
+  .inherit-anim{display:flex;flex-direction:column;align-items:center;gap:4px}
+  .inh-box{padding:8px 14px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--sub)}
+  .inh-box.child{background:var(--tsbg);border-color:#2C5578;color:var(--ts)}
+  .inh-arrow{position:relative;font-family:var(--mono);font-size:10px;color:var(--sub);height:22px;display:flex;align-items:center}
+  .inh-arrow::after{content:'';position:absolute;left:-14px;top:50%;width:6px;height:6px;border-radius:50%;background:var(--ts);animation:inhflow 2s linear infinite}
+  @keyframes inhflow{0%{top:-6px;opacity:0}20%{opacity:1}100%{top:20px;opacity:0}}
+
+  .polymorph-anim{display:flex;flex-direction:column;align-items:center;gap:8px}
+  .poly-top{font-family:var(--mono);font-size:11px;color:var(--sub)}
+  .poly-row{display:flex;gap:8px}
+  .poly-box{padding:7px 12px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:10.5px;color:var(--sub);animation:polyswap 2.8s ease-in-out infinite}
+  .poly-box.b{animation-delay:1.4s}
+  @keyframes polyswap{0%,40%{border-color:var(--line);color:var(--sub)}10%,30%{border-color:var(--ts);color:var(--ts)}}
+
+  .generic-anim{display:flex;flex-direction:column;align-items:center;gap:8px}
+  .gen-box{padding:8px 14px;border-radius:6px;background:var(--tsbg);border:1px solid #2C5578;color:var(--ts);font-family:var(--mono);font-size:13px}
+  .gen-fill{position:relative;height:20px;width:80px}
+  .gen-fill span{position:absolute;left:0;right:0;text-align:center;font-family:var(--mono);font-size:11px;color:var(--sub);opacity:0;animation:genswap 3.6s ease-in-out infinite}
+  .gen-fill span:nth-child(1){animation-delay:0s}
+  .gen-fill span:nth-child(2){animation-delay:1.2s}
+  .gen-fill span:nth-child(3){animation-delay:2.4s}
+  @keyframes genswap{0%,5%{opacity:0}10%,28%{opacity:1}33%,100%{opacity:0}}
+
+  .utility-anim{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .ut-base{padding:7px 14px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--text)}
+  .ut-branch{padding:5px 10px;border-radius:6px;background:var(--tsbg);border:1px solid #2C5578;color:var(--ts);font-family:var(--mono);font-size:10px;animation:utpulse 3s ease-in-out infinite}
+  .ut-branch.b1{animation-delay:0s} .ut-branch.b2{animation-delay:.6s} .ut-branch.b3{animation-delay:1.2s}
+  @keyframes utpulse{0%,100%{opacity:.35}50%{opacity:1}}
+
+  .errorflow-anim{display:flex;flex-direction:column;align-items:center;gap:8px}
+  .ef-top{padding:6px 12px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:10.5px;color:var(--sub)}
+  .ef-row{display:flex;gap:8px}
+  .ef-path{padding:7px 10px;border-radius:6px;font-family:var(--mono);font-size:10px;border:1px solid;animation:efswap 2.8s ease-in-out infinite}
+  .ef-path.caught{background:var(--nodebg);border-color:#2C5C46;color:var(--sub)}
+  .ef-path.uncaught{background:var(--tickbg);border-color:#6B2E2E;color:var(--sub);animation-delay:1.4s}
+  @keyframes efswap{0%,40%{opacity:.4}10%,30%{opacity:1}}
+
+  .combinator-anim{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
+  .cb-chip{padding:7px 11px;border-radius:20px;font-family:var(--mono);font-size:10px;border:1px solid var(--line);background:var(--panel2);color:var(--sub);animation:cbpulse 3.2s ease-in-out infinite}
+  .cb-chip.c1{animation-delay:0s} .cb-chip.c2{animation-delay:.8s} .cb-chip.c3{animation-delay:1.6s} .cb-chip.c4{animation-delay:2.4s}
+  @keyframes cbpulse{0%,100%{border-color:var(--line);color:var(--sub)}20%,55%{border-color:var(--accent);color:var(--accent)}}
+
+  .delegate-anim{display:flex;justify-content:center;padding:10px 0}
+  .del-parent{position:relative;padding:22px 18px 12px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:9.5px;color:var(--sub)}
+  .del-child{margin-top:8px;padding:6px 10px;border-radius:6px;background:var(--tsbg);border:1px solid #2C5578;color:var(--ts);font-size:10px;position:relative}
+  .del-child::after{content:'';position:absolute;left:50%;bottom:100%;width:6px;height:6px;border-radius:50%;background:var(--ts);animation:delbubble 2s ease-out infinite}
+  @keyframes delbubble{0%{bottom:-4px;opacity:1}80%{opacity:1}100%{bottom:60px;opacity:0}}
+
   /* --- badge for demo items in sidebar --- */
   .side-item .play-badge{display:inline-block;margin-left:6px;font-size:9px;padding:1px 6px;border-radius:10px;background:var(--accentbg);color:var(--accent);vertical-align:middle}
 
@@ -318,6 +400,7 @@
   <h1><span class="prompt">$</span> JS vs Node — theory reference</h1>
   <div class="tab js active" id="tabJS">JavaScript engine</div>
   <div class="tab node" id="tabNode">Node.js runtime</div>
+  <div class="tab ts" id="tabTS">TypeScript</div>
 </div>
 
 <div class="shell">
@@ -480,6 +563,40 @@ const jsTopics = [
     {term:"Starvation risk", desc:"Endlessly chained microtasks can delay macrotasks (rendering, timers) indefinitely.", detail:"This isn't just theoretical — a bug where a promise chain keeps re-queuing itself can visibly freeze a page's rendering while the JS thread stays 'busy' the whole time.", code:`function loopForever() {\n  Promise.resolve().then(loopForever);  <span class="cm">// re-queues itself every time</span>\n}\nloopForever();\nsetTimeout(() => console.log('never runs'), 0);  <span class="cm">// starved</span>`}
   ]
 },
+{ id:'combinators', title:'Promise combinators: all, race, any, allSettled', animate:'combinator',
+  lede:"Four ways to wait on multiple promises at once — picking the wrong one is a common source of both real bugs and 'gotcha' interview questions.",
+  steps:[
+    "<code>Promise.all(promises)</code> waits for every one to fulfill, but <b>rejects immediately</b> the instant any single one rejects, discarding the rest.",
+    "Reach for <code>all</code> when every result is genuinely required — if one fails, the whole operation is meaningless anyway (e.g. loading three pieces of required config).",
+    "<code>Promise.allSettled(promises)</code> never short-circuits — it waits for every promise and returns an array of <code>{status, value|reason}</code> for each, regardless of outcome.",
+    "Reach for <code>allSettled</code> when partial success is acceptable — e.g. pinging 3 independent services where one failing shouldn't cancel the other two results.",
+    "<code>Promise.race(promises)</code> settles as soon as the <b>first</b> promise settles, fulfilled or rejected — a classic way to implement a timeout by racing a real call against a timer.",
+    "<code>Promise.any(promises)</code> resolves as soon as the <b>first one fulfills</b>; it only rejects once <i>every</i> promise has rejected, bundling all the errors into one <code>AggregateError</code>.",
+    "None of these actually <b>cancel</b> the 'losing' promises — race and any just stop waiting for the rest; the underlying operations keep running unless you explicitly abort them."
+  ],
+  code:`const results = await Promise.all([fetchA(), fetchB()]);      <span class="cm">// fails fast if either rejects</span>\n\nconst outcomes = await Promise.allSettled([fetchA(), fetchB()]); <span class="cm">// always resolves, per-item status</span>\n\nconst fastest = await Promise.race([fetchA(), timeout(3000)]);   <span class="cm">// timeout pattern</span>\n\nconst firstOk = await Promise.any([mirror1(), mirror2()]);       <span class="cm">// first success wins</span>`,
+  terms:[
+    {term:"Promise.all — fail fast", desc:"Rejects on the first failure, discarding the rest.", detail:"A common gotcha: the promises passed to Promise.all already started running the moment they were created (or passed in) — all() doesn't start them, it only waits on ones already in flight.", code:`try {\n  const [a, b] = await Promise.all([mayFail(), ok()]);\n} catch (err) {\n  <span class="cm">// runs if EITHER rejected — you don't know which one, or the other's result</span>\n}`},
+    {term:"Promise.race as a timeout", desc:"Racing a real operation against a timer to enforce a deadline.", detail:"race() alone doesn't cancel the loser — pairing it with AbortController lets you also stop the slow operation's underlying work, not just stop waiting on it.", code:`const timeout = ms => new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));\nawait Promise.race([fetchData(), timeout(3000)]);  <span class="cm">// rejects if fetchData takes over 3s</span>`}
+  ]
+},
+{ id:'delegation', title:'Event delegation, debounce & throttle', animate:'delegate',
+  lede:"Three closely related patterns for controlling how often — and where — your code responds to events.",
+  steps:[
+    "<b>Event delegation</b>: attach one listener to a parent element instead of one per child — since events bubble, you check <code>event.target</code> to see which child actually triggered it.",
+    "Delegation is essential for dynamic lists — child elements added <i>after</i> the listener was attached still work correctly, because the listener lives on the parent, not on each (possibly not-yet-existing) child.",
+    "<b>Debounce</b> delays execution until a burst of calls goes quiet — it resets its timer on every new call, so the function only runs once activity has genuinely settled (classic use: search-as-you-type).",
+    "<b>Throttle</b> guarantees a function runs at most once per fixed interval, no matter how many times it's triggered — used for scroll/resize handlers where you want steady, capped updates rather than zero.",
+    "The core difference: debounce waits for <b>silence</b> before firing once; throttle fires <b>periodically during continuous activity</b>.",
+    "Both are implemented the same underlying way — a closure holding a timer id or a last-call timestamp, wrapped around <code>setTimeout</code> — no special browser API is required for either.",
+    "As a rule of thumb: search inputs and form validation typically <b>debounce</b> (wait for the user to pause); infinite-scroll and drag handlers typically <b>throttle</b> (need steady updates, not silence)."
+  ],
+  code:`function debounce(fn, delay) {\n  let timer;\n  return (...args) => {\n    clearTimeout(timer);\n    timer = setTimeout(() => fn(...args), delay);\n  };\n}\n\nfunction throttle(fn, interval) {\n  let last = 0;\n  return (...args) => {\n    const now = Date.now();\n    if (now - last >= interval) { last = now; fn(...args); }\n  };\n}`,
+  terms:[
+    {term:"Event delegation", desc:"One listener on a parent, using event.target to identify the actual child clicked.", detail:"Besides working for dynamically-added children, delegation also uses less memory than attaching hundreds of individual listeners to a long list.", code:`list.addEventListener('click', (e) => {\n  if (e.target.matches('.item')) {\n    console.log('clicked item', e.target.dataset.id);\n  }\n});  <span class="cm">// works even for .item elements added later</span>`},
+    {term:"Debounce vs throttle", desc:"Debounce waits for a pause; throttle caps the rate during continuous activity.", detail:"Mixing these up is a common real bug — a debounced scroll handler can feel laggy (it never fires until scrolling stops), while a throttled search box can send far more requests than needed.", code:`searchInput.addEventListener('input', debounce(runSearch, 300));\nwindow.addEventListener('scroll', throttle(updatePosition, 100));`}
+  ]
+},
 { id:'gc', title:'Garbage collection', animate:'sweep',
   lede:"JS memory is managed automatically — but understanding the algorithm explains why some memory leaks happen.",
   steps:[
@@ -534,6 +651,7 @@ const nodeTopics = [
     "The Poll phase computes how long it's safe to block waiting for I/O based on the <b>closest upcoming timer</b> — it won't sleep past when the next setTimeout is due to fire."
   ],
   code:`setTimeout(() => console.log('timer'), 0);\nsetImmediate(() => console.log('immediate'));\n<span class="cm">// order depends on how much sync work ran first — see Timers vs Check below</span>`,
+  note:{type:'warn', text:"<b>Why this matters for an AI platform:</b> an LLM call is a long-lived I/O operation — the actual request/response round trip never blocks the event loop. But what you do <i>around</i> it can: synchronously <code>JSON.parse()</code>-ing a 5MB response, or running CPU-heavy token counting on the main thread, both occupy the single JS thread solidly. During that window, <b>every other concurrent request on the server stalls</b> — not just slow ones. The fix is the same pattern as any CPU-bound work: offload to worker_threads, stream/chunk large payloads instead of parsing them whole, or move heavy computation off the request path entirely."},
   terms:[
     {term:"Phase", desc:"A distinct stage of the loop with its own FIFO callback queue.", detail:"Callbacks registered in one phase never jump ahead into an earlier phase in the same tick — they wait for that phase to come around again on the next pass.", code:`setTimeout(() => console.log('timers phase'), 0);\nsetImmediate(() => console.log('check phase'));\n<span class="cm">// each callback is tied to a specific phase, not just 'soon'</span>`},
     {term:"Tick", desc:"One full pass through all six phases.", detail:"A busy server with constant I/O can run thousands of ticks per second — each one checking every phase's queue in the same fixed order.", code:`<span class="cm">// conceptually, one tick = Timers → Pending → Poll → Check → Close</span>\n<span class="cm">// then the loop starts the next tick from Timers again</span>`}
@@ -588,9 +706,11 @@ const nodeTopics = [
     "<code>highWaterMark</code> controls the internal buffer size before backpressure kicks in — tuning it trades memory usage against how often the stream pauses to let a slow consumer catch up."
   ],
   code:`const rs = fs.createReadStream('in.txt');\nconst ws = fs.createWriteStream('out.txt');\nrs.pipe(ws);   <span class="cm">// streams in chunks, handles backpressure automatically</span>`,
+  note:{type:'info', text:"<b>Directly relevant to LLM token streaming:</b> Server-Sent Events (SSE) for streaming an LLM's response token-by-token to a client is exactly a Writable stream use case. If the client's connection is slow (a mobile network, a laggy browser tab), backpressure signals — <code>res.write()</code> returning <code>false</code> — tell you to pause emitting new tokens until the client catches up. Ignoring that return value and writing every token as fast as the model produces them can pile up in the response buffer and grow memory per open connection, especially with many concurrent streams."},
   terms:[
     {term:"Backpressure", desc:"Slowing the data source so a slower consumer isn't overwhelmed.", detail:"Ignoring backpressure — writing to a slow destination as fast as data arrives — is one of the most common causes of unbounded memory growth in Node servers.", code:`readable.pipe(writable);  <span class="cm">// pipe() automatically pauses readable if writable falls behind</span>`},
-    {term:"Buffer", desc:"Raw binary data storage, allocated off the V8 heap.", detail:"Buffers are how Node handles anything that isn't text — image data, TCP packets, file contents before you decide on an encoding.", code:`const buf = Buffer.from('hello', 'utf8');\nbuf.length;          <span class="cm">// 5 — byte length, not string length</span>\nbuf.toString('hex');  <span class="cm">// '68656c6c6f'</span>`}
+    {term:"Buffer", desc:"Raw binary data storage, allocated off the V8 heap.", detail:"Buffers are how Node handles anything that isn't text — image data, TCP packets, file contents before you decide on an encoding.", code:`const buf = Buffer.from('hello', 'utf8');\nbuf.length;          <span class="cm">// 5 — byte length, not string length</span>\nbuf.toString('hex');  <span class="cm">// '68656c6c6f'</span>`},
+    {term:"SSE streaming write", desc:"Checking the write() return value before pushing the next chunk to a slow client.", detail:"This is the same backpressure contract as any Writable stream — res in an HTTP handler is one, so the exact same 'check the boolean, wait for drain' pattern applies to streaming tokens as it does to piping a file.", code:`function sendToken(res, token) {\n  const ok = res.write(\`data: \${token}\\n\\n\`);\n  if (!ok) res.once('drain', () => {});  <span class="cm">// wait for buffer to clear before writing more</span>\n}`}
   ]
 },
 { id:'process', title:'process & nextTick', animate:'nexttick',
@@ -603,12 +723,34 @@ const nodeTopics = [
     "<code>process.argv</code> exposes command-line arguments, and <code>process.on('exit', fn)</code> lets you run cleanup code right before the process terminates.",
     "<code>process.on('uncaughtException', fn)</code> and <code>process.on('unhandledRejection', fn)</code> are last-resort safety nets — useful for logging, but the process is generally left in an unknown state afterward and should still exit.",
     "<code>nextTick</code> was originally designed to let APIs guarantee a callback is always async, even when the underlying operation completes synchronously — keeping calling code's control flow predictable.",
-    "<code>process.on('SIGTERM', fn)</code> lets you intercept the signal orchestrators like Kubernetes send before killing a container — the standard hook for graceful shutdown (closing DB connections, finishing in-flight requests)."
+    "<code>process.on('SIGTERM', fn)</code> lets you intercept the signal orchestrators like Kubernetes send before killing a container — the standard hook for graceful shutdown (closing DB connections, finishing in-flight requests).",
+    "A proper graceful shutdown sequence: stop accepting new connections with <code>server.close()</code>, let in-flight requests finish naturally, close DB/cache connections, <b>then</b> exit — with a hard timeout as a fallback in case something never finishes."
   ],
   code:`process.nextTick(() => console.log('next tick'));\nPromise.resolve().then(() => console.log('promise'));\n<span class="cm">// output: 'next tick' always first</span>`,
   terms:[
     {term:"process.exitCode", desc:"Sets the exit code without forcibly killing the process mid-task.", detail:"Preferred over process.exit() in most cases, since it lets pending I/O (like a final log write) finish before the process actually exits naturally.", code:`if (errorHappened) {\n  process.exitCode = 1;   <span class="cm">// process exits with code 1 once it naturally finishes</span>\n}`},
-    {term:"process.env", desc:"Read-only-ish object exposing environment variables.", detail:"Every value on process.env is a string, even ones that look like numbers or booleans — a very common source of subtle bugs when reading config.", code:`process.env.PORT;          <span class="cm">// '3000' — a string, not the number 3000</span>\nNumber(process.env.PORT);  <span class="cm">// 3000 — needs explicit conversion</span>`}
+    {term:"process.env", desc:"Read-only-ish object exposing environment variables.", detail:"Every value on process.env is a string, even ones that look like numbers or booleans — a very common source of subtle bugs when reading config.", code:`process.env.PORT;          <span class="cm">// '3000' — a string, not the number 3000</span>\nNumber(process.env.PORT);  <span class="cm">// 3000 — needs explicit conversion</span>`},
+    {term:"Graceful shutdown", desc:"Stop accepting new work, finish what's in flight, then exit — instead of dying mid-request.", detail:"Skipping this means requests being processed at the exact moment of a deploy or scale-down get dropped — a common source of intermittent 502s during rolling deployments.", code:`process.on('SIGTERM', () => {\n  server.close(() => {          <span class="cm">// stop new connections, wait for in-flight ones</span>\n    db.disconnect();\n    process.exit(0);\n  });\n  setTimeout(() => process.exit(1), 10000);  <span class="cm">// hard timeout fallback</span>\n});`}
+  ]
+},
+{ id:'node-errors', title:'Error handling in production', animate:'errorflow',
+  lede:"Uncaught errors are a decision point, not background noise — how you handle them decides whether your process stays healthy or silently corrupts state.",
+  steps:[
+    "<code>process.on('uncaughtException', fn)</code> and <code>process.on('unhandledRejection', fn)</code> are last-resort safety nets — they let you log the error, but by the time they fire, the process may already be in an unknown state.",
+    "<b>The safe move is log and exit</b> — let a process manager (PM2, Kubernetes, systemd) restart cleanly. Trying to 'limp on' after an uncaught exception risks corrupted in-memory state causing worse, harder-to-diagnose failures downstream.",
+    "<code>Promise.all()</code> rejects the instant <b>any single promise rejects</b>, discarding the others — right when every result is required and a partial success is meaningless.",
+    "<code>Promise.allSettled()</code> never short-circuits — it waits for all of them and reports each one's outcome individually, which is what you want when partial failure is acceptable (e.g. calling 3 independent services and using whichever succeed).",
+    "<b>Every outbound call needs a timeout, no exceptions.</b> An LLM API call, a database query, or an internal service call with no timeout can hang a request — and the resources tied to it — indefinitely.",
+    "<code>AbortController</code> is the standard way to implement a timeout on <code>fetch</code> or any abortable operation — its <code>signal</code> can be passed directly into APIs that support cancellation.",
+    "Error <b>propagation through async/await</b> works like synchronous throw/catch — an unhandled throw inside an async function becomes a rejected promise, so a missing try/catch anywhere in the chain silently produces an unhandled rejection at the top.",
+    "Logging the error alone isn't enough context in production — always log <b>which request</b> was in flight (a request ID, the route, key parameters) so a crash can actually be traced back to its trigger."
+  ],
+  code:`process.on('unhandledRejection', (err) => {\n  logger.error(err);\n  process.exit(1);       <span class="cm">// log and exit — don't limp on</span>\n});\n\nasync function callLLM(prompt) {\n  const controller = new AbortController();\n  const timeout = setTimeout(() => controller.abort(), 5000);\n  try {\n    return await fetch('/llm', { signal: controller.signal, body: prompt });\n  } finally {\n    clearTimeout(timeout);   <span class="cm">// always clean up the timer</span>\n  }\n}`,
+  note:{type:'warn', text:"<b>No exceptions on timeouts</b> — a single outbound call without one (an LLM provider having a bad day, a downstream service hanging) can tie up a request indefinitely, and under load, enough hung requests exhaust connections/memory for everyone else. Wrap every fetch/DB/API call with a timeout, even ones that 'never fail in practice'."},
+  terms:[
+    {term:"unhandledRejection vs uncaughtException", desc:"One fires for rejected promises with no .catch; the other for thrown errors outside any promise.", detail:"Since ES2017+, an unhandled promise rejection is treated almost as seriously as a thrown exception — modern Node can even be configured to crash the process on unhandledRejection by default, matching uncaughtException's severity.", code:`process.on('uncaughtException', (err) => { logger.error(err); process.exit(1); });\nprocess.on('unhandledRejection', (err) => { logger.error(err); process.exit(1); });`},
+    {term:"Promise.allSettled vs Promise.all", desc:"allSettled waits for everything and reports each outcome; all fails fast on the first rejection.", detail:"Reaching for allSettled by default in places where you actually need every result to succeed just hides failures — pick based on whether a partial result is genuinely useful to the caller.", code:`const results = await Promise.allSettled([callA(), callB(), callC()]);\nconst succeeded = results.filter(r => r.status === 'fulfilled').map(r => r.value);`},
+    {term:"Timeout with AbortController", desc:"Cancelling a pending call after a deadline, instead of waiting on it forever.", detail:"AbortController is the modern, standard cancellation primitive — many newer Node/browser APIs (fetch, some stream operations) accept a signal directly, rather than needing a manual Promise.race workaround.", code:`const controller = new AbortController();\nsetTimeout(() => controller.abort(), 3000);\nawait fetch(url, { signal: controller.signal });  <span class="cm">// throws AbortError if it takes too long</span>`}
   ]
 },
 { id:'cluster', title:'Scaling: cluster & worker threads', animate:'clusterproc',
@@ -642,12 +784,160 @@ const nodeTopics = [
     "Production Node apps often monitor <b>event loop lag</b> (the delay between scheduling a check and it actually running) as a health metric — rising lag is usually the first sign something is blocking the thread."
   ],
   code:`<span class="cm">// this handles many concurrent requests on ONE thread —</span>\n<span class="cm">// each request's DB call yields back to the loop while waiting</span>\napp.get('/user', async (req, res) => {\n  const user = await db.find(req.query.id);\n  res.json(user);\n});`,
+  note:{type:'warn', text:"<b>Why CPU-intensive work doesn't suit Node:</b> the non-blocking model only helps while your handler is waiting on I/O (network, disk, DNS) — during that wait, the thread is free to serve other requests. A CPU-bound computation (image processing, heavy parsing, crypto hashing, a big synchronous loop) has no waiting to yield during — it occupies the single JS thread solidly until it finishes, so <i>every other request, no matter how trivial, is blocked behind it.</i> See the 'Why CPU-heavy work blocks Node' live demo below for this playing out step by step."},
   terms:[
     {term:"Blocking I/O", desc:"Thread waits idle until an operation finishes — wastes resources under load.", detail:"In a single-threaded Node process, a single blocking call doesn't just waste resources — it stalls every other concurrent request being handled at that moment.", code:`const data = fs.readFileSync('big.txt');  <span class="cm">// nothing else runs until this returns</span>\nconsole.log('done');`},
     {term:"Non-blocking I/O", desc:"Thread issues the request and moves on; a callback fires later on completion.", detail:"This is the default pattern for almost every built-in Node API — functions ending in Sync are deliberate, less-common exceptions.", code:`fs.readFile('big.txt', (err, data) => {\n  console.log('done');   <span class="cm">// runs later, once ready</span>\n});\nconsole.log('this logs first');  <span class="cm">// thread wasn't blocked</span>`}
   ]
 },
 { id:'demo-node', title:'Live demo: full event loop + API request', type:'demo', demo:'node' }
+];
+
+const tsTopics = [
+{ id:'ts-basics', title:'Type system basics', animate:'typeflow',
+  lede:"TypeScript adds a static type layer on top of JS — types exist only while you're writing code and vanish completely once compiled to plain JavaScript.",
+  steps:[
+    "TypeScript is <b>structurally typed</b> — two types are compatible if their shapes match, not because they share a declared name (unlike Java/C#'s nominal typing).",
+    "<b>Type inference</b> means you often don't need to annotate everything — <code>let x = 5</code> infers <code>number</code> automatically without writing <code>: number</code>.",
+    "<code>any</code> disables type checking entirely for that value — it's an escape hatch, not a type, and defeats the whole purpose if overused.",
+    "<code>unknown</code> is the type-safe alternative to <code>any</code> — you can assign anything to it, but you can't use it until you narrow it with a check first.",
+    "<code>never</code> represents a value that can never occur — the return type of a function that always throws, or the type of an unreachable branch after exhaustive checks.",
+    "TypeScript is <b>erased at compile time</b> — types add zero runtime cost and zero runtime behavior; the compiled JS has no trace of them at all.",
+    "<code>strict</code> mode (in tsconfig.json) turns on a bundle of stricter checks — including <code>strictNullChecks</code>, which stops <code>null</code>/<code>undefined</code> from silently being assignable to every other type.",
+    "Because types are erased at compile time, they provide <b>zero protection against data crossing a real boundary</b> — an API response, form input, or LLM output can be typed however you like and still not match at runtime.",
+    "Libraries like <b>zod</b> solve this by defining a schema once and deriving both the <b>runtime check</b> and the <b>static type</b> from that single source of truth — no risk of the two drifting apart over time."
+  ],
+  code:`let age = 25;              <span class="cm">// inferred as number</span>\nlet name: string = 'Kai';  <span class="cm">// explicit annotation</span>\n\nfunction fail(): never {\n  throw new Error('always throws');\n}`,
+  note:{type:'warn', text:"<b>Why you'd still validate at runtime even with types:</b> TypeScript's checks disappear entirely once compiled — an <code>as SomeType</code> assertion, or JSON parsed from an external API/LLM response, is trusted by the compiler but never actually verified. If that data doesn't match the shape you claimed, you get a runtime crash somewhere downstream with no compile-time warning at all. Runtime validation (zod, io-ts, or a manual check) is the only real guarantee for anything crossing a process/network boundary."},
+  terms:[
+    {term:"Structural typing", desc:"Compatibility based on shape, not declared type name.", detail:"This means two completely unrelated interfaces are interchangeable as long as their properties line up — TypeScript calls this 'duck typing' at compile time.", code:`interface Point { x: number; y: number; }\nfunction log(p: Point) { console.log(p.x, p.y); }\nlog({ x: 1, y: 2, z: 3 });  <span class="cm">// OK — has at least x and y</span>`},
+    {term:"any vs unknown", desc:"any bypasses checking entirely; unknown forces you to narrow before use.", detail:"Prefer unknown for values from outside your control (API responses, JSON.parse results) — it protects you from accidentally treating untrusted data as if its shape were guaranteed.", code:`function handle(val: unknown) {\n  if (typeof val === 'string') {\n    val.toUpperCase();  <span class="cm">// OK — narrowed to string</span>\n  }\n}`},
+    {term:"Runtime validation (zod)", desc:"Deriving both a runtime check and a static type from one schema definition.", detail:"This closes the exact gap that pure TypeScript leaves open — the schema actually executes and throws (or returns a typed error) if the real data doesn't match, instead of just trusting an assertion.", code:`const UserSchema = z.object({ id: z.number(), name: z.string() });\ntype User = z.infer&lt;typeof UserSchema&gt;;  <span class="cm">// static type, derived from the schema</span>\n\nconst result = UserSchema.safeParse(apiResponse);  <span class="cm">// actual runtime check</span>\nif (!result.success) { <span class="cm">// handle invalid data</span> }`}
+  ]
+},
+{ id:'ts-union', title:'Union, intersection & narrowing', animate:'narrow',
+  lede:"Union and intersection types let you combine types; narrowing is how TypeScript figures out which specific type you're dealing with at a given point in the code.",
+  steps:[
+    "A <b>union type</b> (<code>string | number</code>) means 'this could be either' — you can only safely call methods that exist on <i>every</i> member of the union.",
+    "An <b>intersection type</b> (<code>A & B</code>) means 'this has all properties of both' — commonly used to combine several smaller interfaces into one.",
+    "<b>Type narrowing</b> is how TypeScript shrinks a union down to a single specific type inside a conditional block, based on a runtime check.",
+    "<code>typeof</code> checks narrow primitives (string, number, boolean); <code>instanceof</code> narrows class instances; custom <b>type guards</b> narrow anything else.",
+    "A <b>type guard</b> is just a function returning <code>value is SomeType</code> — TypeScript trusts that return type to narrow the caller's variable.",
+    "<b>Discriminated unions</b> use a shared literal property (like <code>kind: 'circle' | 'square'</code>) so a <code>switch</code> on that property narrows the whole object automatically.",
+    "Narrowing only lasts within the scope where the check remains provably true — reassigning the variable afterward, or calling an external function, can widen it back."
+  ],
+  code:`function describe(val: string | number) {\n  if (typeof val === 'string') {\n    return val.toUpperCase();   <span class="cm">// narrowed to string here</span>\n  }\n  return val.toFixed(2);        <span class="cm">// narrowed to number here</span>\n}`,
+  terms:[
+    {term:"Union type", desc:"A value that could be one of several types.", detail:"Unions are how TypeScript models real-world variability — an API field that's sometimes a string ID and sometimes a full object is a classic union candidate.", code:`type Id = string | number;\nfunction printId(id: Id) { console.log(id); }\nprintId(101);      <span class="cm">// OK</span>\nprintId('abc-1');  <span class="cm">// OK</span>`},
+    {term:"Discriminated union", desc:"A union of object types sharing one literal 'tag' property used to narrow the whole shape.", detail:"This pattern gives you exhaustiveness checking for free — TypeScript can warn you if a switch statement forgets to handle one of the possible tags.", code:`type Shape =\n  | { kind: 'circle'; r: number }\n  | { kind: 'square'; s: number };\n\nfunction area(shape: Shape) {\n  switch (shape.kind) {\n    case 'circle': return Math.PI * shape.r ** 2;\n    case 'square': return shape.s ** 2;\n  }\n}`}
+  ]
+},
+{ id:'ts-alias', title:'Type aliases vs interfaces', animate:'aliasvs',
+  lede:"Both describe shapes, and for object types they're mostly interchangeable — but a few real differences decide which one fits a given situation.",
+  steps:[
+    "A <code>type</code> alias can name <i>any</i> type — objects, unions, primitives, tuples, function signatures — while <code>interface</code> only describes object/class shapes.",
+    "<b>Interfaces are open</b> — declaring the same interface name twice merges the two declarations together (declaration merging); type aliases throw an error if redeclared.",
+    "Interfaces support <code>extends</code> for inheritance; type aliases use <code>&</code> (intersection) to achieve a similar composition effect.",
+    "For plain object shapes, most teams pick <b>interface</b> by convention — the error messages tend to be cleaner and it signals 'this is meant to be implemented/extended'.",
+    "Type aliases are the only option for <b>union types</b> (<code>type Status = 'idle' | 'loading' | 'error'</code>) — interfaces can't express a union directly.",
+    "Classes can <code>implement</code> either an interface or an object-shaped type alias — TypeScript doesn't care which one you used to declare the contract.",
+    "Neither one exists at runtime — both are fully erased during compilation, exactly like every other TypeScript-only construct."
+  ],
+  code:`interface User { name: string; age: number; }\ntype UserAlias = { name: string; age: number; };\n\ninterface Admin extends User { role: string; }\ntype AdminAlias = UserAlias & { role: string };`,
+  terms:[
+    {term:"Declaration merging", desc:"Two interfaces with the same name automatically combine into one.", detail:"This is intentionally used by library authors to let consumers 'augment' a third-party interface — for example adding custom properties to Express's Request type.", code:`interface Window { myGlobal: string; }\ninterface Window { anotherGlobal: number; }\n<span class="cm">// merged: Window now has both myGlobal AND anotherGlobal</span>`},
+    {term:"Intersection composition", desc:"Combining type aliases with & instead of extends.", detail:"Unlike interface extends, intersecting two types with conflicting property types doesn't error — it just produces a property typed as never, which is a common gotcha.", code:`type A = { x: string };\ntype B = { x: number };\ntype C = A & B;  <span class="cm">// C['x'] is 'never' — string & number is impossible</span>`}
+  ]
+},
+{ id:'ts-classes', title:'Classes & access modifiers', animate:'access',
+  lede:"TypeScript's classes compile down to plain JS classes, but add compile-time visibility rules that plain JavaScript has no concept of at all.",
+  steps:[
+    "<code>public</code> (the default) means accessible from anywhere — you never actually need to write it explicitly.",
+    "<code>private</code> restricts access to <b>inside the class itself</b> — not even subclasses can reach it.",
+    "<code>protected</code> is like private, but subclasses <b>can</b> access it — useful for internals meant to be extended, not exposed.",
+    "<code>readonly</code> prevents reassignment after the constructor runs — it's a compile-time check only, not a runtime freeze.",
+    "<b>Parameter properties</b> let you declare and assign a class field directly in the constructor signature, skipping the usual boilerplate.",
+    "These modifiers are <b>compile-time only</b> — the emitted JavaScript has no real private fields from this syntax (unless you use the newer native <code>#field</code> syntax, which IS enforced at runtime).",
+    "Getters and setters (<code>get</code>/<code>set</code>) let you run logic on property access while keeping the call-site syntax identical to a plain field."
+  ],
+  code:`class Account {\n  private balance: number;\n  readonly id: string;\n\n  constructor(public owner: string, startBalance: number) {\n    this.balance = startBalance;\n    this.id = crypto.randomUUID();\n  }\n\n  deposit(amount: number) { this.balance += amount; }\n}`,
+  terms:[
+    {term:"private vs #field", desc:"TypeScript's private is compile-time only; #field is real, runtime-enforced privacy.", detail:"Compiled TypeScript private fields are still visible in the emitted JS output and accessible via bracket notation — real native #private fields cannot be accessed that way even after compilation.", code:`class A { private secret = 1; #realSecret = 2; }\nconst a = new A();\n(a as any)['secret'];      <span class="cm">// works — TS-only privacy is compile-time</span>\n(a as any)['#realSecret']; <span class="cm">// fails — truly private at runtime</span>`},
+    {term:"Parameter properties", desc:"Declaring and assigning a field directly in the constructor parameter list.", detail:"This is purely sugar — it compiles to the exact same 'declare field, then assign it in the constructor body' pattern you'd otherwise write by hand.", code:`class Point {\n  constructor(public x: number, public y: number) {}\n}\n<span class="cm">// equivalent to declaring x and y as fields, then this.x = x; this.y = y;</span>`}
+  ]
+},
+{ id:'ts-inherit', title:'Inheritance & abstract classes', animate:'inherit',
+  lede:"Inheritance lets one class build on another; abstract classes let you define a partial contract that concrete subclasses are forced to complete.",
+  steps:[
+    "<code>class Dog extends Animal</code> gives Dog everything Animal has, plus whatever Dog adds or overrides.",
+    "<code>super()</code> must be called in a subclass constructor before using <code>this</code> — it runs the parent's constructor logic first.",
+    "<code>super.methodName()</code> calls the parent's version of an overridden method — useful when you want to extend rather than fully replace behavior.",
+    "An <b>abstract class</b> (<code>abstract class Shape</code>) can't be instantiated directly — it exists only to be extended.",
+    "<b>Abstract methods</b> (<code>abstract area(): number</code>) declare a signature with no body — every concrete subclass is <b>required</b> to implement it, checked at compile time.",
+    "Abstract classes can mix abstract methods with fully-implemented concrete methods — unlike interfaces, which can't have any implementation at all.",
+    "TypeScript only supports <b>single inheritance</b> for classes (<code>extends</code> takes one parent) — for combining multiple behaviors, interfaces (via <code>implements</code>) are the way to compose more than one contract."
+  ],
+  code:`abstract class Shape {\n  abstract area(): number;\n  describe() { return \`Area: \${this.area()}\`; }  <span class="cm">// concrete, inherited as-is</span>\n}\n\nclass Circle extends Shape {\n  constructor(private radius: number) { super(); }\n  area() { return Math.PI * this.radius ** 2; }  <span class="cm">// required override</span>\n}`,
+  terms:[
+    {term:"Abstract class", desc:"A class that can't be instantiated directly, only extended.", detail:"Abstract classes sit between interfaces (no implementation) and regular classes (fully implemented) — they let you share common logic while still forcing subclasses to fill in the specifics.", code:`abstract class Shape { abstract area(): number; }\nnew Shape();  <span class="cm">// compile error — cannot create an instance of an abstract class</span>`},
+    {term:"Method overriding", desc:"A subclass redefining a method it inherited, replacing (or extending via super) the parent's behavior.", detail:"TypeScript will flag an override whose signature is incompatible with the parent's — you can't quietly change a method's parameter or return types when overriding.", code:`class Animal { speak() { return 'some sound'; } }\nclass Dog extends Animal {\n  speak() { return super.speak() + ' (a bark, specifically)'; }\n}`}
+  ]
+},
+{ id:'ts-interface', title:'Interfaces & polymorphism', animate:'polymorph',
+  lede:"Interfaces define a contract; polymorphism is what lets many different types honor that same contract in their own way.",
+  steps:[
+    "An <b>interface</b> describes a shape a value must have — properties, method signatures — with zero implementation of its own.",
+    "<code>class Dog implements Animal</code> is a compile-time promise that Dog provides everything Animal's interface requires — it produces no runtime code at all.",
+    "A class can <code>implement</code> <b>multiple</b> interfaces at once, unlike <code>extends</code> which only allows one parent class.",
+    "<b>Polymorphism</b> means code written against the interface works with <i>any</i> class that implements it, without knowing which concrete class it actually is.",
+    "This is what makes functions like <code>function render(shape: Shape)</code> powerful — the same function correctly handles a Circle, Square, or Triangle without an if/else per type.",
+    "Interfaces can also describe <b>function types</b> and <b>index signatures</b> (<code>[key: string]: number</code>), not just object shapes — they're more flexible than 'just a class contract'.",
+    "Optional properties (<code>name?: string</code>) let an interface describe a shape where a field might be missing — accessing it without a check requires narrowing or a fallback."
+  ],
+  code:`interface Shape { area(): number; }\n\nclass Circle implements Shape {\n  constructor(private r: number) {}\n  area() { return Math.PI * this.r ** 2; }\n}\nclass Square implements Shape {\n  constructor(private s: number) {}\n  area() { return this.s ** 2; }\n}\n\nfunction totalArea(shapes: Shape[]) {\n  return shapes.reduce((sum, s) =&gt; sum + s.area(), 0);  <span class="cm">// works for any Shape</span>\n}`,
+  terms:[
+    {term:"implements", desc:"A compile-time promise that a class fulfills an interface's contract.", detail:"Unlike extends, implements adds no behavior at all — it only asks the compiler to verify the shape matches, and produces zero extra runtime code.", code:`interface Flyable { fly(): void; }\nclass Bird implements Flyable {\n  fly() { console.log('flapping'); }  <span class="cm">// required, or a compile error</span>\n}`},
+    {term:"Polymorphism", desc:"Different concrete types responding correctly to the same interface-shaped call.", detail:"This is what lets you add a brand-new class implementing an existing interface without touching any of the code that already consumes that interface — the classic 'open for extension, closed for modification' principle.", code:`const shapes: Shape[] = [new Circle(2), new Square(3)];\nshapes.forEach(s =&gt; console.log(s.area()));  <span class="cm">// each calls its own area() implementation</span>`}
+  ]
+},
+{ id:'ts-generics', title:'Generics crash course', animate:'generic',
+  lede:"Generics let you write a function, class, or type once and have it work correctly for whatever specific type is passed in — without falling back to any.",
+  steps:[
+    "A <b>type parameter</b> like <code>&lt;T&gt;</code> is a placeholder — TypeScript fills it in with whatever concrete type you actually use at the call site.",
+    "<code>function identity&lt;T&gt;(val: T): T</code> means 'whatever type goes in, that exact type comes out' — <code>identity(5)</code> returns <code>number</code>, <code>identity('hi')</code> returns <code>string</code>.",
+    "Without generics you'd have to use <code>any</code> (loses all type safety) or write a separate function per type (repetitive) — generics solve both problems at once.",
+    "<b>Constraints</b> (<code>&lt;T extends { length: number }&gt;</code>) restrict which types are allowed, while still preserving the specific type that was passed in.",
+    "Generics work on <b>classes</b> too — <code>class Box&lt;T&gt;</code> lets you create <code>Box&lt;string&gt;</code> and <code>Box&lt;number&gt;</code> from the same class definition.",
+    "<b>Default type parameters</b> (<code>&lt;T = string&gt;</code>) let a generic be used without explicitly specifying <code>T</code>, falling back to a sensible default.",
+    "Multiple type parameters are allowed (<code>&lt;K, V&gt;</code>) — this is exactly how built-in types like <code>Map&lt;K, V&gt;</code> are defined.",
+    "The type parameter is usually <b>inferred automatically</b> from the argument you pass — you rarely need to write <code>identity&lt;number&gt;(5)</code> explicitly."
+  ],
+  code:`function firstElement&lt;T&gt;(arr: T[]): T {\n  return arr[0];\n}\nfirstElement([1, 2, 3]);        <span class="cm">// T inferred as number</span>\nfirstElement(['a', 'b']);       <span class="cm">// T inferred as string</span>\n\nfunction longest&lt;T extends { length: number }&gt;(a: T, b: T): T {\n  return a.length &gt;= b.length ? a : b;\n}\nlongest('short', 'longer string');  <span class="cm">// works — strings have .length</span>`,
+  terms:[
+    {term:"Type parameter", desc:"A placeholder type, filled in per call/instantiation.", detail:"By convention these are named T, U, K, V for generic cases, but any valid identifier works — naming them meaningfully (like TItem or TResponse) helps in more complex generic code.", code:`function wrapInArray&lt;T&gt;(val: T): T[] {\n  return [val];\n}\nwrapInArray(42);      <span class="cm">// number[]</span>\nwrapInArray('hi');    <span class="cm">// string[]</span>`},
+    {term:"Generic constraint", desc:"Restricting a type parameter to types with certain required properties.", detail:"Constraints are what let you safely call methods or access properties on a generic value inside the function body — without one, TypeScript assumes T could be absolutely anything.", code:`interface HasId { id: number; }\nfunction findById&lt;T extends HasId&gt;(items: T[], id: number) {\n  return items.find(item =&gt; item.id === id);  <span class="cm">// .id is safe because of the constraint</span>\n}`},
+    {term:"Generic class", desc:"A class parameterized by a type, reusable across many concrete types.", detail:"This is exactly how TypeScript's own built-ins like Array&lt;T&gt;, Promise&lt;T&gt;, and Map&lt;K,V&gt; are implemented — generics aren't a special-case feature, they're the foundation of the standard library's type definitions.", code:`class Box&lt;T&gt; {\n  constructor(private value: T) {}\n  get(): T { return this.value; }\n}\nconst b = new Box&lt;string&gt;('hello');\nb.get();  <span class="cm">// string</span>`}
+  ]
+},
+{ id:'ts-utility', title:'Utility types', animate:'utility',
+  lede:"TypeScript ships a set of built-in generic types that transform an existing type into a new one — covering the transformations you'd otherwise write by hand constantly.",
+  steps:[
+    "<code>Partial&lt;T&gt;</code> makes every property of <code>T</code> optional — perfect for an 'update' function that only changes some fields.",
+    "<code>Required&lt;T&gt;</code> is the opposite — it makes every optional property mandatory, useful after you've fully validated/filled in a partial object.",
+    "<code>Pick&lt;T, K&gt;</code> creates a new type with only the listed keys from <code>T</code> — great for narrowing a big model down to exactly what a component needs.",
+    "<code>Omit&lt;T, K&gt;</code> is the inverse of Pick — it keeps everything <i>except</i> the listed keys, commonly used to strip an <code>id</code> before creating a new record.",
+    "<code>Record&lt;K, V&gt;</code> builds an object type with keys of type <code>K</code> all mapping to values of type <code>V</code> — a typed dictionary/lookup map.",
+    "<code>Readonly&lt;T&gt;</code> marks every property as read-only, so any reassignment attempt is a compile-time error — mirrors <code>const</code> but for object properties.",
+    "<code>ReturnType&lt;typeof fn&gt;</code> extracts a function's return type automatically — handy for deriving a type from existing logic instead of duplicating it manually.",
+    "These aren't magic — they're all just <b>ordinary generic types</b> built from mapped types and keyof, defined in TypeScript's own standard library, and you can read their source directly."
+  ],
+  code:`interface User { id: number; name: string; email: string; }\n\ntype UserUpdate = Partial&lt;User&gt;;              <span class="cm">// all fields optional</span>\ntype UserPreview = Pick&lt;User, 'id'|'name'&gt;;    <span class="cm">// only id and name</span>\ntype NewUser = Omit&lt;User, 'id'&gt;;               <span class="cm">// everything except id</span>\ntype UserMap = Record&lt;number, User&gt;;           <span class="cm">// { [id: number]: User }</span>\ntype FrozenUser = Readonly&lt;User&gt;;              <span class="cm">// no property can be reassigned</span>`,
+  terms:[
+    {term:"Partial&lt;T&gt;", desc:"Makes all properties of T optional.", detail:"Under the hood it's just a mapped type: { [P in keyof T]?: T[P] } — worth knowing since it demystifies where utility types come from and how to write your own.", code:`function updateUser(id: number, changes: Partial&lt;User&gt;) {\n  <span class="cm">// changes might only include e.g. { name: 'New Name' }</span>\n}`},
+    {term:"Pick&lt;T, K&gt; / Omit&lt;T, K&gt;", desc:"Select a subset of keys, or exclude a subset of keys, from T.", detail:"Omit is technically built from Pick and Exclude internally — Omit&lt;T,K&gt; is roughly Pick&lt;T, Exclude&lt;keyof T, K&gt;&gt; — a good example of utility types composing on top of each other.", code:`type Credentials = Pick&lt;User, 'email'&gt;;\ntype PublicUser = Omit&lt;User, 'email'&gt;;`},
+    {term:"Record&lt;K, V&gt;", desc:"An object type mapping every key in K to a value of type V.", detail:"Record is especially useful for enforcing that every value of a union/enum has a corresponding entry — TypeScript will error if you forget one.", code:`type Status = 'idle' | 'loading' | 'error';\nconst messages: Record&lt;Status, string&gt; = {\n  idle: 'Waiting...',\n  loading: 'Working...',\n  error: 'Something broke.'\n};  <span class="cm">// missing any key here is a compile error</span>`}
+  ]
+}
 ];
 
 /* ---------- animation templates ---------- */
@@ -667,14 +957,26 @@ const animations = {
   moduleflow: '<div class="moduleflow-anim"><div class="mf-row sync"><span>require()</span><i class="mf-dot"></i></div><div class="mf-row async"><span>import</span><i class="mf-dot"></i></div></div>',
   nexttick: '<div class="nexttick-anim"><div class="nt-chip">promise</div><div class="nt-chip">timer</div><div class="nt-chip priority">nextTick</div></div>',
   clusterproc: '<div class="clusterproc-anim"><div class="cp-proc"><i></i>worker 1</div><div class="cp-proc"><i></i>worker 2</div><div class="cp-proc"><i></i>worker 3</div></div>',
-  nonblock: '<div class="nonblock-anim"><div class="nb-pipe"><i></i><i></i><i></i></div></div>'
+  nonblock: '<div class="nonblock-anim"><div class="nb-pipe"><i></i><i></i><i></i></div></div>',
+  typeflow: '<div class="typeflow-anim"><div class="tf2-value">42</div><div class="tf2-arrow">→</div><div class="tf2-type">number</div></div>',
+  narrow: '<div class="narrow-anim"><div class="nw-wide">string | number</div><div class="nw-funnel"></div><div class="nw-narrow">string</div></div>',
+  aliasvs: '<div class="aliasvs-anim"><div class="av-box a">type</div><div class="av-box b">interface</div><div class="av-result">{ same shape }</div></div>',
+  access: '<div class="access-anim"><div class="acc-chip pub">public</div><div class="acc-chip prot">protected</div><div class="acc-chip priv">private</div></div>',
+  inherit: '<div class="inherit-anim"><div class="inh-box parent">Animal</div><div class="inh-arrow">extends ↓</div><div class="inh-box child">Dog</div></div>',
+  polymorph: '<div class="polymorph-anim"><div class="poly-top">shape.area()</div><div class="poly-row"><div class="poly-box a">Circle</div><div class="poly-box b">Square</div></div></div>',
+  generic: '<div class="generic-anim"><div class="gen-box">Box&lt;<span class="gen-t">T</span>&gt;</div><div class="gen-fill"><span>string</span><span>number</span><span>User</span></div></div>',
+  utility: '<div class="utility-anim"><div class="ut-base">User</div><div class="ut-branch b1">Partial&lt;User&gt;</div><div class="ut-branch b2">Pick&lt;User&gt;</div><div class="ut-branch b3">Omit&lt;User&gt;</div></div>',
+  errorflow: '<div class="errorflow-anim"><div class="ef-top">throw new Error()</div><div class="ef-row"><div class="ef-path caught">caught → logged</div><div class="ef-path uncaught">uncaught → exit</div></div></div>',
+  combinator: '<div class="combinator-anim"><div class="cb-chip c1">all</div><div class="cb-chip c2">race</div><div class="cb-chip c3">any</div><div class="cb-chip c4">allSettled</div></div>',
+  delegate: '<div class="delegate-anim"><div class="del-parent">parent listener<div class="del-child">child click</div></div></div>'
 };
 
 /* ---------- render ---------- */
 let currentTab = 'js';
 let currentIndex = 0;
 
-function topicsFor(tab){ return tab==='js' ? jsTopics : nodeTopics; }
+function topicsFor(tab){ return tab==='js' ? jsTopics : tab==='node' ? nodeTopics : tsTopics; }
+function tabLabel(tab){ return tab==='js' ? 'JavaScript engine' : tab==='node' ? 'Node.js runtime' : 'TypeScript'; }
 
 function renderSidebar(){
   const topics = topicsFor(currentTab);
@@ -693,7 +995,7 @@ function renderSections(){
   if(t.type === 'demo'){
     document.getElementById('sections').innerHTML = `
       <div class="section active">
-        <div class="eyebrow ${currentTab}">${currentTab==='js' ? 'JavaScript engine' : 'Node.js runtime'} — interactive demo</div>
+        <div class="eyebrow ${currentTab}">${tabLabel(currentTab)} — interactive demo</div>
         <h2>${t.title}</h2>
         <p class="lede">${t.demo==='js' ? "Step through (or play) real code and watch the call stack, heap allocation, and the microtask/macrotask queues move together." : "Step through (or play) a script that fires an API request and a file read, and watch exactly which subsystem — kernel, thread pool, or queue — handles each one."}</p>
         ${buildDemoMarkup(t.demo)}
@@ -704,7 +1006,7 @@ function renderSections(){
 
   document.getElementById('sections').innerHTML = `
     <div class="section active">
-      <div class="eyebrow ${currentTab}">${currentTab==='js' ? 'JavaScript engine' : 'Node.js runtime'} — topic ${currentIndex+1} of ${topics.length}</div>
+      <div class="eyebrow ${currentTab}">${tabLabel(currentTab)} — topic ${currentIndex+1} of ${topics.length}</div>
       <h2>${t.title}</h2>
       <p class="lede">${t.lede}</p>
       <div class="visual">${animations[t.animate]}</div>
@@ -712,6 +1014,7 @@ function renderSections(){
       <ul class="steps">${t.steps.map(s=>`<li>${s}</li>`).join('')}</ul>
       <h3>Example</h3>
       <pre><code>${t.code}</code></pre>
+      ${t.note ? `<div class="callout ${t.note.type}"><b class="callout-label">Note</b> ${t.note.text}</div>` : ''}
       <h3>Key terms</h3>
       <div class="term-grid">${t.terms.map(term=>`
         <details class="term">
@@ -730,12 +1033,13 @@ function renderSections(){
 function renderTabs(){
   document.getElementById('tabJS').classList.toggle('active', currentTab==='js');
   document.getElementById('tabNode').classList.toggle('active', currentTab==='node');
+  document.getElementById('tabTS').classList.toggle('active', currentTab==='ts');
 }
 
 function renderFooter(){
   const topics = topicsFor(currentTab);
   const isFirst = currentIndex===0 && currentTab==='js';
-  const isLast = currentIndex===topics.length-1 && currentTab==='node';
+  const isLast = currentIndex===topics.length-1 && currentTab==='ts';
   const prevBtn = document.getElementById('prevSec');
   const nextBtn = document.getElementById('nextSec');
   prevBtn.disabled = isFirst;
@@ -753,16 +1057,19 @@ function renderAll(){
 
 document.getElementById('tabJS').onclick = ()=>{ currentTab='js'; currentIndex=0; renderAll(); };
 document.getElementById('tabNode').onclick = ()=>{ currentTab='node'; currentIndex=0; renderAll(); };
+document.getElementById('tabTS').onclick = ()=>{ currentTab='ts'; currentIndex=0; renderAll(); };
 
 document.getElementById('prevSec').onclick = ()=>{
   if(currentIndex>0){ currentIndex--; }
   else if(currentTab==='node'){ currentTab='js'; currentIndex=jsTopics.length-1; }
+  else if(currentTab==='ts'){ currentTab='node'; currentIndex=nodeTopics.length-1; }
   renderAll();
 };
 document.getElementById('nextSec').onclick = ()=>{
   const topics = topicsFor(currentTab);
   if(currentIndex<topics.length-1){ currentIndex++; }
   else if(currentTab==='js'){ currentTab='node'; currentIndex=0; }
+  else if(currentTab==='node'){ currentTab='ts'; currentIndex=0; }
   renderAll();
 };
 
@@ -1063,11 +1370,45 @@ const nodeRejectSteps = [
  note:"<b>Result: an unhandled promise rejection.</b> <code>res.json(user)</code> never runs, the client request hangs, and depending on your Node version's <code>--unhandled-rejections</code> setting, this can even crash the whole process. Fix: wrap the await in try/catch and call <code>next(err)</code>, or use a wrapper like <code>express-async-errors</code>."}
 ];
 
+/* --- 5. why CPU-intensive work doesn't suit Node --- */
+const nodeCpuCode = [
+  `function fib(n) {                     <span class="cm">// pure CPU work, no I/O at all</span>`,
+  `  if (n < 2) return n;`,
+  `  return fib(n - 1) + fib(n - 2);`,
+  `}`,
+  ``,
+  `app.get('/heavy', (req, res) => {`,
+  `  const result = fib(40);             <span class="cm">// blocks for several seconds</span>`,
+  `  res.json({ result });`,
+  `});`,
+  ``,
+  `app.get('/light', (req, res) => {`,
+  `  res.json({ status: 'ok' });         <span class="cm">// trivial — should be instant</span>`,
+  `});`
+];
+const nodeCpuSteps = [
+{line:5, phase:'idle', stack:[Fd('stack','Global')], pool:[], poolW:[0,0,0,0], kernel:[], tick:[], micro:[], macro:[], out:["Request A → GET /heavy","Request B → GET /light  (arrives moments later)"],
+ note:"Two requests land almost together: one for the CPU-heavy <code>/heavy</code> route, one for the trivial <code>/light</code> route."},
+{line:6, phase:'idle', stack:[Fd('stack','Global'),Fd('stack','/heavy handler','fib(40) running')], pool:[], poolW:[0,0,0,0], kernel:[], tick:[], micro:[], macro:[], out:["Request A → GET /heavy","Request B → GET /light  (arrives moments later)"],
+ note:"Request A's handler starts computing <code>fib(40)</code> — pure CPU work, no I/O anywhere. There's nothing here to hand off to the kernel or the thread pool."},
+{line:6, phase:'idle', stack:[Fd('stack','Global'),Fd('stack','/heavy handler','still computing…')], pool:[], poolW:[0,0,0,0], kernel:[], tick:[], micro:[], macro:[], out:["Request A → GET /heavy","Request B → GET /light  (arrives moments later)"],
+ note:"The single JS thread is now <b>100% occupied</b>. It's not 'busy waiting' like an I/O call — there's genuinely no opportunity to pause and check other queues."},
+{line:6, phase:'idle', stack:[Fd('stack','Global'),Fd('stack','/heavy handler','still computing… (seconds pass)')], pool:[], poolW:[0,0,0,0], kernel:[], tick:[], micro:[], macro:[Fd('macro',"/light handler — queued, can't start")], out:["Request A → GET /heavy","Request B → GET /light  (arrives moments later)"],
+ note:"Request B's handler is trivial — one line, instant response — but it can't even <b>begin</b>. It's stuck behind A on the same single thread."},
+{line:7, phase:'idle', stack:[Fd('stack','Global')], pool:[], poolW:[0,0,0,0], kernel:[], tick:[], micro:[], macro:[Fd('macro',"/light handler — queued, can't start")], out:["Request A → GET /heavy","Request B → GET /light  (arrives moments later)","/heavy responded (2.1s later)"],
+ note:"<code>fib(40)</code> finally returns — several seconds later — and request A gets its response."},
+{line:10, phase:'idle', stack:[Fd('stack','Global'),Fd('stack','/light handler')], pool:[], poolW:[0,0,0,0], kernel:[], tick:[], micro:[], macro:[], out:["Request A → GET /heavy","Request B → GET /light  (arrives moments later)","/heavy responded (2.1s later)"],
+ note:"Only <b>now</b> can request B's handler run at all — the event loop was never blocked from B's side, B was simply never given a turn."},
+{line:-1, phase:'idle', stack:[], pool:[], poolW:[0,0,0,0], kernel:[], tick:[], micro:[], macro:[], out:["Request A → GET /heavy","Request B → GET /light  (arrives moments later)","/heavy responded (2.1s later)","/light responded — 2.1s late, despite doing ~nothing"],
+ note:"<b>This is why CPU-intensive work doesn't belong directly in a Node request handler.</b> One expensive synchronous computation stalls every other concurrent request — not just slow ones, even trivially fast ones. Fix: move the computation to <code>worker_threads</code>, a background job queue, or a separate service, so the main thread stays free to keep serving I/O."}
+];
+
 const nodeScenarios = [
   {key:'core',   label:'Full event loop + API request',        code:nodeCoreCode,   steps:nodeCoreSteps,   phases:nodePhaseDefs},
   {key:'tick',   label:'process.nextTick starvation',           code:nodeTickCode,   steps:nodeTickSteps,   phases:nodePhaseDefs},
   {key:'block',  label:'readFileSync blocks everything',        code:nodeBlockCode,  steps:nodeBlockSteps,  phases:nodePhaseDefs},
-  {key:'reject', label:'Unhandled rejection in an async route', code:nodeRejectCode, steps:nodeRejectSteps, phases:nodePhaseDefs}
+  {key:'reject', label:'Unhandled rejection in an async route', code:nodeRejectCode, steps:nodeRejectSteps, phases:nodePhaseDefs},
+  {key:'cpu',    label:'Why CPU-heavy work blocks Node',        code:nodeCpuCode,    steps:nodeCpuSteps,    phases:nodePhaseDefs}
 ];
 
 const demoState = {
