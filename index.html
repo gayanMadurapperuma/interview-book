@@ -15,6 +15,7 @@
     --micro:#C58CF2; --microbg:#241A2E;
     --pool:#5BD6D6; --poolbg:#12292C;
     --ts:#4FA8F2; --tsbg:#132840;
+    --sd:#C58CF2; --sdbg:#241A38;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
@@ -45,6 +46,7 @@
   .tab.js.active{background:var(--jsbg);color:var(--js);border-color:#6B551F}
   .tab.node.active{background:var(--nodebg);color:var(--node);border-color:#2C5C46}
   .tab.ts.active{background:var(--tsbg);color:var(--ts);border-color:#2C5578}
+  .tab.sd.active{background:var(--sdbg);color:var(--sd);border-color:#4A3468}
   .tab:not(.active):hover{color:var(--text)}
 
   .shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:calc(100vh - 56px)}
@@ -60,6 +62,7 @@
   .side-item.active.js{background:var(--jsbg);color:var(--js)}
   .side-item.active.node{background:var(--nodebg);color:var(--node)}
   .side-item.active.ts{background:var(--tsbg);color:var(--ts)}
+  .side-item.active.sd{background:var(--sdbg);color:var(--sd)}
 
   /* Main content */
   main{padding:28px 30px 80px;max-width:760px}
@@ -69,7 +72,7 @@
   @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 
   .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px}
-  .eyebrow.js{color:var(--js)} .eyebrow.node{color:var(--node)} .eyebrow.ts{color:var(--ts)}
+  .eyebrow.js{color:var(--js)} .eyebrow.node{color:var(--node)} .eyebrow.ts{color:var(--ts)} .eyebrow.sd{color:var(--sd)}
   h2{font-size:22px;font-weight:600;margin:0 0 10px}
   h2::before{content:'> ';color:var(--node)}
   .lede{color:var(--sub);font-size:14.5px;line-height:1.65;margin:0 0 22px}
@@ -321,6 +324,56 @@
   .del-child::after{content:'';position:absolute;left:50%;bottom:100%;width:6px;height:6px;border-radius:50%;background:var(--ts);animation:delbubble 2s ease-out infinite}
   @keyframes delbubble{0%{bottom:-4px;opacity:1}80%{opacity:1}100%{bottom:60px;opacity:0}}
 
+  .lb-anim{display:flex;align-items:center;gap:16px}
+  .lb-box{padding:10px 12px;border-radius:8px;background:var(--sdbg);border:1px solid #4A3468;color:var(--sd);font-family:var(--mono);font-size:11px}
+  .lb-servers{display:flex;flex-direction:column;gap:6px}
+  .lb-server{padding:5px 10px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--sub);font-family:var(--mono);font-size:10px;animation:lbroute 3s ease-in-out infinite}
+  .lb-server.s1{animation-delay:0s} .lb-server.s2{animation-delay:1s} .lb-server.s3{animation-delay:2s}
+  @keyframes lbroute{0%,100%{border-color:var(--line);color:var(--sub)}15%,25%{border-color:var(--sd);color:var(--sd)}}
+
+  .cache-anim{display:flex;flex-direction:column;gap:6px;width:150px}
+  .cache-layer{padding:8px 12px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--sub);font-family:var(--mono);font-size:11px;animation:cachepulse 3s ease-in-out infinite}
+  .cache-layer.l1{animation-delay:0s} .cache-layer.l2{animation-delay:.6s} .cache-layer.l3{animation-delay:1.2s}
+  @keyframes cachepulse{0%,100%{opacity:.35;border-color:var(--line)}25%,45%{opacity:1;border-color:var(--sd)}}
+
+  .dbcompare-anim{display:flex;gap:12px}
+  .db-box{padding:10px 14px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);text-align:center;font-family:var(--mono);font-size:12px;color:var(--sub);display:flex;flex-direction:column;gap:4px;animation:dbswap 3s ease-in-out infinite}
+  .db-box.nosql{animation-delay:1.5s}
+  .db-box span{font-size:9px;opacity:.7}
+  @keyframes dbswap{0%,100%{border-color:var(--line);color:var(--sub)}20%,40%{border-color:var(--sd);color:var(--sd)}}
+
+  .queue-anim{display:flex;align-items:center;gap:8px}
+  .q-node{padding:8px 10px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--sub);font-family:var(--mono);font-size:10px}
+  .q-pipe{position:relative;width:70px;height:16px;border-radius:8px;background:#1A1521;border:1px solid var(--line);overflow:hidden}
+  .q-pipe i{position:absolute;top:3px;left:-10px;width:10px;height:10px;border-radius:2px;background:var(--sd);animation:qflow 1.8s linear infinite}
+  .q-pipe i:nth-child(2){animation-delay:.6s} .q-pipe i:nth-child(3){animation-delay:1.2s}
+  @keyframes qflow{to{left:calc(100% + 10px)}}
+
+  .cb2-anim{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .cb2-switch{width:60px;height:30px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);position:relative;overflow:hidden}
+  .cb2-arm{position:absolute;top:6px;left:6px;width:34px;height:4px;border-radius:2px;background:var(--sd);transform-origin:left center;animation:cbtoggle 3.2s ease-in-out infinite}
+  @keyframes cbtoggle{0%,35%{transform:rotate(0deg);background:var(--node)}50%,85%{transform:rotate(25deg);background:var(--tick)}100%{transform:rotate(0deg);background:var(--node)}}
+  .cb2-label{font-family:var(--mono);font-size:10px;color:var(--sub)}
+
+  .cap-anim{position:relative;width:120px;height:100px}
+  .cap-vertex{position:absolute;padding:6px 10px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--sub);animation:capglow 3.6s ease-in-out infinite}
+  .cap-vertex.c{top:0;left:36px} .cap-vertex.a{bottom:0;left:0} .cap-vertex.p{bottom:0;right:0}
+  .cap-vertex.a{animation-delay:0s} .cap-vertex.p{animation-delay:1.2s} .cap-vertex.c{animation-delay:2.4s}
+  @keyframes capglow{0%,66%,100%{border-color:var(--line);color:var(--sub)}8%,55%{border-color:var(--sd);color:var(--sd)}}
+
+  .obs-anim{display:flex;flex-direction:column;align-items:center;gap:8px}
+  .obs-lens{padding:6px 10px;border-radius:16px;background:var(--panel2);border:1px solid var(--line);color:var(--sub);font-family:var(--mono);font-size:10px;animation:obspulse 3s ease-in-out infinite}
+  .obs-lens.l1{animation-delay:0s} .obs-lens.l2{animation-delay:.5s} .obs-lens.l3{animation-delay:1s}
+  .obs-dash{margin-top:4px;padding:6px 12px;border-radius:6px;background:var(--sdbg);border:1px solid #4A3468;color:var(--sd);font-family:var(--mono);font-size:10px}
+  @keyframes obspulse{0%,100%{opacity:.4}50%{opacity:1}}
+
+  .api-anim{display:flex;flex-direction:column;align-items:center;gap:8px}
+  .api-url{position:relative;padding:8px 12px;border-radius:6px;background:#0D1013;border:1px solid var(--line);color:var(--node);font-family:var(--mono);font-size:11px}
+  .api-cursor2{display:inline-block;width:6px;height:12px;background:var(--sd);margin-left:3px;vertical-align:-2px;animation:blink 1s step-end infinite}
+  .api-status{padding:5px 10px;border-radius:6px;font-family:var(--mono);font-size:10px;animation:apipulse 2s ease-in-out infinite}
+  .api-status.ok{background:var(--nodebg);border:1px solid #2C5C46;color:var(--node)}
+  @keyframes apipulse{0%,100%{opacity:.5}50%{opacity:1}}
+
   /* --- badge for demo items in sidebar --- */
   .side-item .play-badge{display:inline-block;margin-left:6px;font-size:9px;padding:1px 6px;border-radius:10px;background:var(--accentbg);color:var(--accent);vertical-align:middle}
 
@@ -401,6 +454,7 @@
   <div class="tab js active" id="tabJS">JavaScript engine</div>
   <div class="tab node" id="tabNode">Node.js runtime</div>
   <div class="tab ts" id="tabTS">TypeScript</div>
+  <div class="tab sd" id="tabSD">System Design</div>
 </div>
 
 <div class="shell">
@@ -940,6 +994,152 @@ const tsTopics = [
 }
 ];
 
+const sdTopics = [
+{ id:'sd-scaling', title:'Load balancing, horizontal scaling & statelessness', animate:'loadbalance',
+  lede:"The foundation of scaling any backend: spread traffic across many identical servers instead of making one server bigger.",
+  steps:[
+    "<b>Vertical scaling</b> (a bigger machine) has a hard ceiling and a single point of failure; <b>horizontal scaling</b> (more machines) has neither, but requires the app to support running multiple instances at once.",
+    "A <b>load balancer</b> sits in front of your servers and distributes incoming requests — common strategies: round-robin (rotate through servers), least-connections (send to the least busy), and IP hash (same client → same server).",
+    "For horizontal scaling to work safely, servers must be <b>stateless</b> — no request should depend on data stored only in that one server's memory, since the next request might hit a different instance entirely.",
+    "Session data is the classic statelessness trap — storing a logged-in user's session in server memory breaks the moment a load balancer sends their next request elsewhere. Move sessions to Redis, a DB, or a signed client-side token (JWT) instead.",
+    "<b>Sticky sessions</b> (routing a client to the same server every time) are a workaround, not a fix — they reintroduce a single point of failure per client and complicate deployments.",
+    "<b>Health checks</b> let the load balancer stop routing to an unhealthy instance automatically — critical for both graceful failure handling and safe rolling deployments.",
+    "Auto-scaling ties this together: metrics (CPU, request queue depth, latency) trigger adding or removing instances automatically, so capacity roughly tracks real demand instead of being fixed."
+  ],
+  code:`<span class="cm">// stateful — breaks under a load balancer</span>\nlet loggedInUsers = {};  <span class="cm">// lives only in THIS server's memory</span>\n\n<span class="cm">// stateless — safe to run N identical copies of</span>\napp.get('/profile', async (req, res) => {\n  const session = await redis.get(req.cookies.sessionId);  <span class="cm">// shared store, any instance can read it</span>\n  res.json(session);\n});`,
+  terms:[
+    {term:"Statelessness", desc:"No server holds request-critical data only it knows about.", detail:"This is the single property that makes horizontal scaling actually work — without it, adding more servers just adds more places for inconsistent state to hide.", code:`<span class="cm">// any of N identical instances can handle any request</span>\napp.get('/order/:id', async (req, res) => {\n  const order = await db.orders.findById(req.params.id);  <span class="cm">// state lives in the DB, not the process</span>\n  res.json(order);\n});`},
+    {term:"Round-robin vs least-connections", desc:"Two common load balancing strategies with different failure characteristics.", detail:"Round-robin is simple but can overload a server that's slower than the others (it still gets an equal share); least-connections adapts to real load but needs the balancer to track connection counts per server.", code:`<span class="cm">// round-robin: server 1, 2, 3, 1, 2, 3, ...</span>\n<span class="cm">// least-connections: always pick whichever server has the fewest active requests right now</span>`}
+  ]
+},
+{ id:'sd-caching', title:'Caching layers & invalidation', animate:'cachelayers',
+  lede:"Caching trades a bit of staleness for a lot of speed — the hard part is never fetching, it's knowing when to throw a stale value away.",
+  steps:[
+    "Requests typically pass through several cache layers before hitting real work: <b>CDN</b> (static assets, geographically close to the user) → <b>application cache</b> (Redis/Memcached, shared across instances) → <b>database cache</b> (query result or buffer pool caching).",
+    "<b>Cache-aside</b> (lazy loading): the app checks the cache first; on a miss, it reads from the source and populates the cache for next time — simple, and only caches what's actually requested.",
+    "<b>Write-through</b>: every write updates the cache and the source together, keeping them always in sync at the cost of slightly slower writes.",
+    "<b>Write-behind</b>: writes go to the cache immediately and are flushed to the source asynchronously — fast writes, but a crash before the flush can lose data.",
+    "<b>Invalidation</b> is the genuinely hard part — <i>'there are only two hard things in computer science: cache invalidation and naming things.'</i> Common strategies: a <b>TTL</b> (time-based expiry, simple but can serve stale data), or <b>explicit invalidation</b> (delete/update the cache entry the moment the source changes).",
+    "<b>Cache stampede</b>: when a popular key expires, many concurrent requests can all miss at once and hammer the source simultaneously — mitigated with request coalescing (only one request actually fetches, others wait) or staggered TTLs.",
+    "CDN caching is controlled by HTTP headers (<code>Cache-Control</code>, <code>ETag</code>) — the server declares how cacheable a response is, and intermediate caches (browser, CDN) respect that contract.",
+    "Cache hit ratio is the metric that matters — a cache with a low hit ratio adds complexity and a staleness risk without delivering much actual benefit, and is worth removing."
+  ],
+  code:`async function getUser(id) {\n  const cached = await redis.get(\`user:\${id}\`);\n  if (cached) return JSON.parse(cached);            <span class="cm">// cache hit</span>\n\n  const user = await db.users.findById(id);          <span class="cm">// cache miss — read source</span>\n  await redis.set(\`user:\${id}\`, JSON.stringify(user), 'EX', 300);  <span class="cm">// populate, 5min TTL</span>\n  return user;\n}`,
+  terms:[
+    {term:"Cache-aside", desc:"App checks cache first, falls back to the source on a miss, and populates the cache.", detail:"This is the most common pattern precisely because it's forgiving — if the cache is completely empty (a fresh deploy, a flush), the app still works correctly, just slower until it warms back up.", code:`const cached = await cache.get(key);\nif (cached) return cached;\nconst fresh = await source.fetch(key);\nawait cache.set(key, fresh);\nreturn fresh;`},
+    {term:"Cache invalidation on write", desc:"Explicitly deleting or updating a cached value the moment its source changes.", detail:"Deleting (rather than updating) the cache entry on write is often simpler and safer — the next read just repopulates it correctly, instead of risking the cache and source drifting out of sync.", code:`async function updateUser(id, changes) {\n  await db.users.update(id, changes);\n  await redis.del(\`user:\${id}\`);   <span class="cm">// invalidate — next read repopulates fresh</span>\n}`}
+  ]
+},
+{ id:'sd-databases', title:'SQL vs NoSQL, indexing & N+1 queries', animate:'dbcompare',
+  lede:"The database choice and how you query it affects correctness and performance more than almost any other backend decision.",
+  steps:[
+    "<b>SQL (relational)</b> databases enforce a fixed schema and strong relationships via foreign keys — ideal when data is structured, relationships matter, and you need transactional guarantees (ACID).",
+    "<b>NoSQL</b> databases (document, key-value, wide-column, graph) trade some of that structure for flexibility and horizontal scalability — good fits: rapidly evolving schemas, massive write throughput, or data that's naturally document-shaped.",
+    "The real decision driver is usually <b>access patterns</b>, not preference — how will this data be queried, and how often does it change shape? SQL for complex relational queries and consistency; NoSQL for scale and schema flexibility.",
+    "An <b>index</b> is a separate data structure (usually a B-tree) that lets the database find rows without scanning the whole table — the classic trade-off is faster reads at the cost of slower writes (every insert must update the index too).",
+    "Indexing the wrong column (or not indexing a column used in every <code>WHERE</code> clause) is one of the most common real-world performance bugs — a full table scan on a large table can turn a 5ms query into a multi-second one.",
+    "An <b>N+1 query</b> bug: fetching a list (1 query), then looping over it and firing a separate query per item (N queries) — instead of one query joining or batching everything at once.",
+    "The fix for N+1 is usually a <code>JOIN</code>, an ORM's eager-loading option, or batching IDs into a single <code>WHERE id IN (...)</code> query — turning N+1 queries into 1 or 2.",
+    "<b>Denormalization</b> (deliberately duplicating data to avoid a join) is a valid NoSQL and even SQL technique when read performance matters more than write simplicity — it trades storage and update complexity for query speed."
+  ],
+  code:`<span class="cm">// N+1 bug — 1 query for posts, then N queries for each author</span>\nconst posts = await db.posts.findAll();\nfor (const post of posts) {\n  post.author = await db.users.findById(post.authorId);  <span class="cm">// N extra round trips</span>\n}\n\n<span class="cm">// fixed — 1 query total, join or batched IN()</span>\nconst posts = await db.posts.findAll({ include: 'author' });`,
+  terms:[
+    {term:"Index", desc:"A separate lookup structure that avoids scanning the whole table.", detail:"Indexes aren't free — every additional index slows down inserts/updates slightly, since the index has to be kept up to date too, so indexing every column 'just in case' is itself a mistake.", code:`CREATE INDEX idx_users_email ON users(email);\n<span class="cm">-- turns 'WHERE email = ?' from a full scan into a direct lookup</span>`},
+    {term:"N+1 query problem", desc:"One query for a list, then a separate query per item in a loop.", detail:"This bug is especially dangerous because it's invisible in development with small datasets — it only becomes a real problem once a list grows to hundreds or thousands of items in production.", code:`<span class="cm">// batched fix using IN() instead of a query per item</span>\nconst authorIds = posts.map(p => p.authorId);\nconst authors = await db.users.findAll({ where: { id: authorIds } });`}
+  ]
+},
+{ id:'sd-queues', title:'Message queues & delivery guarantees', animate:'queueflow',
+  lede:"Queues decouple producing work from processing it — letting a slow or unreliable consumer never block whoever's generating the work.",
+  steps:[
+    "A <b>message queue</b> (SQS, RabbitMQ, Kafka) sits between a <b>producer</b> (creates work) and one or more <b>consumers</b> (process it) — the producer doesn't wait for processing to finish, just for the message to be accepted.",
+    "This is the standard fix for slow background work — sending an email, resizing an image, calling a third-party API — keeping the user-facing request fast while the actual work happens asynchronously.",
+    "<b>At-least-once delivery</b> means a message might be delivered (and processed) more than once — usually because a consumer crashed after processing but before acknowledging. This is the most common guarantee queues actually provide.",
+    "<b>Exactly-once delivery</b> is extremely hard to guarantee end-to-end in a distributed system — most systems that claim it actually provide at-least-once delivery plus deduplication on the consumer side.",
+    "Because at-least-once is the realistic default, <b>consumers must be idempotent</b> — processing the same message twice should produce the same result as processing it once, not double-charge a customer or double-send an email.",
+    "A <b>dead-letter queue (DLQ)</b> catches messages that repeatedly fail processing, instead of retrying forever or silently dropping them — critical for both debugging and not losing data.",
+    "<b>Ordering</b> is another trade-off — a single queue partition preserves order but limits parallelism; multiple partitions/consumers scale throughput but only guarantee ordering within each partition, not globally.",
+    "Queues also provide natural <b>backpressure</b> for the whole system — if consumers fall behind, work piles up in the queue instead of overwhelming downstream services directly."
+  ],
+  code:`<span class="cm">// producer — fire and forget, request stays fast</span>\napp.post('/signup', async (req, res) => {\n  await db.users.create(req.body);\n  await queue.send('send-welcome-email', { userId: req.body.id });\n  res.status(201).send();  <span class="cm">// doesn't wait for the email to send</span>\n});\n\n<span class="cm">// consumer — must be idempotent, since it may run more than once</span>\nqueue.on('send-welcome-email', async ({ userId }) => {\n  if (await alreadySent(userId)) return;  <span class="cm">// dedupe check</span>\n  await sendEmail(userId);\n  await markSent(userId);\n});`,
+  terms:[
+    {term:"At-least-once vs exactly-once", desc:"At-least-once may redeliver; exactly-once (rarely truly achieved) delivers once.", detail:"In practice, most 'exactly-once' systems are really at-least-once delivery combined with idempotent processing on the consumer — the illusion of exactly-once comes from deduplication, not from the transport layer itself.", code:`<span class="cm">// achieving 'exactly-once' behavior via idempotency, not magic</span>\nasync function processPayment(paymentId) {\n  const existing = await db.payments.findByIdempotencyKey(paymentId);\n  if (existing) return existing;  <span class="cm">// already processed — safe no-op</span>\n  return await chargeCard(paymentId);\n}`},
+    {term:"Dead-letter queue", desc:"Where messages go after repeatedly failing to process successfully.", detail:"Without a DLQ, a single malformed message can either block a whole ordered queue (retried forever) or get silently dropped — neither of which you want to discover in production.", code:`queue.on('process-order', async (msg) => {\n  try {\n    await handleOrder(msg);\n  } catch (err) {\n    if (msg.retryCount >= 3) await deadLetterQueue.send(msg);  <span class="cm">// give up gracefully</span>\n    else throw err;  <span class="cm">// let the queue retry</span>\n  }\n});`}
+  ]
+},
+{ id:'sd-resilience', title:'Idempotency, retries, circuit breakers & bulkheads', animate:'circuitbreaker',
+  lede:"Distributed systems fail constantly in small ways — these four patterns are how you keep small failures from becoming big ones.",
+  steps:[
+    "<b>Idempotency</b>: an operation that produces the same result no matter how many times it's applied — <code>PUT</code> (set a value) is naturally idempotent; <code>POST</code> (create a new thing) usually isn't, unless you add an idempotency key.",
+    "An <b>idempotency key</b> — a unique client-generated ID sent with a request — lets the server recognize and safely ignore a duplicate request (e.g. from a retried payment) instead of processing it twice.",
+    "<b>Retries</b> handle transient failures (a brief network blip, a momentarily overloaded service) — but retrying instantly and repeatedly can turn a small problem into a bigger one by piling more load onto an already-struggling service.",
+    "<b>Exponential backoff</b> (wait longer between each retry) plus <b>jitter</b> (add randomness to the wait) prevents synchronized retry storms, where many clients all retry at the exact same moment and re-overwhelm the service.",
+    "A <b>circuit breaker</b> tracks failures to a dependency and 'opens' after too many — while open, calls fail immediately without even attempting the request, giving the struggling dependency room to recover instead of being hit with more traffic.",
+    "The circuit breaker's <b>half-open</b> state periodically lets a single test request through — if it succeeds, the circuit closes again (normal traffic resumes); if it fails, it stays open longer.",
+    "A <b>bulkhead</b> isolates resources (connection pools, thread pools) per dependency, so one failing/slow dependency can't exhaust resources needed to serve requests to unrelated, healthy dependencies — named after ship compartments that contain flooding.",
+    "These patterns compose: retries handle brief blips, circuit breakers handle sustained outages, and bulkheads contain the blast radius when something does go wrong despite the other two."
+  ],
+  code:`<span class="cm">// idempotency key — safe to retry without double-processing</span>\napp.post('/payments', async (req, res) => {\n  const key = req.headers['idempotency-key'];\n  const existing = await db.payments.findByKey(key);\n  if (existing) return res.json(existing);   <span class="cm">// already handled this exact request</span>\n\n  const payment = await chargeCard(req.body);\n  await db.payments.save(key, payment);\n  res.json(payment);\n});`,
+  terms:[
+    {term:"Circuit breaker states", desc:"Closed (normal) → Open (failing fast) → Half-open (testing recovery).", detail:"The point of 'failing fast' while open isn't just protecting the failing dependency — it's also protecting the caller's own resources (threads, connections) from being tied up waiting on calls that are very likely to fail anyway.", code:`if (breaker.isOpen()) throw new Error('circuit open — failing fast');\ntry {\n  const result = await callDependency();\n  breaker.recordSuccess();\n  return result;\n} catch (err) {\n  breaker.recordFailure();  <span class="cm">// may flip the breaker to open</span>\n  throw err;\n}`},
+    {term:"Exponential backoff with jitter", desc:"Growing delay between retries, randomized to avoid synchronized retry storms.", detail:"Without jitter, many clients that failed at the same moment (e.g. during a brief outage) will all retry at the same moment again — jitter spreads that retry traffic out over time instead of hitting the recovering service in one more spike.", code:`async function retryWithBackoff(fn, attempt = 0) {\n  try { return await fn(); }\n  catch (err) {\n    if (attempt >= 5) throw err;\n    const delay = 2 ** attempt * 100 + Math.random() * 100;  <span class="cm">// backoff + jitter</span>\n    await new Promise(r => setTimeout(r, delay));\n    return retryWithBackoff(fn, attempt + 1);\n  }\n}`}
+  ]
+},
+{ id:'sd-cap', title:'CAP theorem, in plain language', animate:'captriangle',
+  lede:"A useful mental model for distributed database trade-offs — though in practice it's more nuanced than 'pick two'.",
+  steps:[
+    "<b>Consistency</b>: every read gets the most recent write, or an error — no node ever serves stale data.",
+    "<b>Availability</b>: every request gets a (non-error) response — even if it might not reflect the most recent write.",
+    "<b>Partition tolerance</b>: the system keeps working even when network communication between nodes breaks down (a network partition).",
+    "The theorem: when a <b>partition actually happens</b>, you must choose between consistency and availability — you cannot have both at that moment. Partition tolerance itself isn't really optional for any real distributed system, since networks do fail.",
+    "A <b>CP</b> system (e.g. a strongly consistent database like Zookeeper) refuses to serve a request it can't guarantee is up to date during a partition — it returns an error rather than stale data.",
+    "An <b>AP</b> system (e.g. Cassandra, DynamoDB in default mode) keeps serving requests during a partition, accepting that different nodes might temporarily disagree — this is <b>eventual consistency</b>: given enough time with no new writes, all nodes converge.",
+    "In practice, <b>most of the time there's no partition</b> — CAP only forces a choice during the (hopefully rare) window when nodes can't talk to each other; the rest of the time, both consistency and availability are achievable.",
+    "The practical question to ask in an interview isn't 'CP or AP in the abstract' — it's 'for this specific piece of data, is serving stale information acceptable, or is an error better than a wrong answer?' (e.g. a bank balance vs a 'likes' counter)."
+  ],
+  code:`<span class="cm">// AP choice: serve a possibly-stale like count rather than error</span>\nasync function getLikeCount(postId) {\n  return await cassandra.get(postId);  <span class="cm">// fast, available, maybe a few seconds stale</span>\n}\n\n<span class="cm">// CP choice: refuse rather than risk an incorrect balance</span>\nasync function getAccountBalance(accountId) {\n  if (!quorumReachable()) throw new Error('cannot guarantee consistency — try again');\n  return await stronglyConsistentRead(accountId);\n}`,
+  terms:[
+    {term:"Eventual consistency", desc:"Given no new writes, all replicas converge to the same value — but not instantly.", detail:"This isn't a vague promise — most eventually-consistent systems converge within milliseconds to seconds under normal conditions; the 'eventual' window only widens meaningfully during actual network problems.", code:`<span class="cm">// two replicas can briefly disagree right after a write</span>\nawait replicaA.write('count', 5);\n<span class="cm">// replicaB might still return the old value for a brief window</span>\nawait replicaB.read('count');  <span class="cm">// eventually becomes 5 too</span>`},
+    {term:"CP vs AP trade-off", desc:"During a partition: refuse and stay correct (CP), or answer and risk staleness (AP).", detail:"This choice is often made per-operation, not per-database — many real systems (like DynamoDB) let you choose strongly consistent or eventually consistent reads on a per-query basis.", code:`<span class="cm">// same database, different consistency choice per read</span>\ndynamodb.get({ Key: id, ConsistentRead: true });   <span class="cm">// CP-style for this read</span>\ndynamodb.get({ Key: id, ConsistentRead: false });  <span class="cm">// AP-style, faster, possibly stale</span>`}
+  ]
+},
+{ id:'sd-observability', title:'Observability: logs, metrics, traces & alerting', animate:'observability',
+  lede:"You can't fix what you can't see — observability is what turns 'the site is slow' into 'this specific query on this specific service is slow'.",
+  steps:[
+    "<b>Logs</b>: discrete, timestamped events with context — best for answering 'what exactly happened' for one specific request or error, especially after the fact.",
+    "<b>Metrics</b>: numeric measurements aggregated over time (request rate, error rate, latency percentiles, CPU) — best for dashboards, trends, and automated alerting, since they're cheap to store and query at scale.",
+    "<b>Traces</b>: follow a single request as it moves across multiple services, showing where time was actually spent — essential once a request touches more than one service, where logs alone can't show the full picture.",
+    "<b>Structured logging</b> (JSON with consistent fields) beats free-text logs — it lets you actually query and aggregate logs, instead of just grepping for a string and hoping.",
+    "<b>Latency percentiles</b> (p50, p95, p99) matter more than averages — an average can look fine while 1% of users have a genuinely broken experience; p99 surfaces that.",
+    "What to actually <b>alert on</b>: symptoms users would notice — elevated error rate, p95/p99 latency crossing a threshold, a queue backing up — not raw causes like 'CPU at 80%', which may or may not actually be a problem.",
+    "Good alerts are <b>actionable</b> — if an alert fires and there's nothing a human can or should do about it, it's noise that trains people to ignore alerts, including the ones that matter.",
+    "A <b>request ID</b> generated at the edge and passed through every downstream service ties logs, metrics, and traces for a single request together — without it, correlating what happened across services during an incident is far harder."
+  ],
+  code:`<span class="cm">// structured log with a request ID that ties everything together</span>\nlogger.info({\n  requestId: req.id,\n  route: '/api/llm/complete',\n  latencyMs: Date.now() - start,\n  status: res.statusCode,\n  userId: req.user?.id\n});`,
+  terms:[
+    {term:"p99 latency", desc:"The latency below which 99% of requests fall — surfaces the worst experiences, not the typical one.", detail:"A service can have a great average latency of 100ms while its p99 is 4 seconds — meaning 1 in 100 users has a badly broken experience that the average completely hides.", code:`<span class="cm">// example distribution: 100 requests, sorted by latency</span>\n<span class="cm">// p50 (median) = 90ms, p95 = 300ms, p99 = 4000ms</span>\n<span class="cm">// the average might look like ~130ms — hiding that 1% badly slow tail</span>`},
+    {term:"Distributed tracing", desc:"Following one request's journey across multiple services via a shared trace ID.", detail:"Each service adds a 'span' to the trace showing how long its part took — stitched together, this shows exactly which downstream call (a slow DB query, a slow third-party API) is responsible for overall latency.", code:`<span class="cm">// trace ID propagated through headers across service calls</span>\nfetch('https://inventory-service/check', {\n  headers: { 'traceparent': req.headers['traceparent'] }\n});`}
+  ]
+},
+{ id:'sd-api', title:'API design: resources, pagination, versioning & errors', animate:'apidesign',
+  lede:"A well-designed API is one where the shape of the URLs and responses makes the system predictable to use, without reading the docs every time.",
+  steps:[
+    "<b>REST resource modelling</b>: URLs represent nouns (resources), not actions — <code>/orders/123</code>, not <code>/getOrder?id=123</code>; the HTTP method (GET/POST/PUT/DELETE) expresses the action.",
+    "Nest resources to express relationships that are always scoped that way — <code>/users/42/orders</code> for a user's orders — but avoid nesting more than one or two levels deep, which gets unwieldy fast.",
+    "<b>Pagination</b> is mandatory for any endpoint returning an unbounded list — <b>offset-based</b> (<code>?page=2&limit=20</code>) is simple but can skip/duplicate items if data changes between requests; <b>cursor-based</b> (<code>?after=abc123</code>) is stable under concurrent writes and scales better on large datasets.",
+    "<b>Versioning</b> lets you evolve an API without breaking existing clients — common approaches: URL versioning (<code>/v2/orders</code>, most visible/simple) or a header (<code>Accept-Version</code>, keeps URLs clean but less discoverable).",
+    "A consistent <b>error contract</b> matters as much as success responses — every error should return the same shape (error code, human-readable message, maybe a field-level detail list) so clients can handle errors generically instead of parsing every error message.",
+    "Use HTTP status codes <b>meaningfully</b>: 400 for client mistakes, 401/403 for auth issues, 404 for missing resources, 429 for rate limiting, 5xx for server-side failures — returning 200 with an error buried in the body defeats standard HTTP tooling.",
+    "<b>Idempotent methods</b> matter for API design too — GET/PUT/DELETE should be safe to retry; a POST that creates a resource typically shouldn't be retried blindly without an idempotency key (see the resilience topic).",
+    "Good API design also means <b>not over-fetching or under-fetching</b> — this is exactly the problem GraphQL was built to solve, letting clients specify exactly the fields they need instead of getting a fixed REST response shape."
+  ],
+  code:`GET /v2/users/42/orders?after=order_88&limit=20\n\n<span class="cm">// consistent success shape</span>\n{ "data": [ /* orders */ ], "nextCursor": "order_108" }\n\n<span class="cm">// consistent error shape, regardless of which endpoint failed</span>\n{ "error": { "code": "NOT_FOUND", "message": "Order not found" } }`,
+  terms:[
+    {term:"Cursor-based pagination", desc:"Paginating from a stable pointer (like an ID) instead of a numeric offset.", detail:"Offset pagination breaks under concurrent writes — if an item is deleted from an earlier page while a user is paginating, offset-based pages shift and can skip or duplicate items; cursor-based pagination doesn't have this problem.", code:`<span class="cm">// offset — fragile if data changes mid-pagination</span>\nGET /orders?page=3&limit=20\n\n<span class="cm">// cursor — stable regardless of concurrent writes</span>\nGET /orders?after=order_60&limit=20`},
+    {term:"Consistent error contract", desc:"Every endpoint's error response follows the same shape.", detail:"This is what lets a client write ONE generic error-handling function instead of custom parsing logic per endpoint — a small design decision with an outsized effect on how pleasant an API is to actually build against.", code:`{\n  "error": {\n    "code": "VALIDATION_FAILED",\n    "message": "Invalid request body",\n    "details": [{ "field": "email", "issue": "must be a valid email" }]\n  }\n}`}
+  ]
+}
+];
+
 /* ---------- animation templates ---------- */
 const animations = {
   stack: '<div class="stack-anim"><div></div><div></div><div></div></div>',
@@ -968,15 +1168,24 @@ const animations = {
   utility: '<div class="utility-anim"><div class="ut-base">User</div><div class="ut-branch b1">Partial&lt;User&gt;</div><div class="ut-branch b2">Pick&lt;User&gt;</div><div class="ut-branch b3">Omit&lt;User&gt;</div></div>',
   errorflow: '<div class="errorflow-anim"><div class="ef-top">throw new Error()</div><div class="ef-row"><div class="ef-path caught">caught → logged</div><div class="ef-path uncaught">uncaught → exit</div></div></div>',
   combinator: '<div class="combinator-anim"><div class="cb-chip c1">all</div><div class="cb-chip c2">race</div><div class="cb-chip c3">any</div><div class="cb-chip c4">allSettled</div></div>',
-  delegate: '<div class="delegate-anim"><div class="del-parent">parent listener<div class="del-child">child click</div></div></div>'
+  delegate: '<div class="delegate-anim"><div class="del-parent">parent listener<div class="del-child">child click</div></div></div>',
+  loadbalance: '<div class="lb-anim"><div class="lb-box">LB</div><div class="lb-servers"><div class="lb-server s1">S1</div><div class="lb-server s2">S2</div><div class="lb-server s3">S3</div></div></div>',
+  cachelayers: '<div class="cache-anim"><div class="cache-layer l1">CDN</div><div class="cache-layer l2">App cache</div><div class="cache-layer l3">DB</div></div>',
+  dbcompare: '<div class="dbcompare-anim"><div class="db-box sql">SQL<span>rows</span></div><div class="db-box nosql">NoSQL<span>docs</span></div></div>',
+  queueflow: '<div class="queue-anim"><div class="q-node">Producer</div><div class="q-pipe"><i></i><i></i><i></i></div><div class="q-node">Consumer</div></div>',
+  circuitbreaker: '<div class="cb2-anim"><div class="cb2-switch"><div class="cb2-arm"></div></div><div class="cb2-label">circuit</div></div>',
+  captriangle: '<div class="cap-anim"><div class="cap-vertex c">C</div><div class="cap-vertex a">A</div><div class="cap-vertex p">P</div></div>',
+  observability: '<div class="obs-anim"><div class="obs-lens l1">logs</div><div class="obs-lens l2">metrics</div><div class="obs-lens l3">traces</div><div class="obs-dash">dashboard</div></div>',
+  apidesign: '<div class="api-anim"><div class="api-url">GET /v2/orders<span class="api-cursor2"></span></div><div class="api-status ok">200</div></div>'
 };
 
 /* ---------- render ---------- */
 let currentTab = 'js';
 let currentIndex = 0;
 
-function topicsFor(tab){ return tab==='js' ? jsTopics : tab==='node' ? nodeTopics : tsTopics; }
-function tabLabel(tab){ return tab==='js' ? 'JavaScript engine' : tab==='node' ? 'Node.js runtime' : 'TypeScript'; }
+function topicsFor(tab){ return tab==='js' ? jsTopics : tab==='node' ? nodeTopics : tab==='ts' ? tsTopics : sdTopics; }
+function tabLabel(tab){ return tab==='js' ? 'JavaScript engine' : tab==='node' ? 'Node.js runtime' : tab==='ts' ? 'TypeScript' : 'System Design'; }
+const tabOrder = ['js','node','ts','sd'];
 
 function renderSidebar(){
   const topics = topicsFor(currentTab);
@@ -1034,12 +1243,13 @@ function renderTabs(){
   document.getElementById('tabJS').classList.toggle('active', currentTab==='js');
   document.getElementById('tabNode').classList.toggle('active', currentTab==='node');
   document.getElementById('tabTS').classList.toggle('active', currentTab==='ts');
+  document.getElementById('tabSD').classList.toggle('active', currentTab==='sd');
 }
 
 function renderFooter(){
   const topics = topicsFor(currentTab);
-  const isFirst = currentIndex===0 && currentTab==='js';
-  const isLast = currentIndex===topics.length-1 && currentTab==='ts';
+  const isFirst = currentIndex===0 && currentTab===tabOrder[0];
+  const isLast = currentIndex===topics.length-1 && currentTab===tabOrder[tabOrder.length-1];
   const prevBtn = document.getElementById('prevSec');
   const nextBtn = document.getElementById('nextSec');
   prevBtn.disabled = isFirst;
@@ -1058,18 +1268,23 @@ function renderAll(){
 document.getElementById('tabJS').onclick = ()=>{ currentTab='js'; currentIndex=0; renderAll(); };
 document.getElementById('tabNode').onclick = ()=>{ currentTab='node'; currentIndex=0; renderAll(); };
 document.getElementById('tabTS').onclick = ()=>{ currentTab='ts'; currentIndex=0; renderAll(); };
+document.getElementById('tabSD').onclick = ()=>{ currentTab='sd'; currentIndex=0; renderAll(); };
 
 document.getElementById('prevSec').onclick = ()=>{
   if(currentIndex>0){ currentIndex--; }
-  else if(currentTab==='node'){ currentTab='js'; currentIndex=jsTopics.length-1; }
-  else if(currentTab==='ts'){ currentTab='node'; currentIndex=nodeTopics.length-1; }
+  else {
+    const idx = tabOrder.indexOf(currentTab);
+    if(idx>0){ currentTab = tabOrder[idx-1]; currentIndex = topicsFor(currentTab).length-1; }
+  }
   renderAll();
 };
 document.getElementById('nextSec').onclick = ()=>{
   const topics = topicsFor(currentTab);
   if(currentIndex<topics.length-1){ currentIndex++; }
-  else if(currentTab==='js'){ currentTab='node'; currentIndex=0; }
-  else if(currentTab==='node'){ currentTab='ts'; currentIndex=0; }
+  else {
+    const idx = tabOrder.indexOf(currentTab);
+    if(idx<tabOrder.length-1){ currentTab = tabOrder[idx+1]; currentIndex = 0; }
+  }
   renderAll();
 };
 
