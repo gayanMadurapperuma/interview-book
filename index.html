@@ -16,6 +16,7 @@
     --pool:#5BD6D6; --poolbg:#12292C;
     --ts:#4FA8F2; --tsbg:#132840;
     --sd:#C58CF2; --sdbg:#241A38;
+    --ai:#F26B9A; --aibg:#331722;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
@@ -47,6 +48,7 @@
   .tab.node.active{background:var(--nodebg);color:var(--node);border-color:#2C5C46}
   .tab.ts.active{background:var(--tsbg);color:var(--ts);border-color:#2C5578}
   .tab.sd.active{background:var(--sdbg);color:var(--sd);border-color:#4A3468}
+  .tab.ai.active{background:var(--aibg);color:var(--ai);border-color:#6B2E48}
   .tab:not(.active):hover{color:var(--text)}
 
   .shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:calc(100vh - 56px)}
@@ -63,6 +65,7 @@
   .side-item.active.node{background:var(--nodebg);color:var(--node)}
   .side-item.active.ts{background:var(--tsbg);color:var(--ts)}
   .side-item.active.sd{background:var(--sdbg);color:var(--sd)}
+  .side-item.active.ai{background:var(--aibg);color:var(--ai)}
 
   /* Main content */
   main{padding:28px 30px 80px;max-width:760px}
@@ -72,7 +75,7 @@
   @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 
   .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px}
-  .eyebrow.js{color:var(--js)} .eyebrow.node{color:var(--node)} .eyebrow.ts{color:var(--ts)} .eyebrow.sd{color:var(--sd)}
+  .eyebrow.js{color:var(--js)} .eyebrow.node{color:var(--node)} .eyebrow.ts{color:var(--ts)} .eyebrow.sd{color:var(--sd)} .eyebrow.ai{color:var(--ai)}
   h2{font-size:22px;font-weight:600;margin:0 0 10px}
   h2::before{content:'> ';color:var(--node)}
   .lede{color:var(--sub);font-size:14.5px;line-height:1.65;margin:0 0 22px}
@@ -374,6 +377,95 @@
   .api-status.ok{background:var(--nodebg);border:1px solid #2C5C46;color:var(--node)}
   @keyframes apipulse{0%,100%{opacity:.5}50%{opacity:1}}
 
+  .rag-anim{display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:center}
+  .rag-stage{padding:6px 9px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:10px;color:var(--sub);animation:ragstep 5s ease-in-out infinite}
+  .rag-arrow{color:var(--sub);font-size:11px}
+  .rag-stage.s1{animation-delay:0s} .rag-stage.s2{animation-delay:.8s} .rag-stage.s3{animation-delay:1.6s} .rag-stage.s4{animation-delay:2.4s} .rag-stage.s5{animation-delay:3.2s}
+  @keyframes ragstep{0%,100%{border-color:var(--line);color:var(--sub)}8%,20%{border-color:var(--ai);color:var(--ai)}}
+
+  .chunk-anim{position:relative;width:180px;height:50px}
+  .chunk-bar{position:absolute;top:0;left:0;right:0;height:6px;border-radius:3px;background:var(--panel2);border:1px solid var(--line)}
+  .chunk-piece{position:absolute;top:18px;height:16px;border-radius:4px;background:var(--aibg);border:1px solid #6B2E48;animation:chunkfade 3s ease-in-out infinite}
+  .chunk-piece.p1{left:0;width:64px;animation-delay:0s}
+  .chunk-piece.p2{left:58px;width:64px;animation-delay:.4s}
+  .chunk-piece.p3{left:116px;width:64px;animation-delay:.8s}
+  @keyframes chunkfade{0%,100%{opacity:.5}50%{opacity:1}}
+  .chunk-overlap{position:absolute;top:18px;width:8px;height:16px;background:var(--ai);opacity:.4;border-radius:2px}
+  .chunk-overlap.o1{left:58px} .chunk-overlap.o2{left:116px}
+
+  .vec-anim{position:relative;width:120px;height:80px}
+  .vec-dot{position:absolute;width:8px;height:8px;border-radius:50%;background:var(--sub);animation:vecpulse 3s ease-in-out infinite}
+  .vec-dot.d1{top:10px;left:20px} .vec-dot.d2{top:16px;left:34px;background:var(--ai);animation-delay:.3s}
+  .vec-dot.d3{top:55px;left:80px} .vec-dot.d4{top:45px;left:95px}
+  .vec-line{position:absolute;top:14px;left:24px;width:14px;height:2px;background:var(--ai);opacity:.6;transform:rotate(25deg);transform-origin:left center}
+  @keyframes vecpulse{0%,100%{opacity:.4}50%{opacity:1}}
+
+  .bvb-anim{display:flex;gap:10px}
+  .bvb-box{padding:10px 14px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);text-align:center;font-family:var(--mono);font-size:11px;color:var(--sub);display:flex;flex-direction:column;gap:3px;animation:bvbswap 3s ease-in-out infinite}
+  .bvb-box span{font-size:9px;opacity:.7}
+  .bvb-box.custom{animation-delay:1.5s}
+  @keyframes bvbswap{0%,100%{border-color:var(--line);color:var(--sub)}20%,40%{border-color:var(--ai);color:var(--ai)}}
+
+  .ms-anim{display:flex;gap:10px}
+  .ms-col{padding:10px 12px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:10px;color:var(--sub);max-width:110px}
+  .ms-col b{display:block;font-size:11px;margin-bottom:4px;color:var(--text)}
+  .ms-retrieval{animation:mspulse 3s ease-in-out infinite}
+  .ms-generation{animation:mspulse 3s ease-in-out infinite 1.5s}
+  @keyframes mspulse{0%,100%{border-color:var(--line)}30%,50%{border-color:var(--ai)}}
+
+  .rr-anim{display:flex;flex-direction:column;gap:5px}
+  .rr-item{width:26px;padding:5px 0;text-align:center;border-radius:5px;background:var(--panel2);border:1px solid var(--line);color:var(--sub);font-family:var(--mono);font-size:11px;animation:rrsort 3.6s ease-in-out infinite}
+  @keyframes rrsort{0%,20%{transform:translateY(0)}40%,60%{transform:translateY(0)}80%,100%{transform:translateY(0)}}
+  .rr-item.i1{animation-name:rr1} .rr-item.i2{animation-name:rr2} .rr-item.i3{animation-name:rr3}
+  @keyframes rr1{0%,30%{transform:translateY(0)}50%,100%{transform:translateY(31px)}}
+  @keyframes rr2{0%,30%{transform:translateY(31px)}50%,100%{transform:translateY(-31px)}}
+  @keyframes rr3{0%,30%{transform:translateY(-31px)}50%,100%{transform:translateY(0)}}
+
+  .hal-anim{display:flex;flex-direction:column;align-items:center;gap:8px}
+  .hal-text{padding:8px 12px;border-radius:6px;background:var(--tickbg);border:1px solid #6B2E46;color:var(--tick);font-family:var(--mono);font-size:10.5px;animation:halwobble 2.4s ease-in-out infinite}
+  @keyframes halwobble{0%,100%{opacity:.6}50%{opacity:1}}
+  .hal-anchor{padding:6px 10px;border-radius:6px;background:var(--nodebg);border:1px solid #2C5C46;color:var(--node);font-family:var(--mono);font-size:10px}
+
+  .gw-anim{display:flex;align-items:center;gap:10px}
+  .gw-clients,.gw-providers{display:flex;flex-direction:column;gap:5px}
+  .gw-clients i,.gw-providers i{width:14px;height:14px;border-radius:4px;background:var(--panel2);border:1px solid var(--line);display:block}
+  .gw-box{padding:10px 12px;border-radius:8px;background:var(--aibg);border:1px solid #6B2E48;color:var(--ai);font-family:var(--mono);font-size:11px;animation:gwpulse 2.4s ease-in-out infinite}
+  @keyframes gwpulse{0%,100%{opacity:.7}50%{opacity:1}}
+
+  .rs-anim{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .rs-tokens{display:flex;gap:3px}
+  .rs-tokens span{padding:5px 7px;border-radius:4px;background:var(--panel2);border:1px solid var(--line);color:var(--sub);font-family:var(--mono);font-size:9px;animation:rstoken 2.4s ease-in-out infinite}
+  .rs-tokens span:nth-child(2){animation-delay:.3s} .rs-tokens span:nth-child(3){animation-delay:.6s}
+  @keyframes rstoken{0%,100%{opacity:.4}50%{opacity:1}}
+  .rs-filter{padding:5px 10px;border-radius:6px;background:var(--aibg);border:1px solid #6B2E48;color:var(--ai);font-family:var(--mono);font-size:9.5px}
+
+  .fb-anim{display:flex;align-items:center;gap:8px}
+  .fb-node{padding:8px 10px;border-radius:6px;font-family:var(--mono);font-size:10px;border:1px solid}
+  .fb-node.primary{background:var(--tickbg);border-color:#6B2E46;color:var(--tick);animation:fbflicker 3s ease-in-out infinite}
+  .fb-node.fallback{background:var(--nodebg);border-color:#2C5C46;color:var(--node)}
+  .fb-arrow{color:var(--sub)}
+  @keyframes fbflicker{0%,100%{opacity:1}45%,55%{opacity:.3}}
+
+  .sc-anim{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .sc-query,.sc-cached{padding:6px 10px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--sub);font-family:var(--mono);font-size:9px}
+  .sc-cached{background:var(--aibg);border-color:#6B2E48;color:var(--ai)}
+  .sc-arrow{color:var(--ai);font-size:11px;animation:scpulse 2s ease-in-out infinite}
+  @keyframes scpulse{0%,100%{opacity:.4}50%{opacity:1}}
+
+  .tc-anim{display:flex;gap:6px}
+  .tc-chip{padding:7px 11px;border-radius:20px;border:1px solid var(--line);background:var(--panel2);color:var(--sub);font-family:var(--mono);font-size:10px;animation:tcpulse 3s ease-in-out infinite}
+  .tc-chip.sse{animation-delay:1s} .tc-chip.ws{animation-delay:2s}
+  @keyframes tcpulse{0%,100%{border-color:var(--line);color:var(--sub)}20%,33%{border-color:var(--ai);color:var(--ai)}}
+
+  .wl-anim{width:110px;height:26px}
+  .wl-track{position:relative;height:26px}
+  .wl-track span{position:absolute;left:0;right:0;padding:6px 10px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);color:var(--sub);font-family:var(--mono);font-size:10px;text-align:center;opacity:0;animation:wlcycle 4.8s ease-in-out infinite;box-sizing:border-box}
+  .wl-track span:nth-child(1){animation-delay:0s}
+  .wl-track span:nth-child(2){animation-delay:1.2s}
+  .wl-track span:nth-child(3){animation-delay:2.4s}
+  .wl-track span:nth-child(4){animation-delay:3.6s}
+  @keyframes wlcycle{0%,3%{opacity:0}8%,22%{opacity:1;border-color:var(--ai);color:var(--ai)}27%,100%{opacity:0}}
+
   /* --- badge for demo items in sidebar --- */
   .side-item .play-badge{display:inline-block;margin-left:6px;font-size:9px;padding:1px 6px;border-radius:10px;background:var(--accentbg);color:var(--accent);vertical-align:middle}
 
@@ -455,6 +547,7 @@
   <div class="tab node" id="tabNode">Node.js runtime</div>
   <div class="tab ts" id="tabTS">TypeScript</div>
   <div class="tab sd" id="tabSD">System Design</div>
+  <div class="tab ai" id="tabAI">AI Platform</div>
 </div>
 
 <div class="shell">
@@ -1140,6 +1233,235 @@ const sdTopics = [
 }
 ];
 
+const aiTopics = [
+{ id:'ai-rag-arch', title:'RAG: architecture end-to-end', animate:'ragpipeline',
+  lede:"Retrieval-Augmented Generation grounds an LLM's answers in your own documents instead of relying purely on what it memorized during training.",
+  steps:[
+    "<b>Ingestion</b>: source documents (PDFs, wikis, policy docs) are pulled in, cleaned of formatting noise, and normalized into plain text before anything else happens.",
+    "<b>Chunking</b>: each document is split into smaller pieces sized to fit an embedding model's effective window and to keep retrieved context focused, not an entire 50-page document.",
+    "<b>Embedding</b>: each chunk is converted into a dense vector capturing its semantic meaning — this happens once at ingestion time, and the vectors are stored in a vector database.",
+    "<b>Retrieval</b>: at query time, the user's question is embedded the same way, and the vector DB returns the chunks whose vectors are most similar — search over meaning, not keyword matching.",
+    "<b>Augmented generation</b>: retrieved chunks are inserted into the LLM's prompt as context, and the model is instructed to answer <i>using that context</i> — grounding the response instead of relying purely on training data.",
+    "<b>Staleness</b> is an ongoing operational problem, not a one-time setup task — source documents change, and stale chunks silently return outdated answers with full confidence. A refresh pipeline (scheduled re-ingestion, or triggered on document change events) is required, not optional.",
+    "The pipeline is only as good as its weakest stage — bad chunking produces irrelevant context even with perfect embeddings; bad retrieval produces confidently wrong answers even with a great generation model."
+  ],
+  code:`<span class="cm">// conceptual pipeline, not literal API</span>\nconst docs = await ingest(source);\nconst chunks = docs.flatMap(doc => chunk(doc, { size: 500, overlap: 75 }));\nconst vectors = await embed(chunks);\nawait vectorDB.upsert(vectors);\n\n<span class="cm">// query time</span>\nconst queryVector = await embed([userQuestion]);\nconst topChunks = await vectorDB.query(queryVector, { topK: 5 });\nconst answer = await llm.generate(userQuestion, { context: topChunks });`,
+  note:{type:'info', text:"<b>What I'd do differently rebuilding today:</b> two things, from the start rather than bolted on later. First, treat document staleness as a first-class pipeline stage — a scheduled or event-triggered re-embed job, not an afterthought discovered after users complain. Second, separate retrieval evaluation from generation evaluation from day one, so a quality regression can be traced to the actual broken stage instead of guessed at."},
+  terms:[
+    {term:"Grounding", desc:"Constraining the LLM's answer to information actually present in retrieved context.", detail:"Grounding is a combination of prompt instruction ('answer only from this context') and having genuinely sufficient context retrieved in the first place — prompting alone can't compensate for a retrieval stage that found the wrong chunks.", code:`const prompt = \`Answer using ONLY the context below. If the answer isn't in the context, say you don't know.\\n\\nContext:\\n\${topChunks.join('\\n')}\\n\\nQuestion: \${userQuestion}\`;`},
+    {term:"Vector database", desc:"Stores embedding vectors alongside chunk text/metadata, indexed for fast similarity search.", detail:"It's not just a store — the indexing structure (commonly HNSW) is what makes searching millions of vectors fast; without it you'd be doing a brute-force comparison against every vector on every query.", code:`await vectorDB.upsert([\n  { id: 'chunk_1', vector: [0.12, -0.04, ...], text: '...', metadata: { doc: 'policy.pdf', section: 3 } }\n]);`}
+  ]
+},
+{ id:'ai-chunking', title:'RAG: chunking strategies', animate:'chunking',
+  lede:"How you split documents determines what the retriever can even find — get this wrong and no amount of embedding quality fixes it.",
+  steps:[
+    "<b>Fixed-size chunking</b> splits text into equal-length pieces (e.g. every 500 tokens) — simple and predictable, but can cut a sentence or idea awkwardly in half, splitting relevant context across two chunks.",
+    "<b>Semantic/recursive chunking</b> splits along natural boundaries (sections → paragraphs → sentences), falling back to smaller separators only when a piece is still too large — producing chunks that are coherent units of meaning.",
+    "<b>Overlap</b> (commonly 50-100 tokens shared between consecutive chunks) prevents information from being lost right at a chunk boundary — without it, a fact split exactly across two chunks may not be fully retrievable by either.",
+    "Chunk <b>size</b> is a real trade-off: too small and each chunk lacks enough context to be useful alone; too large and irrelevant surrounding text dilutes the embedding's focus, hurting retrieval precision.",
+    "Document structure should inform chunking when it's available — splitting a policy document by its own headings usually beats a blind fixed-size split, since it preserves logically complete units.",
+    "Metadata attached to each chunk (source document, section title, date) matters as much as the chunk text itself — it's what lets you cite sources, filter by recency, or detect which document a stale chunk came from.",
+    "There's no universally 'correct' chunk size — it depends on the embedding model and the nature of the documents; this is something to tune and evaluate against real queries, not guess once and leave."
+  ],
+  code:`function recursiveChunk(text, { maxSize = 500, overlap = 75 } = {}) {\n  const separators = ['\\n\\n', '\\n', '. ', ' '];  <span class="cm">// try largest units first</span>\n  <span class="cm">// split on the first separator that gets pieces under maxSize,</span>\n  <span class="cm">// falling back to smaller separators only when needed</span>\n  <span class="cm">// then slide a window with 'overlap' tokens shared between pieces</span>\n}`,
+  terms:[
+    {term:"Overlap", desc:"Shared tokens between consecutive chunks, preventing loss at boundaries.", detail:"Overlap is a direct trade-off against storage and retrieval noise — more overlap means more total chunks (more storage, more near-duplicate retrieval results) in exchange for fewer boundary-split facts.", code:`<span class="cm">// chunk 1: tokens 0-500</span>\n<span class="cm">// chunk 2: tokens 425-925   ← 75 tokens shared with chunk 1</span>\n<span class="cm">// a fact spanning tokens 480-510 is now fully inside BOTH chunks</span>`},
+    {term:"Recursive/semantic chunking", desc:"Splitting along natural document boundaries instead of fixed character counts.", detail:"This is the default strategy in most production RAG systems (e.g. LangChain's RecursiveCharacterTextSplitter) precisely because it degrades gracefully — it tries the most meaningful split first and only gets more aggressive when it has to.", code:`splitter = RecursiveCharacterTextSplitter({\n  chunkSize: 500,\n  chunkOverlap: 75,\n  separators: ['\\n\\n', '\\n', '. ', ' ']\n});`}
+  ]
+},
+{ id:'ai-embeddings', title:'RAG: embeddings & vector similarity', animate:'vectorspace',
+  lede:"Embeddings turn text into numbers positioned so that similar meaning ends up close together in vector space — that closeness is literally what retrieval search is over.",
+  steps:[
+    "An <b>embedding</b> is a fixed-length vector of floats (e.g. 1536 dimensions) produced by an embedding model — texts with similar meaning produce vectors that are close together in that high-dimensional space.",
+    "<b>Cosine similarity</b> measures the angle between two vectors, not their distance — it's the standard metric for text embeddings because it's insensitive to vector magnitude; only direction (meaning) matters.",
+    "Cosine similarity ranges from -1 to 1 — in practice for normalized text embeddings, values are typically positive, with values closer to 1 meaning more semantically similar.",
+    "A <b>vector database</b> stores embedding vectors alongside the original chunk text and metadata, and indexes them for <b>approximate nearest neighbor (ANN)</b> search — exact nearest-neighbor comparison doesn't scale past a small number of vectors.",
+    "ANN algorithms (commonly <b>HNSW</b>) trade a small amount of accuracy for massive speed — instead of comparing a query against every vector, they navigate a graph structure to find very-likely-nearest neighbors in roughly logarithmic time.",
+    "The <b>same embedding model</b> must be used for both ingestion (embedding chunks) and query time (embedding the question) — vectors from different models aren't comparable, even at identical dimensionality.",
+    "Embedding quality is domain-dependent — a general-purpose embedding model can perform noticeably worse on highly specialized/technical documents than a model chosen or tuned for that domain."
+  ],
+  code:`function cosineSimilarity(a, b) {\n  const dot = a.reduce((sum, ai, i) => sum + ai * b[i], 0);\n  const magA = Math.sqrt(a.reduce((sum, ai) => sum + ai * ai, 0));\n  const magB = Math.sqrt(b.reduce((sum, bi) => sum + bi * bi, 0));\n  return dot / (magA * magB);  <span class="cm">// 1 = identical direction, 0 = unrelated</span>\n}`,
+  terms:[
+    {term:"Cosine similarity", desc:"The angle between two vectors — the standard similarity metric for text embeddings.", detail:"Unlike Euclidean distance, cosine similarity ignores vector length entirely — this matters because embedding magnitude often reflects things like text length rather than meaning, which you don't want influencing the similarity score.", code:`cosineSimilarity(embed('cat'), embed('kitten'));  <span class="cm">// close to 1 — similar meaning</span>\ncosineSimilarity(embed('cat'), embed('spreadsheet'));  <span class="cm">// close to 0 — unrelated</span>`},
+    {term:"Approximate nearest neighbor (ANN)", desc:"Fast, near-exact similarity search that scales to millions of vectors.", detail:"Exact nearest-neighbor search is O(n) per query — fine for thousands of vectors, unusable for millions; ANN indexes like HNSW get this down to roughly O(log n) by accepting a small, tunable accuracy trade-off.", code:`const results = await vectorDB.query(queryVector, {\n  topK: 5,\n  metric: 'cosine'  <span class="cm">// index handles the ANN search internally</span>\n});`}
+  ]
+},
+{ id:'ai-bedrock-vs-custom', title:'RAG: Bedrock Knowledge Bases vs. custom build', animate:'buildvsbuy',
+  lede:"Both get you to a working RAG system — the real decision is how much control you need versus how fast you need to ship.",
+  steps:[
+    "<b>Bedrock Knowledge Bases</b> manages ingestion, chunking, embedding, vector storage, and retrieval orchestration for you — point it at a data source (e.g. S3) and it handles the pipeline end-to-end.",
+    "The trade-off is <b>control</b> — chunking strategy, embedding model choice, and retrieval tuning are more limited/opinionated than a custom build, and debugging a retrieval quality issue means working within what the managed service exposes.",
+    "A <b>custom RAG build</b> (your own chunking logic, your own vector DB, your own retrieval/reranking pipeline) gives full control over every stage — at the cost of building and operating all of it yourself.",
+    "Custom builds make sense when you need a specific chunking strategy, a particular embedding model, hybrid search (keyword + vector), custom reranking, or fine-grained per-chunk access control a managed service doesn't support well.",
+    "Managed services make sense when speed-to-production matters more than fine-tuning every stage, or when the team doesn't have bandwidth to operate a vector DB and ingestion pipeline long-term.",
+    "A pragmatic middle ground: start managed to validate the use case quickly, and migrate specific stages to custom (e.g. a custom reranker, or swapping the vector DB) once you know exactly which stage is the actual bottleneck.",
+    "This decision isn't permanent or all-or-nothing — a real production system can mix both, e.g. Bedrock KB for ingestion/storage but a custom reranking step layered on top of its retrieval results."
+  ],
+  code:`<span class="cm">// managed — pipeline is configuration, not code</span>\nconst kb = await bedrock.createKnowledgeBase({\n  dataSource: 's3://policy-docs',\n  embeddingModel: 'amazon.titan-embed-text-v1'\n});\n\n<span class="cm">// custom — every stage is code you own and can tune</span>\nconst chunks = myChunker.split(docs);\nconst vectors = await myEmbeddingModel.embed(chunks);\nawait myVectorDB.upsert(vectors);`,
+  terms:[
+    {term:"Managed vs custom trade-off", desc:"Speed-to-build vs. fine-grained control over each pipeline stage.", detail:"The honest framing in an interview isn't 'which is better' — it's 'what does this specific use case actually need control over', since that's usually a small, identifiable subset of the whole pipeline.", code:`<span class="cm">// hybrid: managed storage/retrieval, custom reranking layered on top</span>\nconst candidates = await bedrockKB.retrieve(query, { topK: 20 });\nconst reranked = await myReranker.rerank(query, candidates);`},
+    {term:"Hybrid search", desc:"Combining keyword (BM25/lexical) search with vector similarity search.", detail:"Pure vector search can miss exact-match cases (an error code, a specific product SKU) that keyword search handles trivially — hybrid search combines both and merges the results, something a managed KB may not support out of the box.", code:`const vectorResults = await vectorDB.query(queryVector);\nconst keywordResults = await bm25Index.search(queryText);\nconst merged = mergeAndRank(vectorResults, keywordResults);`}
+  ]
+},
+{ id:'ai-metrics', title:'RAG: retrieval metrics vs. generation metrics', animate:'metricsplit',
+  lede:"These measure two completely different failure modes — conflating them is one of the most common RAG evaluation mistakes.",
+  steps:[
+    "<b>Retrieval metrics</b> measure whether the right chunks were found at all — they say nothing about what the LLM did with them afterward.",
+    "<b>Precision@k</b>: of the top-k chunks retrieved, what fraction are actually relevant to the query — measures how much of the retrieved context is noise.",
+    "<b>Recall</b>: of all the truly relevant chunks that exist in the corpus, what fraction did retrieval actually find — measures whether anything important was missed entirely.",
+    "<b>MRR (Mean Reciprocal Rank)</b>: how high up the first genuinely relevant result appears, averaged across queries — rewards putting the best chunk first, not just somewhere in the top-k.",
+    "<b>Generation metrics</b> measure the LLM's output quality <i>given</i> whatever was retrieved — a separate concern from whether retrieval did its job.",
+    "<b>Faithfulness</b>: does the generated answer actually stick to what the retrieved context says, without adding unsupported claims — the core hallucination check.",
+    "<b>Relevance</b>: does the answer address what the user actually asked, independent of faithfulness — an answer can be perfectly faithful to context and still fail to answer the real question.",
+    "<b>Hallucination rate</b>: frequency of confidently stated claims not supported by retrieved context — this can happen even with perfect retrieval, if the model embellishes beyond what it was given.",
+    "<b>Why never conflate these:</b> a bad answer could mean retrieval found the wrong chunks, OR the model ignored good chunks and hallucinated anyway — treating it as one blended score makes it impossible to know which stage to actually fix."
+  ],
+  code:`<span class="cm">// retrieval evaluation — independent of the LLM entirely</span>\nfunction precisionAtK(retrievedIds, relevantIds, k) {\n  const topK = retrievedIds.slice(0, k);\n  const relevant = topK.filter(id => relevantIds.includes(id));\n  return relevant.length / k;\n}\n\n<span class="cm">// generation evaluation — given context, judge the ANSWER</span>\nasync function faithfulnessCheck(answer, context) {\n  return await judgeModel.evaluate({ answer, context, criterion: 'faithfulness' });\n}`,
+  terms:[
+    {term:"Precision@k", desc:"Fraction of the top-k retrieved chunks that are actually relevant.", detail:"High precision@k with low recall means retrieval is accurate but incomplete — it found good chunks, just not all of the good ones, which is a very different fix (broaden retrieval) than a precision problem (filter out noise).", code:`precisionAtK(['c1','c5','c9'], ['c1','c9','c22'], 3);  <span class="cm">// 2 of top 3 are relevant → 0.67</span>`},
+    {term:"Faithfulness", desc:"Whether the generated answer sticks to what the retrieved context actually supports.", detail:"Faithfulness is usually measured with a separate 'judge' LLM call comparing claim-by-claim against context — it's a generation-stage metric, and can be low even when retrieval and precision/recall are both excellent.", code:`<span class="cm">// context said "the policy renews annually" —</span>\n<span class="cm">// answer claiming "the policy renews monthly" fails a faithfulness check</span>`}
+  ]
+},
+{ id:'ai-reranking', title:'RAG: reranking', animate:'rerank',
+  lede:"Initial vector retrieval is fast but approximate — a second-pass reranker spends more compute on a smaller candidate set to get the ordering right.",
+  steps:[
+    "Vector search retrieves an initial candidate set (say, top 20-50 chunks) quickly using ANN search — but ANN's speed comes from approximation, so the ordering isn't always ideal.",
+    "A <b>reranker</b> is a separate, usually more expensive model (often a <b>cross-encoder</b>) that scores the query against each candidate chunk more precisely, then re-sorts them.",
+    "Cross-encoders process the query and chunk <i>together</i> in one forward pass — unlike embedding models, which encode them separately — capturing interactions similarity search alone misses, at the cost of being far too slow to run over an entire corpus.",
+    "This is why reranking is a <b>two-stage</b> pattern: cheap/fast vector search narrows millions of chunks down to dozens, then the expensive/accurate reranker only has to score those dozens.",
+    "Reranking typically improves precision@k noticeably — chunks that were 'close enough' by cosine similarity but not actually the best match often get correctly reordered or dropped.",
+    "The cost/latency trade-off is real — reranking adds a model call in the critical path of every query, worth measuring against the actual quality gain for your specific use case.",
+    "Reranking doesn't fix a fundamentally bad initial candidate set — if the true best chunk wasn't even in the top-k retrieved (a recall problem), no reranker can recover it; that's still a retrieval-stage fix."
+  ],
+  code:`<span class="cm">// stage 1: fast, approximate — narrow millions down to dozens</span>\nconst candidates = await vectorDB.query(queryVector, { topK: 30 });\n\n<span class="cm">// stage 2: slow, precise — only run on the narrowed set</span>\nconst scored = await Promise.all(\n  candidates.map(c => crossEncoder.score(query, c.text))\n);\nconst reranked = candidates\n  .map((c, i) => ({ ...c, score: scored[i] }))\n  .sort((a, b) => b.score - a.score)\n  .slice(0, 5);`,
+  terms:[
+    {term:"Cross-encoder", desc:"Scores a query and a candidate together in one pass, rather than comparing separately-computed embeddings.", detail:"This is precisely why cross-encoders can't be used for the initial search over a whole corpus — you'd need one forward pass per candidate document, which doesn't scale, whereas embeddings are precomputed once and compared cheaply.", code:`<span class="cm">// bi-encoder (embeddings): encode once, compare many times — scalable</span>\n<span class="cm">// cross-encoder: encode query+doc together, every time — accurate but slow</span>`},
+    {term:"Two-stage retrieval", desc:"Fast approximate search narrows candidates; a slower precise model reranks them.", detail:"This pattern shows up constantly in search systems generally, not just RAG — it's the standard way to combine 'search millions of items' with 'be very precise about the top handful'.", code:`const stage1 = await fastApproximateSearch(query, { topK: 50 });\nconst stage2 = await slowPreciseRerank(query, stage1, { topK: 5 });`}
+  ]
+},
+{ id:'ai-hallucination', title:'RAG: hallucination causes & mitigation', animate:'hallucination',
+  lede:"Hallucination isn't a single bug with a single fix — it has several distinct causes, each needing a different mitigation.",
+  steps:[
+    "<b>Cause — insufficient/irrelevant context</b>: if retrieval didn't surface the right chunks, the model may fill the gap with plausible-sounding but unsupported content rather than saying it doesn't know.",
+    "<b>Cause — model overconfidence</b>: LLMs are trained to produce fluent, confident-sounding text, which doesn't correlate with actual certainty — a wrong answer often reads exactly as confidently as a right one.",
+    "<b>Cause — instruction-following gaps</b>: even with perfect context, a model can drift from 'answer using only this context' toward blending in its own training knowledge, especially on topics it 'knows' well.",
+    "<b>Mitigation — grounding</b>: explicit prompt instructions to answer only from provided context, paired with genuinely sufficient, relevant context in the first place (a retrieval-quality problem, not just a prompting one).",
+    "<b>Mitigation — citations</b>: requiring the model to cite which retrieved chunk supports each claim makes fabrication harder to do convincingly, and easy to spot — unsupported claims simply have no citation.",
+    "<b>Mitigation — refusal thresholds</b>: if retrieval confidence (similarity scores) falls below a threshold, have the system explicitly respond 'I don't have enough information' instead of forcing an answer from weak context.",
+    "<b>Mitigation — faithfulness checks</b>: a separate evaluation pass (sometimes another LLM call) can compare the generated answer against retrieved context and flag unsupported claims before the response reaches the user.",
+    "No single mitigation eliminates hallucination completely — production systems layer several of these together, aiming to reduce frequency and severity, not achieve a guaranteed zero."
+  ],
+  code:`const topResult = retrievedChunks[0];\nif (topResult.score < REFUSAL_THRESHOLD) {\n  return "I don't have enough information to answer that confidently.";\n}\n\nconst prompt = \`Answer using ONLY the context. Cite the source chunk for each claim.\\n\\nContext:\\n\${format(retrievedChunks)}\\n\\nQuestion: \${question}\`;`,
+  terms:[
+    {term:"Refusal threshold", desc:"A minimum retrieval confidence score below which the system declines to answer.", detail:"Setting this threshold is itself a trade-off — too low and weak answers still get generated; too high and the system refuses questions it could actually have answered reasonably well.", code:`const bestScore = topChunks[0]?.score ?? 0;\nif (bestScore < 0.65) return refusalResponse();  <span class="cm">// threshold tuned via evaluation, not guessed</span>`},
+    {term:"Citation requirement", desc:"Forcing the model to attribute each claim to a specific retrieved source.", detail:"Beyond deterring fabrication, citations give users a way to verify the answer themselves — which matters as much for trust as for accuracy, especially in compliance-sensitive domains.", code:`<span class="cm">// prompt instruction</span>\n"For every factual claim, include [source: chunk_id] immediately after it."`}
+  ]
+},
+{ id:'ai-gateway-why', title:'Gateway: why it exists', animate:'gatewaychoke',
+  lede:"A gateway starts as a solution to one concrete pain — attributing LLM cost per team — and grows into the single choke point for everything cross-cutting.",
+  steps:[
+    "<b>The originating problem: cost attribution</b> — once multiple teams/services call an LLM provider directly, nobody can answer 'which team is spending what' without every team independently instrumenting their own calls.",
+    "The fix is architectural, not a spreadsheet: route <i>all</i> LLM calls through one internal service (the gateway) sitting between callers and the actual provider(s) — cost and usage get tracked in exactly one place.",
+    "Once you have a single choke point, it becomes the natural place for <b>auth</b> (which team/service can call which model), <b>rate limiting</b> (per-team quotas, so one team can't starve others), and <b>routing</b> (which provider/model handles a given request).",
+    "It also becomes the natural place for cross-cutting concerns that would otherwise be duplicated in every calling service: PII redaction, caching, provider fallback, and structured logging of every prompt/response for audit.",
+    "The gateway pattern trades a small amount of added latency (one extra network hop) for centralized control — for most LLM use cases, that hop is negligible next to the LLM call's own latency.",
+    "A gateway also decouples callers from the provider — switching providers, or adding a new one, only changes the gateway's routing logic; calling services don't need to change at all.",
+    "This mirrors a broader backend pattern — an API gateway plays the same role for internal/external APIs generally; an LLM gateway is that same idea applied specifically to model calls."
+  ],
+  code:`app.post('/gateway/complete', async (req, res) => {\n  await authenticate(req);                 <span class="cm">// who is this, are they allowed?</span>\n  await checkRateLimit(req.team);           <span class="cm">// per-team quota</span>\n  const redacted = redactPII(req.body.prompt);\n  const response = await routeToProvider(redacted, req.team);\n  await logUsage(req.team, response.tokenCount);  <span class="cm">// the whole point — attribution</span>\n  res.json(response);\n});`,
+  terms:[
+    {term:"Choke point pattern", desc:"Routing all traffic of a kind through one service to centralize cross-cutting concerns.", detail:"The trade-off worth naming explicitly: a choke point is also a single point of failure and a latency add — its value has to outweigh that, which for cost attribution/auth/redaction across many teams, it generally does.", code:`<span class="cm">// before: every service calls the provider directly — no shared visibility</span>\n<span class="cm">// after: every service calls the gateway — one place to see, control, and log everything</span>`},
+    {term:"Cost attribution", desc:"Tracking spend/usage per team or user by tagging every request.", detail:"This only works if the tag is attached at the earliest possible point (auth) and carried through every downstream log — attribution bolted on after the fact is far less reliable than attribution built into the request path from day one.", code:`await logUsage({ team: req.team, model: response.model, tokens: response.tokenCount, cost: response.tokenCount * PRICE_PER_TOKEN });`}
+  ]
+},
+{ id:'ai-gateway-redaction', title:'Gateway: PII redaction & the streaming problem', animate:'redactstream',
+  lede:"Redaction sounds simple until you have to do it on a token stream instead of a complete string — this is the single most important nuance to be ready to explain.",
+  steps:[
+    "PII redaction has to happen on <b>both sides</b>: input (scrubbing sensitive data out of the prompt before it reaches the model/logs) and output (catching PII the model might generate or echo back, even if the input was clean).",
+    "On a <b>non-streaming</b> response, redaction is straightforward — the full response text exists before it's returned, so you can run a regex/NER pass over the complete string and replace matches before sending it on.",
+    "<b>Streaming breaks this</b>: tokens arrive one at a time, and sensitive patterns (an email address, a phone number) can be split across multiple token boundaries — a naive per-token check will miss a pattern only complete once several tokens are combined.",
+    "<b>Fix 1 — token-buffer redaction</b>: maintain a small rolling buffer of recent tokens, run the redaction check against the buffer's combined text, and only flush tokens once they're far enough back that no pattern could still be forming across the boundary.",
+    "<b>Fix 2 — delayed flush</b>: hold back emitting the last N characters until enough new content has arrived to confirm whether a sensitive pattern is completing right at that boundary — a small, mostly-imperceptible latency increase in exchange for correctness.",
+    "Both fixes share the same core idea: <b>you can't make a redaction decision on a token in isolation</b> — you need surrounding context, which means streaming redaction inherently can't be zero-latency even though streaming exists to minimize latency.",
+    "A pattern spanning an unusually large amount of buffered content is the edge case worth naming explicitly — most implementations cap the buffer size and document that trade-off rather than pretending it's solved perfectly."
+  ],
+  code:`class StreamRedactor {\n  buffer = '';\n  flush(newToken, emit) {\n    this.buffer += newToken;\n    if (this.buffer.length > FLUSH_THRESHOLD) {\n      const safeToEmit = this.buffer.slice(0, -HOLDBACK_CHARS);\n      const redacted = redactPII(safeToEmit);   <span class="cm">// check against the BUFFER, not one token</span>\n      emit(redacted);\n      this.buffer = this.buffer.slice(-HOLDBACK_CHARS);  <span class="cm">// keep the tail for the next check</span>\n    }\n  }\n}`,
+  terms:[
+    {term:"Token-buffer redaction", desc:"Checking recent tokens together, not one at a time, before releasing them downstream.", detail:"The buffer size is a direct latency/safety trade-off — bigger buffer catches longer patterns but delays every token more; smaller buffer feels faster but risks missing a pattern that spans more tokens than the buffer holds.", code:`<span class="cm">// email split across 3 tokens: "jo", "hn@examp", "le.com"</span>\n<span class="cm">// checking each alone finds nothing; checking the combined buffer finds the full email</span>`},
+    {term:"Delayed flush", desc:"Holding back the most recent characters until they're confirmed safe to release.", detail:"This is the same fundamental trade as TCP's Nagle algorithm or any buffering strategy — trading a small, bounded latency for correctness, rather than optimizing for zero latency at the cost of occasionally being wrong.", code:`<span class="cm">// only emit content once it's more than HOLDBACK_CHARS behind the stream's live edge</span>\nconst safe = buffer.slice(0, buffer.length - HOLDBACK_CHARS);`}
+  ]
+},
+{ id:'ai-gateway-fallback', title:'Gateway: provider fallback & multi-model routing', animate:'fallback',
+  lede:"When your primary model provider has a bad day, the gateway is what decides whether your users notice at all.",
+  steps:[
+    "<b>Failover triggers</b>: typically a combination of HTTP error codes (5xx, timeouts) and a <b>circuit breaker</b> tripping after repeated failures — not 'the first request failed, switch immediately'.",
+    "A single transient failure shouldn't trigger failover on its own — that's what retries-with-backoff are for; failover is for <b>sustained</b> problems, the circuit-breaker pattern applied specifically to LLM providers.",
+    "<b>Avoiding cascading retries</b> is critical: if every failed request against Provider A immediately retries against Provider B, and B is also degraded (or gets overwhelmed by the sudden shift), you can take down the fallback too — same backoff/jitter/circuit-breaker discipline as any resilience pattern.",
+    "<b>Multi-model routing</b> can also be a deliberate cost choice, not just a failure response — routing cheaper/faster models to simple requests and reserving an expensive, capable model for complex ones, independent of any failure.",
+    "Fallback needs to account for <b>model differences</b>, not just availability — a fallback model may have a different context window or different output tendencies, so a naive 'just swap the endpoint' fallback can silently degrade quality even when it 'succeeds'.",
+    "Requests that already partially streamed tokens from a now-failing provider are a genuine edge case — restart the whole request against the fallback (a visible stutter/reset) or fail that individual request cleanly? Both are defensible; being consistent matters more than which one.",
+    "Logging <i>which</i> provider actually served each request is essential — without it, debugging why one response looked different, or measuring per-provider reliability, becomes guesswork."
+  ],
+  code:`async function callWithFallback(prompt) {\n  if (!primaryBreaker.isOpen()) {\n    try {\n      const res = await callProvider('primary', prompt);\n      primaryBreaker.recordSuccess();\n      return { ...res, provider: 'primary' };\n    } catch (err) {\n      primaryBreaker.recordFailure();  <span class="cm">// may open the circuit for future requests</span>\n    }\n  }\n  const res = await callProvider('fallback', prompt);  <span class="cm">// separate breaker, own backoff</span>\n  return { ...res, provider: 'fallback' };\n}`,
+  terms:[
+    {term:"Failover trigger", desc:"The condition that causes traffic to switch from primary to a fallback provider.", detail:"Good triggers look at sustained failure rate over a rolling window, not a single data point — a threshold like '50% of the last 20 requests failed' avoids flapping on brief, isolated blips.", code:`if (recentFailureRate('primary', { window: 20 }) > 0.5) {\n  breaker.open();\n}`},
+    {term:"Cascading retry risk", desc:"Retries against a fallback amplifying load right when it's least able to absorb it.", detail:"This is a real production incident pattern, not a theoretical one — a struggling secondary provider can go from 'slightly degraded' to 'fully down' the moment 100% of traffic that was on the primary suddenly retries against it at once.", code:`<span class="cm">// bad: instant, unlimited retry against fallback on every primary failure</span>\n<span class="cm">// better: fallback calls still respect their own backoff + circuit breaker</span>`}
+  ]
+},
+{ id:'ai-gateway-cache', title:'Gateway: caching & cost attribution', animate:'semanticcache',
+  lede:"LLM calls are expensive and slow enough that caching pays off fast — but caching prompts correctly is trickier than caching typical API responses.",
+  steps:[
+    "<b>Exact-match caching</b>: identical prompt + parameters → return the cached response directly, skipping the model call — simple, but only helps when the exact same request repeats, which is rare for open-ended chat.",
+    "<b>Semantic caching</b> goes further: embed the incoming prompt, and if it's similar enough (cosine similarity above a threshold) to a previously cached prompt, return that cached response — catching paraphrased-but-equivalent requests exact-match would miss.",
+    "Semantic caching has a real correctness risk — too loose a similarity threshold returns a <i>wrong</i> cached answer for a subtly different question; the threshold needs deliberate tuning and evaluation, not a guessed default.",
+    "<b>Cache-key design</b> needs to include everything that affects the output, not just the prompt text — model version, temperature/sampling parameters, and system prompt version all belong in the key, or you'll serve a cached response that doesn't match the current configuration.",
+    "<b>Per-team/per-user cost attribution</b> means tagging every request (cached or not) with who initiated it, then aggregating token usage and cost by that tag — exactly the problem that motivated building the gateway in the first place.",
+    "A cache hit should still be logged for usage tracking, even though it didn't cost a real model call — otherwise usage dashboards undercount actual traffic, even while correctly reflecting real provider spend.",
+    "Usage tracking data is also what makes rate limiting and quota enforcement possible per team — without it, 'team X gets 1000 requests/day' has no way to actually be measured or enforced."
+  ],
+  code:`async function getCachedOrCall(prompt, config) {\n  const promptVector = await embed(prompt);\n  const cached = await semanticCache.findSimilar(promptVector, {\n    threshold: 0.95,\n    filterKey: { model: config.model, systemPromptVersion: config.systemPromptVersion }\n  });\n  if (cached) { await logUsage(config.team, { cacheHit: true }); return cached.response; }\n\n  const response = await callProvider(prompt, config);\n  await semanticCache.store(promptVector, response, config);\n  await logUsage(config.team, { cacheHit: false, tokens: response.tokenCount });\n  return response;\n}`,
+  terms:[
+    {term:"Semantic caching", desc:"Serving a cached response for a prompt that's similar (not identical) to a prior one.", detail:"The similarity threshold is the single most important tuning knob — too aggressive and users get answers to a question slightly different from what they asked, which is worse than a cache miss.", code:`<span class="cm">// "what's our refund policy?" and "how do refunds work?" —</span>\n<span class="cm">// different text, similar enough embeddings to hit the same cache entry</span>`},
+    {term:"Cache-key design", desc:"Everything that affects the output must be part of what determines a cache hit.", detail:"A cache keyed on prompt text alone will confidently return a stale response after a system prompt update or model version bump — the bug is invisible until someone notices answers 'feel wrong' after a deploy.", code:`const cacheKey = { promptVector, model: 'claude-sonnet', temperature: 0.7, systemPromptVersion: 'v3' };`}
+  ]
+},
+{ id:'ai-transport', title:'Streaming: WebSockets vs. SSE vs. long polling', animate:'transportcompare',
+  lede:"Three different ways to get real-time-ish updates from server to client, each with a real trade-off — not one obviously-correct default.",
+  steps:[
+    "<b>Long polling</b>: the client repeatedly requests, and the server holds the connection open until it has new data (or a timeout), then the client immediately re-requests — simple and works everywhere, but has real per-request overhead and isn't truly real-time.",
+    "<b>Server-Sent Events (SSE)</b>: a single long-lived HTTP connection where the server pushes a stream of events to the client — built on plain HTTP, auto-reconnects natively in browsers, but is <b>one-way only</b> (server → client).",
+    "<b>WebSockets</b>: a persistent, full-duplex connection — both client and server can send messages at any time over the same connection, without HTTP request/response framing overhead per message.",
+    "For an LLM chatbot specifically, the traffic is naturally bidirectional: tokens streaming server→client, but also things like a 'stop generation' signal or typing indicators client→server — this is what tips the choice toward WebSockets over SSE.",
+    "SSE would still work for the token-streaming half alone, and is simpler to operate (plain HTTP, works through more infrastructure without special handling) — the deciding factor is specifically needing client→server signals mid-stream, not streaming itself.",
+    "WebSockets need more infrastructure awareness — load balancers need to support connection upgrades and hold them open (not just route stateless HTTP requests), and scaling horizontally needs a way to route a client back to the server holding its connection, or a shared layer between servers.",
+    "Long polling is rarely the right choice for something as latency-sensitive as token-by-token LLM output — its per-request round-trip overhead directly works against the point of streaming, which is showing partial output as fast as possible."
+  ],
+  code:`<span class="cm">// SSE — simple, one-way, great for token streaming alone</span>\nres.setHeader('Content-Type', 'text/event-stream');\nfor await (const token of llmStream) res.write(\`data: \${token}\\n\\n\`);\n\n<span class="cm">// WebSocket — bidirectional, needed for stop/interrupt signals mid-stream</span>\nws.on('message', (msg) => { if (msg === 'stop') abortController.abort(); });\nfor await (const token of llmStream) ws.send(token);`,
+  terms:[
+    {term:"Full-duplex", desc:"Both sides can send at any time over the same connection, independently.", detail:"This is the specific property SSE lacks and WebSockets have — a chatbot needing an in-band 'stop generating' signal while tokens are still streaming out is a textbook full-duplex requirement.", code:`<span class="cm">// SSE: server → client only, client needs a SEPARATE request to send anything back</span>\n<span class="cm">// WebSocket: both directions, same connection, no extra request needed</span>`},
+    {term:"SSE one-way limitation", desc:"Server-Sent Events only push from server to client; the client can't send over the same connection.", detail:"A common workaround is pairing SSE (server→client) with regular HTTP POST requests (client→server) for any signals needed — functionally similar to WebSockets but as two separate channels instead of one.", code:`<span class="cm">// client sends "stop" via a normal POST, not over the SSE connection itself</span>\nfetch('/stop-generation', { method: 'POST', body: JSON.stringify({ requestId }) });`}
+  ]
+},
+{ id:'ai-ws-lifecycle', title:'Streaming: backpressure & connection lifecycle', animate:'wsconnlifecycle',
+  lede:"A persistent connection isn't 'open and done' — it has a real lifecycle to manage, and a slow client can still cause problems even over a fast server.",
+  steps:[
+    "A WebSocket's lifecycle: <b>connecting</b> → <b>open</b> (actively sending/receiving) → <b>closing</b> (graceful shutdown handshake) → <b>closed</b> — code should handle all four states explicitly, not just assume 'open' forever.",
+    "<b>Backpressure applies to WebSockets too</b>, the same underlying concept as any Writable stream — <code>ws.send()</code> buffers internally if the client can't keep up, and unchecked sending can grow that buffer unbounded, exactly like ignoring backpressure on any other stream.",
+    "<code>bufferedAmount</code> exposes how much data is queued but not yet sent to the client — checking it before sending more (and pausing/slowing token emission if it's growing) is the WebSocket-specific way to respect backpressure.",
+    "<b>Heartbeats/pings</b> are necessary because TCP alone doesn't reliably detect a dead connection — periodic ping/pong lets the server detect and clean up connections whose client disappeared without a clean close, instead of holding resources for them indefinitely.",
+    "<b>Reconnection handling</b> matters on the client side — a dropped connection mid-generation needs a strategy: does the client reconnect and resume, or does the server need to support resuming a specific in-progress generation by ID?",
+    "On <b>graceful shutdown</b> (a server restart or scale-down), existing WebSocket connections need the same care as in-flight HTTP requests — send a close frame with a reason, giving clients a chance to reconnect elsewhere, rather than killing the process and letting connections drop silently.",
+    "At scale, tracking <i>which server</i> holds which client's connection becomes its own problem — routing a server-initiated message to the right server usually needs a shared layer (Redis pub/sub, or a dedicated connection-routing service) once there's more than one WebSocket server."
+  ],
+  code:`ws.on('open', () => {\n  const heartbeat = setInterval(() => ws.ping(), 30000);\n  ws.on('pong', () => { lastPong = Date.now(); });     <span class="cm">// track liveness</span>\n  ws.on('close', () => clearInterval(heartbeat));\n});\n\nfunction sendToken(ws, token) {\n  if (ws.bufferedAmount > MAX_BUFFER) return false;     <span class="cm">// backpressure — slow down</span>\n  ws.send(token);\n  return true;\n}`,
+  terms:[
+    {term:"bufferedAmount backpressure", desc:"Checking the WebSocket's internal send buffer before pushing more data.", detail:"This is functionally identical to checking a Writable stream's write() return value — same underlying problem (a slow consumer), same fix (check before sending, pause if needed), just a different-named API on a different object.", code:`if (ws.bufferedAmount > 1_000_000) {\n  <span class="cm">// pause emitting new tokens until the client catches up</span>\n  await new Promise(r => setTimeout(r, 50));\n}`},
+    {term:"Heartbeat / ping-pong", desc:"Periodic liveness checks to detect a dead connection TCP alone won't reliably surface.", detail:"Without heartbeats, a client that lost network connectivity abruptly (phone goes into a tunnel, laptop sleeps) can leave a 'zombie' connection open on the server indefinitely, quietly consuming memory and connection slots.", code:`setInterval(() => {\n  if (Date.now() - lastPong > 60000) ws.terminate();  <span class="cm">// no pong in 60s — assume dead</span>\n}, 30000);`}
+  ]
+}
+];
+
+
 /* ---------- animation templates ---------- */
 const animations = {
   stack: '<div class="stack-anim"><div></div><div></div><div></div></div>',
@@ -1176,16 +1498,29 @@ const animations = {
   circuitbreaker: '<div class="cb2-anim"><div class="cb2-switch"><div class="cb2-arm"></div></div><div class="cb2-label">circuit</div></div>',
   captriangle: '<div class="cap-anim"><div class="cap-vertex c">C</div><div class="cap-vertex a">A</div><div class="cap-vertex p">P</div></div>',
   observability: '<div class="obs-anim"><div class="obs-lens l1">logs</div><div class="obs-lens l2">metrics</div><div class="obs-lens l3">traces</div><div class="obs-dash">dashboard</div></div>',
-  apidesign: '<div class="api-anim"><div class="api-url">GET /v2/orders<span class="api-cursor2"></span></div><div class="api-status ok">200</div></div>'
+  apidesign: '<div class="api-anim"><div class="api-url">GET /v2/orders<span class="api-cursor2"></span></div><div class="api-status ok">200</div></div>',
+  ragpipeline: '<div class="rag-anim"><div class="rag-stage s1">Ingest</div><div class="rag-arrow">→</div><div class="rag-stage s2">Chunk</div><div class="rag-arrow">→</div><div class="rag-stage s3">Embed</div><div class="rag-arrow">→</div><div class="rag-stage s4">Retrieve</div><div class="rag-arrow">→</div><div class="rag-stage s5">Generate</div></div>',
+  chunking: '<div class="chunk-anim"><div class="chunk-bar"></div><div class="chunk-piece p1"></div><div class="chunk-piece p2"></div><div class="chunk-piece p3"></div><div class="chunk-overlap o1"></div><div class="chunk-overlap o2"></div></div>',
+  vectorspace: '<div class="vec-anim"><i class="vec-dot d1"></i><i class="vec-dot d2"></i><i class="vec-dot d3"></i><i class="vec-dot d4"></i><div class="vec-line"></div></div>',
+  buildvsbuy: '<div class="bvb-anim"><div class="bvb-box managed">Managed<span>fast</span></div><div class="bvb-box custom">Custom<span>control</span></div></div>',
+  metricsplit: '<div class="ms-anim"><div class="ms-col ms-retrieval"><b>Retrieval</b><span>precision · recall · MRR</span></div><div class="ms-col ms-generation"><b>Generation</b><span>faithfulness · hallucination</span></div></div>',
+  rerank: '<div class="rr-anim"><div class="rr-item i1">3</div><div class="rr-item i2">1</div><div class="rr-item i3">2</div></div>',
+  hallucination: '<div class="hal-anim"><div class="hal-text">generated claim</div><div class="hal-anchor">citation ⚓</div></div>',
+  gatewaychoke: '<div class="gw-anim"><div class="gw-clients"><i></i><i></i><i></i></div><div class="gw-box">Gateway</div><div class="gw-providers"><i></i><i></i></div></div>',
+  redactstream: '<div class="rs-anim"><div class="rs-tokens"><span>jo</span><span>hn@examp</span><span>le.com</span></div><div class="rs-filter">buffer + redact</div></div>',
+  fallback: '<div class="fb-anim"><div class="fb-node primary">Primary ✕</div><div class="fb-arrow">→</div><div class="fb-node fallback">Fallback ✓</div></div>',
+  semanticcache: '<div class="sc-anim"><div class="sc-query">"how do refunds work?"</div><div class="sc-arrow">≈</div><div class="sc-cached">cached: "refund policy?"</div></div>',
+  transportcompare: '<div class="tc-anim"><div class="tc-chip poll">poll</div><div class="tc-chip sse">SSE →</div><div class="tc-chip ws">WS ⇄</div></div>',
+  wsconnlifecycle: '<div class="wl-anim"><div class="wl-track"><span>connecting</span><span>open</span><span>closing</span><span>closed</span></div></div>'
 };
 
 /* ---------- render ---------- */
 let currentTab = 'js';
 let currentIndex = 0;
 
-function topicsFor(tab){ return tab==='js' ? jsTopics : tab==='node' ? nodeTopics : tab==='ts' ? tsTopics : sdTopics; }
-function tabLabel(tab){ return tab==='js' ? 'JavaScript engine' : tab==='node' ? 'Node.js runtime' : tab==='ts' ? 'TypeScript' : 'System Design'; }
-const tabOrder = ['js','node','ts','sd'];
+function topicsFor(tab){ return tab==='js' ? jsTopics : tab==='node' ? nodeTopics : tab==='ts' ? tsTopics : tab==='sd' ? sdTopics : aiTopics; }
+function tabLabel(tab){ return tab==='js' ? 'JavaScript engine' : tab==='node' ? 'Node.js runtime' : tab==='ts' ? 'TypeScript' : tab==='sd' ? 'System Design' : 'AI Platform'; }
+const tabOrder = ['js','node','ts','sd','ai'];
 
 function renderSidebar(){
   const topics = topicsFor(currentTab);
@@ -1244,6 +1579,7 @@ function renderTabs(){
   document.getElementById('tabNode').classList.toggle('active', currentTab==='node');
   document.getElementById('tabTS').classList.toggle('active', currentTab==='ts');
   document.getElementById('tabSD').classList.toggle('active', currentTab==='sd');
+  document.getElementById('tabAI').classList.toggle('active', currentTab==='ai');
 }
 
 function renderFooter(){
@@ -1269,6 +1605,7 @@ document.getElementById('tabJS').onclick = ()=>{ currentTab='js'; currentIndex=0
 document.getElementById('tabNode').onclick = ()=>{ currentTab='node'; currentIndex=0; renderAll(); };
 document.getElementById('tabTS').onclick = ()=>{ currentTab='ts'; currentIndex=0; renderAll(); };
 document.getElementById('tabSD').onclick = ()=>{ currentTab='sd'; currentIndex=0; renderAll(); };
+document.getElementById('tabAI').onclick = ()=>{ currentTab='ai'; currentIndex=0; renderAll(); };
 
 document.getElementById('prevSec').onclick = ()=>{
   if(currentIndex>0){ currentIndex--; }
