@@ -271,7 +271,7 @@ html[data-theme="dark"] .mode.on{background:var(--bg);color:var(--text)}
   background:var(--accentbg);color:var(--accent);vertical-align:1px;
 }
 
-main{padding:40px 40px 100px;max-width:calc(var(--maxw) + 80px)}
+main{padding:40px 40px 100px;max-width:calc(var(--maxw) + 80px);margin-inline:auto;width:100%}
 @media (max-width:640px){main{padding:26px 16px 60px}}
 
 /* ================= CONTENT ================= */
@@ -2410,8 +2410,8 @@ list.addEventListener('click', (e) =&gt; {
   ]
 },
 
-{ id:'demo-js', group:'Interactive', title:'Live demo: stack, heap & the loop', type:'demo', demoGroup:'js',
-  lede:"Step through real code and watch the call stack, heap allocations and the microtask/macrotask queues move together." }
+{ id:'demo-js', group:'Interactive', title:'Live demo: the engine, step by step', type:'demo', demoGroup:'js',
+  lede:"Step-through walkthroughs of the mechanisms behind this track — the call stack and heap, closures in loops, <code>this</code> binding, microtask ordering, async/await suspension, generators, garbage collection, and the promise combinators." }
 ];
 
 
@@ -3290,8 +3290,8 @@ npm ci --ignore-scripts`,
   ]
 },
 
-{ id:'demo-node', group:'Interactive', title:'Live demo: event loop, thread pool & blocking', type:'demo', demoGroup:'node',
-  lede:"Step through scripts that fire API requests, file reads and CPU work, and watch exactly which subsystem — kernel, thread pool, or queue — handles each one." }
+{ id:'demo-node', group:'Interactive', title:'Live demo: the runtime, step by step', type:'demo', demoGroup:'node',
+  lede:"Watch exactly which subsystem — kernel, thread pool, or queue — handles each operation: the full event loop, <code>nextTick</code> starvation, blocking sync I/O, unhandled rejections, CPU-bound handlers, <code>setTimeout</code> vs <code>setImmediate</code>, thread-pool saturation, stream backpressure, and EventEmitter." }
 ];
 
 
@@ -5761,6 +5761,184 @@ js: [
      note:"then#2 runs and logs <b>'p2'</b>. The microtask queue is finally empty."},
     {line:-1, phase:'macro', out:['a','b','p1','p2','timeout'], cols:{stack:[Fd('stack','timeout callback')]},
      note:"<b>Only now</b> does the loop reach the macrotask — logs <b>'timeout'</b>, last. Final order: a, b, p1, p2, timeout."}
+  ]},
+
+{ key:'asyncawait', label:'async/await suspension & resumption',
+  phases:JS_PHASES,
+  cols:[
+    {k:'stack', label:'Call stack',            c:'accent'},
+    {k:'susp',  label:'Suspended async frames', c:'node'},
+    {k:'micro', label:'Microtask queue',        c:'micro'},
+    {k:'macro', label:'Pending I/O',            c:'js'}
+  ],
+  takeaway:"An async function runs <b>synchronously up to its first <code>await</code></b>, then suspends and resumes as a microtask. It always returns a promise — so the caller continues immediately.",
+  code:[
+    `async function load(id) {`,
+    `  console.log(<span class="str">'1: entering load'</span>);`,
+    `  const user = <span class="kw">await</span> fetchUser(id);   <span class="cm">// suspends HERE</span>`,
+    `  console.log(<span class="str">'4: resumed with user'</span>);`,
+    `  return user;`,
+    `}`,
+    ``,
+    `const p = load(7);       <span class="cm">// returns a promise immediately</span>`,
+    `console.log(<span class="str">'2: after calling load'</span>);`,
+    `p.then(u =&gt; console.log(<span class="str">'5: then'</span>, u));`,
+    `console.log(<span class="str">'3: end of script'</span>);`
+  ],
+  steps:[
+    {line:7, phase:'run', out:[], cols:{stack:[Fd('stack','Global'),Fd('stack','load(7)')]},
+     note:"Calling an <code>async</code> function does <b>not</b> defer anything. The body starts executing immediately, on the current stack."},
+    {line:1, phase:'run', out:['1: entering load'], cols:{stack:[Fd('stack','Global'),Fd('stack','load(7)')]},
+     note:"Everything before the first <code>await</code> is ordinary synchronous code — logs <b>'1: entering load'</b> right now."},
+    {line:2, phase:'run', out:['1: entering load'], cols:{stack:[Fd('stack','Global')], susp:[Fd('heap','load(7)','paused at await')], macro:[Fd('macro','fetchUser(7) — in flight')]},
+     note:"<b>The <code>await</code> suspends the function.</b> Its frame pops off the stack and is parked; <code>fetchUser</code> is already running. <code>load()</code> has already returned a <i>pending promise</i> to its caller."},
+    {line:8, phase:'run', out:['1: entering load','2: after calling load'], cols:{stack:[Fd('stack','Global')], susp:[Fd('heap','load(7)','paused at await')], macro:[Fd('macro','fetchUser(7) — in flight')]},
+     note:"Control is back in the caller. <code>p</code> holds a pending promise — this is why an async function never blocks the code that called it."},
+    {line:9, phase:'run', out:['1: entering load','2: after calling load'], cols:{stack:[Fd('stack','Global')], susp:[Fd('heap','load(7)','paused at await')], macro:[Fd('macro','fetchUser(7) — in flight')]},
+     note:"<code>.then()</code> registers a reaction on that pending promise. Nothing is queued yet — the promise hasn't settled."},
+    {line:10, phase:'run', out:['1: entering load','2: after calling load','3: end of script'], cols:{stack:[Fd('stack','Global')], susp:[Fd('heap','load(7)','paused at await')], macro:[Fd('macro','fetchUser(7) — in flight')]},
+     note:"Last synchronous line. Note the log order so far: <b>1, 2, 3</b> — the middle of <code>load</code> hasn't run at all."},
+    {line:-1, phase:'idle', out:['1: entering load','2: after calling load','3: end of script'], cols:{susp:[Fd('heap','load(7)','paused at await')], micro:[Fd('micro','resume load() with user','← fetchUser resolved')]},
+     note:"Call stack empty. <code>fetchUser</code> resolves, and the <b>continuation of <code>load</code> is queued as a microtask</b> — not run directly by whatever resolved it."},
+    {line:3, phase:'micro', out:['1: entering load','2: after calling load','3: end of script','4: resumed with user'], cols:{stack:[Fd('stack','load(7) — resumed')], micro:[Fd('micro',"then → log('5: then')",'← just queued')]},
+     note:"The microtask runs: <code>load</code> resumes <b>where it left off</b>, with its local variables intact, and logs <b>'4'</b>. Returning resolves <code>p</code>, which queues the <code>.then</code> reaction."},
+    {line:9, phase:'micro', out:['1: entering load','2: after calling load','3: end of script','4: resumed with user','5: then {…}'], cols:{stack:[Fd('stack','then callback')]},
+     note:"The queue drains: the <code>.then</code> reaction runs and logs <b>'5'</b>. Final order: <b>1, 2, 3, 4, 5</b>."},
+    {line:-1, phase:'idle', out:['1: entering load','2: after calling load','3: end of script','4: resumed with user','5: then {…}'], cols:{},
+     note:"<b>Mental model:</b> <code>await</code> ≈ <code>yield</code>, and the runtime is a driver that calls <code>.next(value)</code> when the awaited promise settles. That's literally how Babel compiles it. Consequence: <code>await</code> on a plain value <i>still</i> costs one microtask tick."}
+  ]},
+
+{ key:'generator', label:'Generators: lazy execution & two-way channel',
+  phases:[
+    {k:'run',  label:'Caller running', c:'accent'},
+    {k:'gen',  label:'Generator body', c:'node'},
+    {k:'susp', label:'Suspended',      c:'micro'},
+    {k:'done', label:'Completed',      c:'sub'}
+  ],
+  cols:[
+    {k:'stack', label:'Call stack',        c:'accent'},
+    {k:'gen',   label:'Generator state',   c:'node'},
+    {k:'chan',  label:'Values in / out',   c:'micro'}
+  ],
+  takeaway:"Calling a generator function runs <b>none</b> of its body. Each <code>next()</code> resumes it until the next <code>yield</code>, and the argument to <code>next(v)</code> becomes the <i>result</i> of that yield — a two-way channel.",
+  code:[
+    `function* dialogue() {`,
+    `  console.log(<span class="str">'body starts'</span>);`,
+    `  const a = <span class="kw">yield</span> 1;`,
+    `  console.log(<span class="str">'received a ='</span>, a);`,
+    `  const b = <span class="kw">yield</span> 2;`,
+    `  return a + b;`,
+    `}`,
+    ``,
+    `const it = dialogue();`,
+    `console.log(<span class="str">'created — nothing has run'</span>);`,
+    `it.next();      <span class="cm">// → { value: 1, done: false }</span>`,
+    `it.next(10);    <span class="cm">// 10 becomes the value of "yield 1"</span>`,
+    `it.next(20);    <span class="cm">// → { value: 30, done: true }</span>`
+  ],
+  steps:[
+    {line:8, phase:'run', out:[], cols:{stack:[Fd('stack','Global')], gen:[Fd('heap','dialogue()','suspended at start')]},
+     note:"<code>dialogue()</code> returns an iterator object. <b>Not a single line of the body has executed</b> — this surprises people who put side effects before the first yield."},
+    {line:9, phase:'run', out:['created — nothing has run'], cols:{stack:[Fd('stack','Global')], gen:[Fd('heap','dialogue()','suspended at start')]},
+     note:"Confirmed: the log inside the body hasn't appeared, but the script's own log has."},
+    {line:10, phase:'gen', out:['created — nothing has run','body starts'], cols:{stack:[Fd('stack','Global'),Fd('stack','dialogue body')], gen:[Fd('node','running')], chan:[Fd('micro','next()','no value sent in')]},
+     note:"The first <code>next()</code> runs the body <b>from the top</b> until it hits a <code>yield</code>."},
+    {line:2, phase:'susp', out:['created — nothing has run','body starts'], cols:{stack:[Fd('stack','Global')], gen:[Fd('heap','suspended at "yield 1"','locals kept alive')], chan:[Fd('micro','out ← { value: 1, done: false }')]},
+     note:"<code>yield 1</code> hands <code>1</code> out and <b>suspends</b>. The frame's local variables stay alive on the heap, exactly like a closure — this is the machinery async/await is built on."},
+    {line:11, phase:'gen', out:['created — nothing has run','body starts','received a = 10'], cols:{stack:[Fd('stack','Global'),Fd('stack','dialogue body')], gen:[Fd('node','running')], chan:[Fd('micro','in → next(10)','becomes the value of "yield 1"')]},
+     note:"<b>The two-way part.</b> <code>next(10)</code> resumes the generator and the argument becomes the <i>result</i> of the suspended <code>yield</code> expression, so <code>a === 10</code>."},
+    {line:4, phase:'susp', out:['created — nothing has run','body starts','received a = 10'], cols:{stack:[Fd('stack','Global')], gen:[Fd('heap','suspended at "yield 2"','a = 10 retained')], chan:[Fd('micro','out ← { value: 2, done: false }')]},
+     note:"Suspends again at <code>yield 2</code>, with <code>a</code> preserved between resumptions."},
+    {line:12, phase:'done', out:['created — nothing has run','body starts','received a = 10'], cols:{stack:[Fd('stack','Global')], gen:[Fd('heap','completed')], chan:[Fd('micro','in → next(20)'),Fd('micro','out ← { value: 30, done: true }')]},
+     note:"<code>next(20)</code> sets <code>b = 20</code>, the body returns <code>a + b</code>, and the result comes out as <code>{ value: 30, done: true }</code>."},
+    {line:-1, phase:'done', out:['created — nothing has run','body starts','received a = 10','further next() → { value: undefined, done: true }'], cols:{gen:[Fd('heap','completed — single use')]},
+     note:"<b>Generators are single-use.</b> Every further <code>next()</code> returns <code>{ undefined, true }</code>. Make the <i>class</i> iterable (a method returning a fresh generator) if you need to iterate twice. Also: <code>it.return()</code> runs <code>finally</code> blocks — which is where resource cleanup belongs when a consumer <code>break</code>s early."}
+  ]},
+
+{ key:'gc', label:'Closures, reachability & a real memory leak',
+  phases:[
+    {k:'run',   label:'Running',   c:'accent'},
+    {k:'mark',  label:'Mark',      c:'micro'},
+    {k:'sweep', label:'Sweep',     c:'js'},
+    {k:'done',  label:'Collected', c:'node'}
+  ],
+  cols:[
+    {k:'stack', label:'Call stack',   c:'accent'},
+    {k:'roots', label:'GC roots',     c:'micro'},
+    {k:'heap',  label:'Heap objects', c:'node'}
+  ],
+  takeaway:"Garbage collection is about <b>reachability from roots</b>, not scope. A listener that closes over a large object keeps it alive forever — and dropping the listener isn't enough if another reference remains.",
+  code:[
+    `function attach() {`,
+    `  const bigData = new Array(1_000_000);        <span class="cm">// ~8MB</span>`,
+    `  const handler = () =&gt; console.log(bigData.length);`,
+    `  window.addEventListener(<span class="str">'resize'</span>, handler);`,
+    `  return handler;`,
+    `}`,
+    ``,
+    `let h = attach();`,
+    ``,
+    `window.removeEventListener(<span class="str">'resize'</span>, h);`,
+    `h = null;                                      <span class="cm">// drop the last reference</span>`
+  ],
+  steps:[
+    {line:7, phase:'run', out:[], cols:{stack:[Fd('stack','Global'),Fd('stack','attach()')], roots:[Fd('micro','global scope'),Fd('micro','current call stack')]},
+     note:"Roots are the things GC starts from: the global object, the active call stack, and anything held by the host (DOM listeners, timers)."},
+    {line:1, phase:'run', out:[], cols:{stack:[Fd('stack','Global'),Fd('stack','attach()')], roots:[Fd('micro','global scope'),Fd('micro','attach() frame')], heap:[Fd('heap','bigData','~8 MB')]},
+     note:"<code>bigData</code> is allocated on the heap. Right now it's reachable only through the running <code>attach()</code> frame."},
+    {line:3, phase:'run', out:[], cols:{stack:[Fd('stack','Global'),Fd('stack','attach()')], roots:[Fd('micro','global scope'),Fd('micro','attach() frame'),Fd('micro',"window 'resize' listener",'← a root!')], heap:[Fd('heap','handler closure'),Fd('heap','bigData','~8 MB')]},
+     note:"<b>The critical moment.</b> Registering the listener stores <code>handler</code> on a host object — <code>window</code> is a root, so the closure is now rooted, and the closure references <code>bigData</code>."},
+    {line:-1, phase:'run', out:[], cols:{stack:[Fd('stack','Global')], roots:[Fd('micro','global scope'),Fd('micro',"window 'resize' listener"),Fd('micro','global h')], heap:[Fd('heap','handler closure'),Fd('heap','bigData','~8 MB — still reachable')]},
+     note:"<code>attach()</code> returns and its frame pops. Scope is gone, but <b>reachability isn't</b>: two separate root paths still lead to <code>bigData</code>."},
+    {line:-1, phase:'mark', out:[], cols:{roots:[Fd('micro',"window 'resize' listener"),Fd('micro','global h')], heap:[Fd('node','handler closure','MARKED'),Fd('node','bigData','MARKED')]},
+     note:"<b>Mark phase.</b> The collector walks every reference from every root. Both objects are marked reachable."},
+    {line:-1, phase:'sweep', out:['heap after GC: ~8 MB retained'], cols:{roots:[Fd('micro',"window 'resize' listener"),Fd('micro','global h')], heap:[Fd('bad','bigData','~8 MB — NOT freed')]},
+     note:"<b>Sweep phase frees nothing.</b> This is the leak: an 8MB array retained by a listener nobody remembers registering. In a SPA that runs <code>attach()</code> on every route change, it compounds."},
+    {line:9, phase:'run', out:['heap after GC: ~8 MB retained'], cols:{roots:[Fd('micro','global h','← still holds handler')], heap:[Fd('bad','handler closure','still reachable'),Fd('bad','bigData','still ~8 MB')]},
+     note:"<code>removeEventListener</code> drops <i>one</i> root path — but <code>h</code> is a global variable, and it's also a root. <b>Removing the listener alone does not free it.</b>"},
+    {line:10, phase:'run', out:['heap after GC: ~8 MB retained'], cols:{roots:[Fd('micro','global scope')], heap:[Fd('heap','handler closure','unreachable'),Fd('heap','bigData','unreachable')]},
+     note:"Now the last reference is dropped. Both objects are <i>eligible</i> — note that <code>h = null</code> doesn't free anything itself, it only removes the edge."},
+    {line:-1, phase:'mark', out:['heap after GC: ~8 MB retained'], cols:{roots:[Fd('micro','global scope')], heap:[Fd('heap','handler closure','not marked'),Fd('heap','bigData','not marked')]},
+     note:"Next mark phase: no path from any root reaches either object, so neither is marked. Note this also handles cycles — the closure and array could point at each other and it would make no difference."},
+    {line:-1, phase:'done', out:['heap after GC: ~8 MB retained','heap after GC: ~0 MB retained'], cols:{roots:[Fd('micro','global scope')]},
+     note:"<b>Swept and freed.</b> How you'd find this in production: two heap snapshots under load, Comparison view, sort by <b>retained size</b>, and follow the retainer path — which would point straight at the listener."}
+  ]},
+
+{ key:'combinators', label:'all vs allSettled: fail-fast & no cancellation',
+  phases:[
+    {k:'start', label:'t = 0',      c:'accent'},
+    {k:'t100',  label:'t = 100ms',  c:'tick'},
+    {k:'t300',  label:'t = 300ms',  c:'js'},
+    {k:'t500',  label:'t = 500ms',  c:'node'},
+    {k:'done',  label:'Summary',    c:'sub'}
+  ],
+  cols:[
+    {k:'ops',     label:'Operations in flight',      c:'accent'},
+    {k:'all',     label:'Promise.all',               c:'js'},
+    {k:'settled', label:'Promise.allSettled',        c:'node'}
+  ],
+  takeaway:"<code>all</code> rejects on the first failure and discards everything else; <code>allSettled</code> reports every outcome. <b>Neither cancels the losers</b> — that needs an AbortController.",
+  code:[
+    `const a = slowOk(300);      <span class="cm">// fulfils at 300ms</span>`,
+    `const b = failFast(100);    <span class="cm">// REJECTS at 100ms</span>`,
+    `const c = slowOk(500);      <span class="cm">// fulfils at 500ms</span>`,
+    ``,
+    `await Promise.all([a, b, c]);         <span class="cm">// fail fast</span>`,
+    `await Promise.allSettled([a, b, c]);  <span class="cm">// waits for all</span>`
+  ],
+  steps:[
+    {line:2, phase:'start', out:['t=0: all three operations started'], cols:{ops:[Fd('stack','a — pending'),Fd('stack','b — pending'),Fd('stack','c — pending')], all:[Fd('macro','pending')], settled:[Fd('heap','pending')]},
+     note:"<b>Promises are eager.</b> All three operations began the moment they were created — before either combinator was called. The combinators only decide how to <i>wait</i>."},
+    {line:4, phase:'t100', out:['t=0: all three operations started','t=100: b rejected'], cols:{ops:[Fd('stack','a — pending'),Fd('bad','b — REJECTED'),Fd('stack','c — pending')], all:[Fd('bad','REJECTED','with b\'s error')], settled:[Fd('heap','pending','still waiting')]},
+     note:"<b><code>Promise.all</code> settles immediately</b> — fail fast. You get <code>b</code>'s error and nothing else: no indication of which promise failed beyond the error itself, and no access to the other results."},
+    {line:4, phase:'t100', out:['t=0: all three operations started','t=100: b rejected'], cols:{ops:[Fd('stack','a — STILL RUNNING'),Fd('bad','b — rejected'),Fd('stack','c — STILL RUNNING')], all:[Fd('bad','already settled')], settled:[Fd('heap','pending')]},
+     note:"<b>Nothing was cancelled.</b> <code>a</code> and <code>c</code> keep consuming connections, memory and downstream capacity — <code>all</code> simply stopped listening. This is the most-missed detail in the topic."},
+    {line:5, phase:'t300', out:['t=0: all three operations started','t=100: b rejected','t=300: a fulfilled (discarded by all)'], cols:{ops:[Fd('node','a — fulfilled'),Fd('bad','b — rejected'),Fd('stack','c — pending')], all:[Fd('bad','settled at 100ms','a\'s value is thrown away')], settled:[Fd('heap','1 of 3 recorded')]},
+     note:"<code>a</code> fulfils, but <code>all</code> settled 200ms ago — its value is discarded. <code>allSettled</code> records it and keeps waiting."},
+    {line:5, phase:'t500', out:['t=0: all three operations started','t=100: b rejected','t=300: a fulfilled','t=500: c fulfilled'], cols:{ops:[Fd('node','a — fulfilled'),Fd('bad','b — rejected'),Fd('node','c — fulfilled')], all:[Fd('bad','rejected @100ms')], settled:[Fd('node','[{fulfilled, a}, {rejected, b}, {fulfilled, c}]','resolved @500ms')]},
+     note:"<b><code>allSettled</code> never rejects.</b> It resolves at 500ms with one <code>{status, value|reason}</code> entry per input, in input order — so you can report exactly which call failed and still use the two that succeeded."},
+    {line:-1, phase:'done', out:['Use all → every result required','Use allSettled → partial success is useful','Use race → first to settle (timeouts)','Use any → first to fulfil (mirrors/fallbacks)'], cols:{},
+     note:"<b>Choosing:</b> <code>all</code> when a partial result is meaningless. <code>allSettled</code> when it isn't. <code>race</code> settles on the first to settle either way — the timeout pattern. <code>any</code> waits for the first <i>success</i> and only rejects with an <code>AggregateError</code> when all fail. To actually stop the losers, pass an <code>AbortSignal</code> into each operation and abort it once you have your answer."}
   ]}
 ],
 
@@ -5940,6 +6118,157 @@ node: [
      note:"Only <b>now</b> can request B's handler run. The event loop was never 'blocked' from B's perspective — B was simply never given a turn."},
     {line:-1, phase:'idle', w:[0,0,0,0], out:['Request A → GET /heavy','Request B → GET /light  (arrives moments later)','/heavy responded (2.1s later)','/light responded — 2.1s late, despite doing ~nothing'], cols:{},
      note:"<b>This is why CPU-intensive work doesn't belong in a Node request handler.</b> Fix: <code>worker_threads</code> pool, a background job queue, or a separate service — keeping the main thread free for I/O."}
+  ]},
+
+{ key:'immediate', label:'setTimeout vs setImmediate', phases:NODE_PHASES, cols:NODE_COLS,
+  takeaway:"At the top level the order is <b>non-deterministic</b>. Inside an I/O callback it is guaranteed: <b>setImmediate always wins</b>, because Check comes immediately after Poll.",
+  code:[
+    `setTimeout(() =&gt; console.log(<span class="str">'timeout'</span>), 0);`,
+    `setImmediate(() =&gt; console.log(<span class="str">'immediate'</span>));`,
+    ``,
+    `fs.readFile(__filename, () =&gt; {`,
+    `  setTimeout(() =&gt; console.log(<span class="str">'io → timeout'</span>), 0);`,
+    `  setImmediate(() =&gt; console.log(<span class="str">'io → immediate'</span>));`,
+    `});`
+  ],
+  steps:[
+    {line:0, phase:'idle', w:[0,0,0,0], out:[], cols:{stack:[Fd('stack','Global')], macro:[Fd('macro','setTimeout → Timers')]},
+     note:"A 0ms timer is registered. Note that Node clamps a 0ms timeout to <b>1ms</b> internally — that single millisecond is the whole source of the ambiguity that follows."},
+    {line:1, phase:'idle', w:[0,0,0,0], out:[], cols:{stack:[Fd('stack','Global')], macro:[Fd('macro','setTimeout → Timers'),Fd('macro','setImmediate → Check')]},
+     note:"<code>setImmediate</code> is registered for the <b>Check</b> phase, which runs immediately after Poll."},
+    {line:3, phase:'idle', w:[1,0,0,0], out:[], cols:{stack:[Fd('stack','Global')], pool:[Fd('pool','readFile(__filename)')], macro:[Fd('macro','setTimeout → Timers'),Fd('macro','setImmediate → Check')]},
+     note:"<code>fs.readFile</code> goes to the thread pool (Worker 1). Its callback will run in the <b>Poll</b> phase when the read completes."},
+    {line:-1, phase:'idle', w:[1,0,0,0], out:[], cols:{pool:[Fd('pool','readFile(__filename)')], macro:[Fd('macro','setTimeout → Timers'),Fd('macro','setImmediate → Check')]},
+     note:"<b>The ambiguity.</b> The loop is about to start its first iteration. If process startup happened to take ≥1ms, the timer is already due and Timers fires first. If it was faster, Timers finds nothing due, and Check runs first. <b>Both orders are legal</b> — this pair genuinely varies run to run on the same machine."},
+    {line:-1, phase:'timers', w:[1,0,0,0], out:['timeout'], cols:{stack:[Fd('stack','setTimeout callback')], pool:[Fd('pool','readFile(__filename)')], macro:[Fd('macro','setImmediate → Check')]},
+     note:"In <i>this</i> run, startup took over 1ms, so the Timers phase finds the timer due and logs <b>'timeout'</b> first. Re-run the process and you may well see the opposite."},
+    {line:3, phase:'poll', w:[0,0,0,0], out:['timeout'], cols:{stack:[Fd('stack','fs.readFile callback')], macro:[Fd('macro','setImmediate → Check')]},
+     note:"<b>Poll phase.</b> The read finished, so its callback runs — and we are now at a <i>known</i> point in the loop, which is what removes the ambiguity from here on."},
+    {line:5, phase:'poll', w:[0,0,0,0], out:['timeout'], cols:{stack:[Fd('stack','fs.readFile callback')], macro:[Fd('macro','setImmediate → Check'),Fd('macro','io → immediate → Check'),Fd('macro','io → timeout → Timers (next iteration)')]},
+     note:"Inside the callback both are registered. The immediate goes to <b>Check — the very next phase</b>. The timer goes to Timers, which has already run this iteration, so it must wait for the next pass."},
+    {line:-1, phase:'check', w:[0,0,0,0], out:['timeout','immediate','io → immediate'], cols:{stack:[Fd('stack','setImmediate callbacks')], macro:[Fd('macro','io → timeout → Timers')]},
+     note:"<b>Check phase.</b> Both queued immediates run now, in registration order — the outer one, then the one registered from inside the I/O callback."},
+    {line:-1, phase:'timers', w:[0,0,0,0], out:['timeout','immediate','io → immediate','io → timeout'], cols:{stack:[Fd('stack','io timeout callback')]},
+     note:"Only on the <b>next iteration</b> does Timers come around again and fire <code>'io → timeout'</code> — a full loop later than its sibling."},
+    {line:-1, phase:'idle', w:[0,0,0,0], out:['timeout','immediate','io → immediate','io → timeout'], cols:{},
+     note:"<b>The rule to remember:</b> inside any I/O callback, <code>setImmediate</code> fires before <code>setTimeout(…, 0)</code>, guaranteed. At the top level, don't rely on either. And if you need to yield after I/O without waiting a full loop, <code>setImmediate</code> is the correct tool — <code>process.nextTick</code> would jump ahead of the loop entirely."}
+  ]},
+
+{ key:'pool', label:'Thread pool saturation', phases:NODE_PHASES, cols:NODE_COLS,
+  takeaway:"The libuv pool has <b>4 threads by default</b>. Saturate it with crypto and your unrelated file reads queue behind it — while HTTP requests, which use the kernel, are unaffected.",
+  code:[
+    `<span class="cm">// UV_THREADPOOL_SIZE = 4  (the default)</span>`,
+    `for (const pw of [p1, p2, p3, p4, p5]) {`,
+    `  crypto.pbkdf2(pw, salt, 100_000, 64, <span class="str">'sha512'</span>, done);`,
+    `}`,
+    ``,
+    `fs.readFile(<span class="str">'config.json'</span>, cb);   <span class="cm">// tiny file</span>`,
+    `https.get(<span class="str">'https://api/health'</span>, cb); <span class="cm">// network</span>`
+  ],
+  steps:[
+    {line:2, phase:'idle', w:[1,1,1,1], out:['5 password hashes requested'], cols:{stack:[Fd('stack','Global')], pool:[Fd('pool','pbkdf2 #1'),Fd('pool','pbkdf2 #2'),Fd('pool','pbkdf2 #3'),Fd('pool','pbkdf2 #4')]},
+     note:"Four <code>pbkdf2</code> calls immediately occupy all four pool threads. Note these are <b>async</b> calls — your JS thread is completely free, which is exactly why this problem is invisible in a CPU graph."},
+    {line:2, phase:'idle', w:[1,1,1,1], out:['5 password hashes requested'], cols:{stack:[Fd('stack','Global')], pool:[Fd('pool','pbkdf2 #1'),Fd('pool','pbkdf2 #2'),Fd('pool','pbkdf2 #3'),Fd('pool','pbkdf2 #4'),Fd('bad','pbkdf2 #5','QUEUED — no free thread')]},
+     note:"The fifth hash has nowhere to run. It sits in libuv's work queue until a thread frees up — pure waiting, invisible to your code."},
+    {line:5, phase:'idle', w:[1,1,1,1], out:['5 password hashes requested','config.json requested'], cols:{stack:[Fd('stack','Global')], pool:[Fd('pool','pbkdf2 #1–4','running'),Fd('bad','pbkdf2 #5','queued'),Fd('bad','readFile config.json','QUEUED behind the hashes')]},
+     note:"<b>Here is the damage.</b> A trivial 2KB file read — nothing to do with authentication — is now stuck behind five CPU-bound hashes, because <code>fs</code> and <code>crypto</code> share the same four threads."},
+    {line:6, phase:'idle', w:[1,1,1,1], out:['5 password hashes requested','config.json requested','GET /health sent'], cols:{stack:[Fd('stack','Global')], pool:[Fd('pool','pbkdf2 #1–4'),Fd('bad','pbkdf2 #5'),Fd('bad','readFile — queued')], kernel:[Fd('heap','GET /health','kernel epoll — unaffected')]},
+     note:"The HTTP request goes to the <b>kernel</b>, not the pool. Networking never touches the thread pool — which is why one Node process can hold tens of thousands of sockets with only four worker threads."},
+    {line:-1, phase:'poll', w:[1,1,1,1], out:['5 password hashes requested','config.json requested','GET /health sent','← /health responded (12ms)'], cols:{pool:[Fd('pool','pbkdf2 #1–4'),Fd('bad','pbkdf2 #5'),Fd('bad','readFile — still queued')]},
+     note:"<b>The tell-tale symptom.</b> The network call returns fast while the file read is still waiting. If you were only watching CPU and HTTP latency, everything would look healthy."},
+    {line:-1, phase:'poll', w:[0,1,1,1], out:['5 password hashes requested','config.json requested','GET /health sent','← /health responded (12ms)','← hash #1 done (410ms)'], cols:{stack:[Fd('stack','pbkdf2 #1 callback')], pool:[Fd('pool','pbkdf2 #2–4'),Fd('pool','pbkdf2 #5','started — thread freed')], kernel:[]},
+     note:"Hash #1 completes; its callback runs on the main thread in the <b>Poll</b> phase. Worker 1 is free, so the queued fifth hash starts — <b>not</b> the file read, which was queued after it."},
+    {line:5, phase:'poll', w:[0,0,0,1], out:['5 password hashes requested','config.json requested','GET /health sent','← /health responded (12ms)','← hash #1 done (410ms)','← config.json read (830ms)'], cols:{stack:[Fd('stack','readFile callback')], pool:[Fd('pool','pbkdf2 #5','running')]},
+     note:"The 2KB file finally arrives after <b>830ms</b> — a read that takes under a millisecond in isolation. This is what pool saturation looks like from the outside: unrelated I/O with wildly inflated p99."},
+    {line:-1, phase:'idle', w:[0,0,0,0], out:['5 password hashes requested','config.json requested','GET /health sent','← /health responded (12ms)','← hash #1 done (410ms)','← config.json read (830ms)'], cols:{},
+     note:"<b>Fixes, in order:</b> move password hashing off the pool entirely (a dedicated worker pool or auth service); raise <code>UV_THREADPOOL_SIZE</code> toward your core count — but it must be set <b>before the process starts</b>; and use <code>dns.resolve()</code> rather than <code>dns.lookup()</code> if DNS is also competing for these threads."}
+  ]},
+
+{ key:'stream', label:'Backpressure: ignoring write()',
+  phases:[
+    {k:'flow',  label:'Flowing',      c:'node'},
+    {k:'full',  label:'Buffer over HWM', c:'js'},
+    {k:'pause', label:'Source paused', c:'tick'},
+    {k:'drain', label:'Drain',         c:'accent'}
+  ],
+  cols:[
+    {k:'src',  label:'Readable (fast disk)',    c:'node'},
+    {k:'buf',  label:'Writable internal buffer', c:'js'},
+    {k:'dest', label:'Slow consumer (mobile client)', c:'pool'}
+  ],
+  takeaway:"<code>write()</code> returning <code>false</code> means \"stop\". Ignoring it buffers without limit in memory — per connection. <code>pipeline()</code> handles this for you.",
+  code:[
+    `const src = fs.createReadStream(<span class="str">'4gb.mp4'</span>);  <span class="cm">// fast</span>`,
+    ``,
+    `<span class="cm">// ❌ the bug: return value ignored</span>`,
+    `src.on(<span class="str">'data'</span>, (chunk) =&gt; {`,
+    `  res.write(chunk);`,
+    `});`,
+    ``,
+    `<span class="cm">// ✅ the fix</span>`,
+    `await pipeline(src, res);`
+  ],
+  steps:[
+    {line:3, phase:'flow', out:['streaming started'], cols:{src:[Fd('heap','reading 64KB chunks','fast')], buf:[Fd('macro','128 KB buffered','HWM = 64 KB')], dest:[Fd('pool','sent 64 KB','slow link')]},
+     note:"Attaching a <code>'data'</code> listener puts the readable into <b>flowing mode</b> — it now pushes chunks at you as fast as the disk can supply them, whether or not you're ready."},
+    {line:4, phase:'flow', out:['streaming started','write() returned false'], cols:{src:[Fd('heap','still pushing','unpaused')], buf:[Fd('macro','1.2 MB buffered','over HWM')], dest:[Fd('pool','sent 190 KB')]},
+     note:"The writable's buffer has passed <code>highWaterMark</code>, so <code>res.write()</code> has started returning <b>false</b>. That is the entire backpressure signal — and this code throws it away."},
+    {line:4, phase:'full', out:['streaming started','write() returned false','write() returned false ×2,400'], cols:{src:[Fd('heap','still pushing'),Fd('bad','no pause requested')], buf:[Fd('bad','340 MB buffered','growing without limit')], dest:[Fd('pool','sent 4 MB','~1 Mbps')]},
+     note:"<b>The buffer is now the difference between disk speed and network speed, held in RAM.</b> Nothing errors, nothing warns — memory just climbs."},
+    {line:4, phase:'full', out:['streaming started','write() returned false ×2,400','RSS: 2.1 GB'], cols:{src:[Fd('heap','still pushing')], buf:[Fd('bad','1.9 GB buffered','per connection!')], dest:[Fd('pool','sent 22 MB')]},
+     note:"<b>And it's per connection.</b> Fifty slow clients streaming simultaneously is fifty of these buffers. This is one of the most common causes of a Node process being OOM-killed with healthy-looking CPU."},
+    {line:8, phase:'flow', out:['— restarted with pipeline() —'], cols:{src:[Fd('heap','reading 64KB chunks')], buf:[Fd('macro','64 KB buffered','at HWM')], dest:[Fd('pool','sent 64 KB')]},
+     note:"Now the correct version. <code>pipeline()</code> wires the same data flow, but it also watches <code>write()</code>'s return value."},
+    {line:8, phase:'pause', out:['— restarted with pipeline() —','source paused'], cols:{src:[Fd('bad','PAUSED','waiting for drain')], buf:[Fd('macro','64 KB buffered','capped')], dest:[Fd('pool','draining…')]},
+     note:"<code>write()</code> returned <code>false</code>, so <b>the source is paused</b>. The disk stops reading. Memory stops growing. The consumer sets the pace."},
+    {line:8, phase:'drain', out:['— restarted with pipeline() —','source paused',"'drain' → resumed"], cols:{src:[Fd('heap','resumed')], buf:[Fd('macro','32 KB buffered','below HWM')], dest:[Fd('pool','sent 128 KB')]},
+     note:"The buffer falls below the high-water mark, the writable emits <code>'drain'</code>, and the source resumes. This pause/resume cycle repeats for the whole 4GB at <b>constant memory</b>."},
+    {line:-1, phase:'drain', out:['— restarted with pipeline() —','4 GB transferred','peak RSS: 90 MB'], cols:{},
+     note:"<b>Same transfer, ~90MB instead of ~2GB.</b> <code>pipeline()</code> also propagates errors and destroys every stream in the chain on failure — which raw <code>.pipe()</code> does not, and is how file descriptors leak. The identical contract applies to WebSockets (<code>ws.bufferedAmount</code>) and to SSE token streaming from an LLM."}
+  ]},
+
+{ key:'emitter', label:"EventEmitter & the unhandled 'error'",
+  phases:[
+    {k:'run',   label:'Running',         c:'accent'},
+    {k:'emit',  label:'Emitting (sync)', c:'node'},
+    {k:'crash', label:'Uncaught throw',  c:'tick'},
+    {k:'idle',  label:'Process exits',   c:'sub'}
+  ],
+  cols:[
+    {k:'stack',     label:'Call stack',            c:'accent'},
+    {k:'listeners', label:"Listeners for 'done'",  c:'node'},
+    {k:'err',       label:"Listeners for 'error'", c:'tick'}
+  ],
+  takeaway:"<code>emit()</code> is <b>synchronous</b> and runs listeners in registration order. An <code>'error'</code> event with no listener is <b>thrown</b> — which crashes the process.",
+  code:[
+    `const jobs = new EventEmitter();`,
+    ``,
+    `jobs.on(<span class="str">'done'</span>, () =&gt; console.log(<span class="str">'listener A'</span>));`,
+    `jobs.on(<span class="str">'done'</span>, () =&gt; console.log(<span class="str">'listener B'</span>));`,
+    ``,
+    `console.log(<span class="str">'before emit'</span>);`,
+    `jobs.emit(<span class="str">'done'</span>);`,
+    `console.log(<span class="str">'after emit'</span>);`,
+    ``,
+    `jobs.emit(<span class="str">'error'</span>, new Error(<span class="str">'boom'</span>));  <span class="cm">// no listener!</span>`
+  ],
+  steps:[
+    {line:3, phase:'run', out:[], cols:{stack:[Fd('stack','Global')], listeners:[Fd('heap','A'),Fd('heap','B')]},
+     note:"Two listeners registered for <code>'done'</code>. Order is recorded — emission will follow it exactly. Note there is <b>no listener for <code>'error'</code></b>."},
+    {line:5, phase:'run', out:['before emit'], cols:{stack:[Fd('stack','Global')], listeners:[Fd('heap','A'),Fd('heap','B')]},
+     note:"Ordinary synchronous log."},
+    {line:6, phase:'emit', out:['before emit','listener A'], cols:{stack:[Fd('stack','Global'),Fd('stack',"emit('done')"),Fd('stack','listener A')], listeners:[Fd('node','A','running'),Fd('heap','B')]},
+     note:"<b><code>emit</code> is synchronous.</b> Listener A is invoked on the current stack — not queued as a microtask or a timer. A slow listener here blocks the emitter and everything else."},
+    {line:6, phase:'emit', out:['before emit','listener A','listener B'], cols:{stack:[Fd('stack','Global'),Fd('stack',"emit('done')"),Fd('stack','listener B')], listeners:[Fd('heap','A'),Fd('node','B','running')]},
+     note:"Listener B runs immediately after, in registration order, still inside the same <code>emit()</code> call."},
+    {line:7, phase:'run', out:['before emit','listener A','listener B','after emit'], cols:{stack:[Fd('stack','Global')], listeners:[Fd('heap','A'),Fd('heap','B')]},
+     note:"<code>emit()</code> returns only after every listener has finished, then <b>'after emit'</b> logs. Output order is <b>before → A → B → after</b>, with nothing deferred. (An <code>async</code> listener would return a promise the emitter ignores entirely — its rejection would be unhandled.)"},
+    {line:9, phase:'crash', out:['before emit','listener A','listener B','after emit'], cols:{stack:[Fd('bad',"emit('error')"),Fd('bad','no handler → throw')], err:[Fd('bad','none registered')]},
+     note:"<b>The special case.</b> <code>'error'</code> is the one event EventEmitter treats specially: with no listener registered, it <b>throws the error</b> rather than quietly doing nothing."},
+    {line:-1, phase:'idle', out:['before emit','listener A','listener B','after emit','⚠ Uncaught Error: boom','process exited (code 1)'], cols:{},
+     note:"Nothing catches it, so it becomes an uncaught exception and the process dies. <b>This is why every stream, socket, child process and custom emitter needs an <code>'error'</code> listener</b> — and why <code>pipeline()</code> exists, since it wires error handling for a whole chain so you cannot miss one."},
+    {line:-1, phase:'idle', out:['Fixed: jobs.on(\'error\', err => logger.error({ err }))'], cols:{err:[Fd('node','logger handler','registered')]},
+     note:"With a handler attached, the same emit is just a log line. One more thing worth knowing: the default limit is <b>10 listeners per event</b>, and the <code>MaxListenersExceededWarning</code> you get past that is almost always a genuine leak — a listener added per request and never removed — not noise to silence with <code>setMaxListeners</code>."}
   ]}
 ],
 
