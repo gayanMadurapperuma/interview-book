@@ -938,6 +938,13 @@ html[data-theme="dark"] .deck-scope button.on{background:var(--bg)}
 .kn-shard i{width:38px;height:8px;border-radius:2px;background:var(--awsbg);border:1px solid var(--awsbd);display:block;animation:depswap 2.2s ease-in-out infinite}
 .kn-shard:nth-child(2) i{animation-delay:.4s}
 .kn-label{font-family:var(--mono);font-size:9px;color:var(--sub)}
+
+/* generic left-to-right pipeline animation (db track) */
+.flow-anim{display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:center}
+.flow-step{padding:6px 10px;border-radius:6px;background:var(--panel2);border:1px solid var(--line);font-family:var(--mono);font-size:9.5px;color:var(--sub);animation:flowstep 4.5s ease-in-out infinite}
+.flow-step.f2{animation-delay:.9s}.flow-step.f3{animation-delay:1.8s}.flow-step.f4{animation-delay:2.7s}
+.flow-arrow{color:var(--faint);font-size:10px}
+@keyframes flowstep{0%,100%{border-color:var(--line);color:var(--sub)}9%,22%{border-color:var(--db);color:var(--db)}}
 </style>
 </head>
 <body>
@@ -1045,6 +1052,10 @@ var ANIM = {
   stepfn: '<div class="sfn-anim"><div class="sfn-state s1">Validate</div><div class="sfn-arrow">→</div><div class="sfn-state s2">Process</div><div class="sfn-arrow">→</div><div class="sfn-state s3 ok">Notify</div></div>',
   eventbus: '<div class="evt-anim"><div class="evt-src">EventBridge</div><div class="evt-fan"><i></i><i></i><i></i></div></div>',
   rdsproxy: '<div class="pool2-anim"><div class="pl-lambdas"><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="pl-proxy">RDS Proxy</div><div class="pl-db">RDS</div></div>',
+  normalise: '<div class="shard-anim"><div class="sh-node n1">orders</div><div class="sh-node n2">customers</div><div class="sh-node n3">products</div></div>',
+  datastore: '<div class="combinator-anim"><div class="cb-chip c1">relational</div><div class="cb-chip c2">document</div><div class="cb-chip c3">key-value</div><div class="cb-chip c4">columnar</div></div>',
+  lakepipe: '<div class="flow-anim"><div class="flow-step f1">S3 raw</div><div class="flow-arrow">\u2192</div><div class="flow-step f2">Glue</div><div class="flow-arrow">\u2192</div><div class="flow-step f3">Parquet</div><div class="flow-arrow">\u2192</div><div class="flow-step f4">Athena</div></div>',
+  cdcflow: '<div class="flow-anim"><div class="flow-step f1">write</div><div class="flow-arrow">\u2192</div><div class="flow-step f2">outbox</div><div class="flow-arrow">\u2192</div><div class="flow-step f3">stream</div><div class="flow-arrow">\u2192</div><div class="flow-step f4">consumers</div></div>',
   kinesis: '<div class="kinesis-anim"><span class="kn-label">shard 1</span><div class="kn-shard"><i></i><i></i><i></i></div><span class="kn-label">shard 2</span><div class="kn-shard"><i></i><i></i><i></i></div></div>'
 };
 
@@ -5587,6 +5598,867 @@ const secret = JSON.parse((await client.send(
 
 
 
+/* ===== 06-db.js ===== */
+
+var dbTopics = [
+/* ==================== TRANSACTIONS ==================== */
+{ id:'db-acid', group:'Transactions', title:'ACID & what a transaction actually guarantees', animate:'isolation',
+  lede:"Four letters everyone can recite — the interview is about which one is negotiable and what it costs.",
+  say:"Atomicity means all-or-nothing, consistency means the database's own constraints hold across the transaction, isolation means concurrent transactions don't observe each other's partial work, and durability means a committed write survives a crash. In practice the one you actively tune is isolation — it's a dial with a real cost, and the default in Postgres and most engines is Read Committed, not Serializable.",
+  steps:[
+    "<b>Atomicity</b> — the whole transaction commits or none of it does. Implemented with a write-ahead log and rollback; a crash mid-transaction leaves no partial effect.",
+    "<b>Consistency</b> — the database moves from one valid state to another with respect to its declared constraints (foreign keys, checks, uniqueness). It does <i>not</i> mean your business rules are correct.",
+    "<b>Isolation</b> — concurrent transactions behave as if they ran with some degree of separation. This is the negotiable one, and the level you choose determines which anomalies are possible.",
+    "<b>Durability</b> — once <code>COMMIT</code> returns, the data survives a crash. Achieved by flushing the WAL to disk (<code>fsync</code>) before acknowledging.",
+    "The <b>WAL (write-ahead log)</b> is the mechanism behind A and D: changes are appended to a sequential log and fsynced <i>before</i> the data pages are updated, so recovery can replay or undo.",
+    "Durability is a spectrum in practice: <code>synchronous_commit = off</code> in Postgres trades a small window of possible data loss for a large throughput gain, and replicas can be sync or async.",
+    "<b>Keep transactions short.</b> They hold locks and a pooled connection for their entire duration — never make a network call inside one.",
+    "A transaction is not a substitute for idempotency: a retried request can commit twice unless you also have an idempotency key or a uniqueness constraint."
+  ],
+  code:`BEGIN;
+  UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+  UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT;                       <span class="cm">-- atomic: both or neither</span>
+
+<span class="cm">-- constraints are what "consistency" actually means</span>
+ALTER TABLE accounts ADD CONSTRAINT non_negative CHECK (balance &gt;= 0);
+
+<span class="cm">-- durability trade-off (Postgres)</span>
+SET synchronous_commit = off;  <span class="cm">-- faster commits, small loss window on crash</span>`,
+  traps:[
+    "<b>Consistency in ACID ≠ consistency in CAP.</b> ACID's C is about declared constraints; CAP's C is about all replicas returning the latest write. Interviewers ask this deliberately.",
+    "Wrapping an external API call inside a transaction holds locks for the entire round trip — a top cause of lock storms and pool exhaustion.",
+    "A rollback still consumed work: sequences/auto-increment values are not returned, so IDs get gaps.",
+    "Long-running read transactions in Postgres block <code>VACUUM</code> from cleaning old row versions, which causes table bloat.",
+    "Nested <code>BEGIN</code> is not nested transactions — you need <code>SAVEPOINT</code>, and most ORMs emulate nesting with savepoints."
+  ],
+  terms:[
+    {term:"Write-ahead log", desc:"Append-only log flushed before data pages — the basis of atomicity and durability.", detail:"Because it's sequential, it's fast to write. Recovery replays committed transactions and undoes uncommitted ones. It's also what physical replication ships to replicas, and what point-in-time recovery replays.", code:`<span class="cm">-- WAL is also the replication stream and the PITR source</span>\nSELECT pg_current_wal_lsn();`},
+    {term:"Savepoints", desc:"Partial rollback inside a transaction.", detail:"Lets you attempt something optional and recover without losing the whole transaction. ORMs use these to implement 'nested transactions', which is worth knowing when a nested failure unexpectedly rolls back more than you meant.", code:`BEGIN;\n  INSERT INTO orders …;\n  SAVEPOINT before_optional;\n  INSERT INTO analytics …;      <span class="cm">-- may fail</span>\n  ROLLBACK TO before_optional;  <span class="cm">-- order survives</span>\nCOMMIT;`}
+  ],
+  cards:[
+    {q:"What does the C in ACID actually mean?", a:"That the database's own declared constraints — foreign keys, checks, uniqueness, triggers — hold before and after the transaction. It is <b>not</b> a guarantee that your business logic is right, and it is unrelated to the C in CAP."},
+    {q:"How are atomicity and durability implemented?", a:"With a write-ahead log: changes are appended to a sequential log and fsynced before the data pages change. On crash, recovery replays committed transactions and undoes uncommitted ones."},
+    {q:"Which ACID property do you actually tune, and why?", a:"Isolation. It's a dial (Read Uncommitted → Serializable) trading concurrency for correctness, and the default in most engines is Read Committed — not Serializable — so certain anomalies are possible by default."},
+    {q:"Why must transactions be short?", a:"They hold row locks and a pooled connection for their whole duration. A long transaction — especially one containing a network call — causes lock contention, deadlocks, pool exhaustion, and in Postgres blocks VACUUM and causes bloat."}
+  ],
+  quiz:[
+    {q:"A handler opens a transaction, inserts an order, calls Stripe, then commits. What is the main risk?", options:["Row locks and a connection are held for the whole network round trip","Stripe will reject the call","The insert can't be rolled back","None — this is the standard pattern"], answer:0,
+     why:"The transaction stays open for hundreds of milliseconds or more. Under load that exhausts the pool and creates lock contention. Commit first, then charge with an idempotency key, and reconcile failures."}
+  ],
+  cheat:[
+    "<b>A</b>tomicity (all-or-nothing, via WAL) · <b>C</b>onsistency (declared constraints) · <b>I</b>solation (the tunable one) · <b>D</b>urability (fsync'd WAL).",
+    "ACID's C ≠ CAP's C. Expect to be asked.",
+    "WAL = atomicity + durability + replication stream + PITR.",
+    "Default isolation is usually <b>Read Committed</b>, not Serializable.",
+    "<b>Short transactions.</b> No network calls inside. Commit → then call, with an idempotency key.",
+    "<code>SAVEPOINT</code> for partial rollback; ORMs use it to fake nesting."
+  ]
+},
+
+{ id:'db-isolation', group:'Transactions', title:'Isolation levels & the anomalies they permit', animate:'isolation',
+  lede:"Four levels, four anomalies — and knowing which anomaly each level still allows is the whole question.",
+  say:"Read Uncommitted allows dirty reads, Read Committed prevents those but allows non-repeatable reads and phantoms, Repeatable Read prevents both of those, and Serializable prevents everything including write skew. Postgres's Read Committed is the default and takes a fresh snapshot per statement; its Repeatable Read is snapshot isolation, which still permits write skew — that's why Serializable exists as a separate level.",
+  steps:[
+    "<b>Dirty read</b> — reading another transaction's <i>uncommitted</i> data. Prevented from Read Committed upward; Postgres never allows it at all.",
+    "<b>Non-repeatable read</b> — reading the same row twice in one transaction and getting different values because someone committed in between. Prevented from Repeatable Read upward.",
+    "<b>Phantom read</b> — re-running the same <i>range</i> query and getting new rows. Prevented at Serializable (and in Postgres's Repeatable Read, thanks to snapshot isolation).",
+    "<b>Write skew</b> — two transactions each read a set, each make a decision that is individually valid, and the combined result violates an invariant. Only Serializable prevents it.",
+    "<b>Read Committed</b> (the common default): each <i>statement</i> sees a fresh snapshot. So two identical <code>SELECT</code>s in one transaction can differ.",
+    "<b>Repeatable Read</b>: the whole transaction sees one snapshot taken at its start. In Postgres this is snapshot isolation and it also blocks phantoms — but a concurrent conflicting write causes a <b>serialization failure</b> your application must retry.",
+    "<b>Serializable</b>: the result is guaranteed equivalent to <i>some</i> serial order. Postgres implements SSI (predicate-tracking, optimistic); MySQL/InnoDB uses next-key locking (pessimistic).",
+    "The practical rule: use the default, and reach for a higher level or explicit locking only where a real invariant is at stake — then <b>be prepared to retry</b> serialization failures with backoff."
+  ],
+  code:`<span class="cm">-- classic write skew: "at least one doctor must be on call"</span>
+<span class="cm">-- both transactions run concurrently at Repeatable Read</span>
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+  SELECT count(*) FROM doctors WHERE on_call = true;  <span class="cm">-- both see 2</span>
+  UPDATE doctors SET on_call = false WHERE id = 1;    <span class="cm">-- T1</span>
+COMMIT;                                               <span class="cm">-- T2 does the same for id = 2</span>
+<span class="cm">-- result: ZERO doctors on call. Neither transaction saw a conflicting row.</span>
+
+<span class="cm">-- fixes</span>
+BEGIN ISOLATION LEVEL SERIALIZABLE;                   <span class="cm">-- 1. detect &amp; retry</span>
+SELECT … FROM doctors WHERE on_call = true FOR UPDATE; <span class="cm">-- 2. explicit lock</span>
+ALTER TABLE … ADD CONSTRAINT …;                        <span class="cm">-- 3. materialise the invariant</span>`,
+  table:{title:'Levels vs anomalies', head:['Level','Dirty read','Non-repeatable','Phantom','Write skew'], rows:[
+    ['Read Uncommitted','Possible*','Possible','Possible','Possible'],
+    ['Read Committed <i>(default)</i>','No','Possible','Possible','Possible'],
+    ['Repeatable Read','No','No','No in PG / possible in spec','Possible'],
+    ['Serializable','No','No','No','No']
+  ]},
+  traps:[
+    "<b>Postgres has no real Read Uncommitted</b> — requesting it silently gives you Read Committed. Naming the level and getting a different behaviour surprises people.",
+    "Higher isolation does not mean 'no errors' — it means <b>more errors you must retry</b>. Serializable and Repeatable Read both raise serialization failures under contention.",
+    "In Read Committed, an <code>UPDATE … WHERE balance &gt; 100</code> re-reads the row after waiting on a lock, so it can act on a value your earlier <code>SELECT</code> never saw. Read-modify-write needs <code>FOR UPDATE</code> or an atomic expression.",
+    "<code>SELECT … FOR UPDATE</code> in an inconsistent order across code paths is how you manufacture deadlocks.",
+    "MySQL's Repeatable Read behaves differently from Postgres's (next-key locks vs snapshots) — don't carry assumptions between engines."
+  ],
+  terms:[
+    {term:"Atomic update vs read-modify-write", desc:"Let the database do the arithmetic and the race disappears.", detail:"<code>SET n = n + 1</code> is applied under the row lock the update itself takes. Reading into the application, adding one, and writing back is a lost-update race at any level below Serializable.", code:`<span class="cm">-- ❌ lost update</span>\nSELECT stock FROM items WHERE id = 1;   <span class="cm">-- 5</span>\nUPDATE items SET stock = 4 WHERE id = 1;\n\n<span class="cm">-- ✅ atomic, no race</span>\nUPDATE items SET stock = stock - 1\nWHERE id = 1 AND stock &gt; 0;`},
+    {term:"Optimistic vs pessimistic locking", desc:"Detect-and-retry versus take-the-lock-first.", detail:"Optimistic (a version column, or Serializable's SSI) is best when conflicts are rare — no lock held, but you must handle a retry. Pessimistic (<code>FOR UPDATE</code>) is better under real contention, at the cost of blocking and deadlock risk.", code:`<span class="cm">-- optimistic</span>\nUPDATE orders SET status = 'shipped', version = version + 1\nWHERE id = $1 AND version = $2;   <span class="cm">-- 0 rows ⇒ someone else won, retry</span>\n\n<span class="cm">-- pessimistic</span>\nSELECT * FROM orders WHERE id = $1 FOR UPDATE;`},
+    {term:"Serialization failure retry", desc:"Higher isolation moves the burden into your code.", detail:"Wrap the whole transaction in a bounded retry with backoff and jitter, and make sure everything inside is safe to re-execute — no emails sent mid-transaction.", code:`for (let a = 0; a &lt; 3; a++){\n  try { return await tx(work); }\n  catch (e){\n    if (e.code !== '40001') throw e;      <span class="cm">// serialization_failure</span>\n    await sleep(2 ** a * 50 + Math.random() * 50);\n  }\n}`}
+  ],
+  cards:[
+    {q:"Name the four anomalies and the lowest level that prevents each.", a:"<b>Dirty read</b> → Read Committed. <b>Non-repeatable read</b> → Repeatable Read. <b>Phantom read</b> → Serializable (Postgres's Repeatable Read also prevents it). <b>Write skew</b> → Serializable only."},
+    {q:"What is write skew?", a:"Two concurrent transactions each read an overlapping set, each make an individually-valid decision, and the combination breaks an invariant — e.g. both doctors go off call because each saw the other still on. No row conflicts, so snapshot isolation can't detect it; only Serializable can."},
+    {q:"What's the catch with Serializable?", a:"It doesn't remove conflicts, it converts them into <b>serialization failure errors</b> the application must catch and retry with backoff. Throughput also drops under contention. Use it where a real invariant is at stake."},
+    {q:"Postgres Read Committed: can two identical SELECTs in one transaction differ?", a:"Yes. Read Committed takes a fresh snapshot <b>per statement</b>, so anything committed between the two statements becomes visible. That's a non-repeatable read, and it's allowed at this level."}
+  ],
+  quiz:[
+    {q:"Two transactions each check 'at least one doctor on call' and each take a different doctor off call, at Repeatable Read. Result?", options:["Zero on call — write skew, only Serializable prevents it","One stays on call","A deadlock","A unique-constraint violation"], answer:0,
+     why:"Neither transaction wrote a row the other read, so snapshot isolation sees no conflict. This is textbook write skew: Serializable (or an explicit <code>FOR UPDATE</code> / constraint) is required."},
+    {q:"Which is safe under concurrency?", code:`-- A\nSELECT stock FROM items WHERE id=1;   -- app computes stock-1\nUPDATE items SET stock = $newValue WHERE id=1;\n\n-- B\nUPDATE items SET stock = stock - 1 WHERE id=1 AND stock &gt; 0;`,
+     options:["B — the arithmetic happens under the update's row lock","A — the SELECT locks the row","Both","Neither"], answer:0,
+     why:"A is a read-modify-write race: two sessions read 5 and both write 4. B is atomic — the update takes the row lock and computes from the current value, and the <code>stock &gt; 0</code> guard prevents going negative."}
+  ],
+  cheat:[
+    {t:'table', head:['Level','Dirty','Non-repeat.','Phantom','Write skew'], rows:[
+      ['Read Uncommitted','✔*','✔','✔','✔'],
+      ['Read Committed (default)','✘','✔','✔','✔'],
+      ['Repeatable Read','✘','✘','✘ (PG)','✔'],
+      ['Serializable','✘','✘','✘','✘']
+    ]},
+    "* Postgres has no Read Uncommitted — it silently gives Read Committed.",
+    "Read Committed = fresh snapshot <b>per statement</b>. Repeatable Read = one snapshot per <b>transaction</b>.",
+    "<b>Write skew is the level-4 question.</b> Fix: Serializable, <code>FOR UPDATE</code>, or a constraint.",
+    "Higher isolation ⇒ <b>serialization failures to retry</b> (SQLSTATE <code>40001</code>), backoff + jitter.",
+    "Read-modify-write → make it atomic (<code>SET n = n - 1 WHERE n &gt; 0</code>) or lock.",
+    {t:'mnemonic', text:"Anomalies in order of severity: <b>D</b>irty → <b>N</b>on-repeatable → <b>P</b>hantom → <b>S</b>kew. Each level knocks out one more, left to right."}
+  ]
+},
+
+{ id:'db-mvcc', group:'Transactions', title:'MVCC, locks, deadlocks & vacuum', animate:'sweep',
+  lede:"How Postgres lets readers and writers coexist — and the maintenance debt that model creates.",
+  say:"MVCC means an UPDATE writes a new row version rather than overwriting, so readers never block writers and writers never block readers — each transaction sees the versions visible to its snapshot. The cost is dead tuples, which VACUUM must reclaim; a long-running transaction holds back the visibility horizon and causes bloat. Locks still exist for writer-writer conflicts, and deadlocks come from acquiring them in inconsistent order.",
+  steps:[
+    "<b>MVCC</b>: an <code>UPDATE</code> writes a <b>new row version</b> and marks the old one dead. Each version carries the transaction ids that created and deleted it.",
+    "A transaction's <b>snapshot</b> determines which versions it can see — so <b>readers never block writers and writers never block readers</b>. Only writer-versus-writer conflicts take locks.",
+    "<b>Dead tuples</b> accumulate. <code>VACUUM</code> reclaims them for reuse; <code>autovacuum</code> does this in the background based on churn thresholds.",
+    "<b>A long-running transaction holds back the visibility horizon</b> — vacuum cannot remove versions that transaction might still need, so the table bloats. An idle-in-transaction connection is a classic cause.",
+    "<b>Bloat</b> means more pages to scan for the same rows: queries slow down and disk grows. <code>VACUUM FULL</code> rewrites the table but takes an exclusive lock; <code>pg_repack</code> does it online.",
+    "<b>Row locks</b> (<code>FOR UPDATE</code>, and any UPDATE/DELETE) and <b>table locks</b> (DDL) are what actually block. Watch <code>pg_locks</code> and <code>pg_stat_activity</code>.",
+    "<b>Deadlock</b>: T1 holds A and wants B while T2 holds B and wants A. The engine detects the cycle and kills one transaction with a deadlock error.",
+    "The fix is <b>consistent lock ordering</b> — always acquire rows in the same order (e.g. sorted by primary key) — plus short transactions and a bounded retry.",
+    "MySQL/InnoDB also uses MVCC but with an undo log and next-key (gap) locks, so its blocking behaviour and deadlock patterns differ from Postgres's."
+  ],
+  code:`<span class="cm">-- who is blocking whom (Postgres)</span>
+SELECT pid, state, wait_event_type, now() - xact_start AS age, query
+FROM pg_stat_activity
+WHERE state &lt;&gt; 'idle' ORDER BY age DESC;
+
+<span class="cm">-- the silent killer: idle in transaction</span>
+SELECT pid, now() - state_change AS idle_for, query
+FROM pg_stat_activity WHERE state = 'idle in transaction';
+
+<span class="cm">-- consistent ordering prevents deadlocks</span>
+SELECT * FROM accounts WHERE id = ANY($1) ORDER BY id FOR UPDATE;
+
+<span class="cm">-- bound the damage</span>
+SET lock_timeout = '3s';
+SET idle_in_transaction_session_timeout = '30s';
+SET statement_timeout = '10s';`,
+  traps:[
+    "<b>Idle in transaction</b> is the most damaging state a connection can be in: it holds locks and blocks vacuum indefinitely. Always set <code>idle_in_transaction_session_timeout</code>.",
+    "<code>UPDATE</code> in Postgres rewrites the whole row (all columns), so updating one column of a wide row still writes a full new version — and updates every index unless HOT applies.",
+    "<code>VACUUM FULL</code> takes an ACCESS EXCLUSIVE lock and blocks everything; it is not a routine operation.",
+    "Deadlocks are <b>expected</b> under concurrency — detect the error code (<code>40P01</code>) and retry rather than treating each one as a bug.",
+    "Adding a column with a volatile default, or many DDL statements, can take table locks that queue behind (and then block) everything.",
+    "Autovacuum falling behind shows up first as slowly growing latency, not as an error."
+  ],
+  terms:[
+    {term:"Transaction ID wraparound", desc:"The failure mode that takes a Postgres database offline.", detail:"Transaction ids are 32-bit and wrap. Vacuum 'freezes' old rows to prevent them appearing to be from the future. If autovacuum can't keep up — usually because of a long transaction or a stuck replication slot — Postgres eventually refuses writes to protect the data. Monitor <code>age(datfrozenxid)</code>.", code:`SELECT datname, age(datfrozenxid) AS xid_age\nFROM pg_database ORDER BY xid_age DESC;\n<span class="cm">-- alert well before autovacuum_freeze_max_age (default 200M)</span>`},
+    {term:"HOT updates", desc:"Heap-only tuple updates skip index maintenance.", detail:"If the new version fits on the same page and no indexed column changed, Postgres chains it on the page and doesn't touch the indexes — much cheaper. Leaving some <code>fillfactor</code> headroom on update-heavy tables makes HOT updates more likely.", code:`ALTER TABLE sessions SET (fillfactor = 85);  <span class="cm">-- room for HOT updates</span>`},
+    {term:"Deadlock retry", desc:"Catch the code, retry with backoff, keep ordering consistent.", detail:"Deadlock is the engine choosing a victim to break a cycle — it's a normal outcome under contention, not necessarily a bug, though repeated deadlocks on the same pair of tables means your lock ordering is inconsistent.", code:`catch (e) {\n  if (e.code === '40P01' || e.code === '40001') return retry();  <span class="cm">// deadlock / serialization</span>\n  throw e;\n}`}
+  ],
+  cards:[
+    {q:"What is MVCC and what does it buy you?", a:"Multi-version concurrency control: updates write a new row version instead of overwriting, and each transaction sees the versions visible to its snapshot. The payoff is that <b>readers never block writers and writers never block readers</b> — only writer-writer conflicts take locks."},
+    {q:"Why does a long-running transaction cause table bloat?", a:"Vacuum can only remove row versions no running transaction might still need. A long transaction (or one sitting idle-in-transaction) holds back that horizon, so dead tuples accumulate, tables grow, and scans get slower."},
+    {q:"What causes a deadlock and how do you prevent it?", a:"Two transactions acquiring the same locks in opposite order. Prevent it by always acquiring rows in a consistent order (e.g. sorted by primary key), keeping transactions short, and setting <code>lock_timeout</code> — plus a bounded retry, since deadlocks are expected under contention."},
+    {q:"What is transaction ID wraparound?", a:"Postgres transaction ids are 32-bit; vacuum must 'freeze' old rows before they wrap and appear to be in the future. If autovacuum can't keep up — long transactions, stuck replication slots — Postgres eventually stops accepting writes to protect data. Monitor <code>age(datfrozenxid)</code>."}
+  ],
+  quiz:[
+    {q:"A Postgres table grows to 40GB while holding only 2GB of live rows, and queries are slowing. Most likely cause?", options:["Bloat — vacuum blocked by a long-running or idle-in-transaction session","Missing indexes","Too many connections","Wrong isolation level"], answer:0,
+     why:"Dead tuples aren't being reclaimed because something is holding back the visibility horizon. Find it in <code>pg_stat_activity</code>, set <code>idle_in_transaction_session_timeout</code>, then repack the table."}
+  ],
+  cheat:[
+    "<b>MVCC</b>: update = new row version. Readers ⊥ writers. Only writer-writer conflicts lock.",
+    "Cost: dead tuples → <b>VACUUM/autovacuum</b>. Long/idle transactions block it → <b>bloat</b>.",
+    "<code>idle_in_transaction_session_timeout</code>, <code>lock_timeout</code>, <code>statement_timeout</code> — set all three.",
+    "Deadlock = inconsistent lock order → acquire rows <b>ORDER BY id FOR UPDATE</b>; retry on <code>40P01</code>.",
+    "<code>VACUUM FULL</code> = exclusive lock; use <code>pg_repack</code> online.",
+    "Watch <code>pg_stat_activity</code>, <code>pg_locks</code>, <code>age(datfrozenxid)</code> (wraparound).",
+    "HOT updates skip index writes — leave <code>fillfactor</code> headroom on hot tables."
+  ]
+},
+
+/* ==================== PERFORMANCE ==================== */
+{ id:'db-index', group:'Performance', title:'Indexing internals: B-trees, composites & selectivity', animate:'btree',
+  lede:"The single highest-leverage database skill — and the one most often reduced to 'add an index'.",
+  say:"A B-tree index is a balanced structure that turns a full scan into a logarithmic lookup, and it also provides ordering, which is why it can serve ORDER BY and range queries. The details that matter are column order in a composite index — leftmost prefix — selectivity, and the fact that every index makes writes slower and takes space. An index is only used if the planner believes it's cheaper, which is why a function on the column or a low-selectivity predicate silently gives you a sequential scan.",
+  steps:[
+    "A <b>B-tree</b> keeps keys sorted in a balanced tree, so a lookup is O(log n) page reads instead of scanning every row. Because it's sorted, it also serves <b>range queries</b> and <b>ORDER BY</b> without a sort.",
+    "<b>Selectivity</b> decides whether it's worth using: an index that narrows to 1% of rows is great; one that narrows to 40% is usually slower than a sequential scan, because random page reads cost more than sequential ones.",
+    "<b>Composite index column order matters.</b> An index on <code>(a, b, c)</code> serves predicates on <code>a</code>, <code>(a,b)</code>, and <code>(a,b,c)</code> — the <b>leftmost prefix</b> — but not on <code>b</code> alone.",
+    "Rule of thumb for ordering: <b>equality columns first, then the range/sort column</b>. <code>WHERE tenant = ? AND created_at &gt; ?</code> wants <code>(tenant, created_at)</code>.",
+    "A <b>covering index</b> includes every column the query needs (via <code>INCLUDE</code> in Postgres), so the engine answers from the index alone — an <b>index-only scan</b>, no heap access.",
+    "<b>Partial indexes</b> index a subset (<code>WHERE deleted_at IS NULL</code>) — much smaller and faster for queries that always carry that predicate.",
+    "Other types: <b>GIN</b> for arrays/JSONB/full-text, <b>GiST</b> for geometric and range types, <b>BRIN</b> for huge naturally-ordered tables (time series), <b>hash</b> for equality only.",
+    "<b>Every index costs writes</b>: each insert/update/delete must maintain it, and it consumes memory and disk. Unused indexes are pure overhead — find them in <code>pg_stat_user_indexes</code>.",
+    "<b>Build indexes concurrently</b> in production (<code>CREATE INDEX CONCURRENTLY</code>) — the plain form takes a lock that blocks writes for the whole build."
+  ],
+  code:`<span class="cm">-- equality first, then range/sort</span>
+CREATE INDEX idx_orders_tenant_created ON orders (tenant_id, created_at DESC);
+
+<span class="cm">-- covering: answers entirely from the index (index-only scan)</span>
+CREATE INDEX idx_orders_lookup ON orders (tenant_id, status) INCLUDE (total, created_at);
+
+<span class="cm">-- partial: only the rows you ever query</span>
+CREATE INDEX idx_active_users ON users (email) WHERE deleted_at IS NULL;
+
+<span class="cm">-- ❌ function on the column disables the index</span>
+WHERE lower(email) = 'a@b.com';
+<span class="cm">-- ✅ index the expression instead</span>
+CREATE INDEX idx_users_email_lower ON users (lower(email));
+
+<span class="cm">-- never lock the table in production</span>
+CREATE INDEX CONCURRENTLY idx_orders_status ON orders (status);
+
+<span class="cm">-- find indexes nobody uses</span>
+SELECT relname, indexrelname, idx_scan FROM pg_stat_user_indexes WHERE idx_scan = 0;`,
+  traps:[
+    "<b>Any function or cast on an indexed column kills the index</b>: <code>lower(email)</code>, <code>date(created_at)</code>, <code>id::text</code>. Index the expression, or rewrite the predicate.",
+    "A leading wildcard (<code>LIKE '%foo'</code>) can't use a B-tree. Trailing wildcards can; full-text or trigram indexes handle the rest.",
+    "Indexing every column 'to be safe' slows down every write and wastes memory — and the planner still won't use most of them.",
+    "<code>OR</code> across different columns often prevents a single index from being used; a <code>UNION ALL</code> of two indexed queries can be dramatically faster.",
+    "<code>NULL</code>s and column order in the index must match the <code>ORDER BY</code> direction, or you lose the sort-avoidance benefit.",
+    "Adding an index to a huge table without <code>CONCURRENTLY</code> blocks writes for the entire build."
+  ],
+  terms:[
+    {term:"Leftmost prefix rule", desc:"A composite index on (a,b,c) serves a, (a,b), (a,b,c) — not b alone.", detail:"This is why one well-ordered composite index often replaces three single-column ones, and why a query filtering only on the second column mysteriously does a sequential scan.", code:`CREATE INDEX ON t (tenant_id, status, created_at);\n\nWHERE tenant_id = 1                             <span class="cm">-- ✅ uses index</span>\nWHERE tenant_id = 1 AND status = 'open'         <span class="cm">-- ✅</span>\nWHERE status = 'open'                           <span class="cm">-- ❌ no leading column</span>`},
+    {term:"Index-only scan", desc:"Answering a query from the index without touching the table.", detail:"Requires every referenced column to be in the index, and the visibility map to be current — which means it depends on vacuum having run. A query that is index-only in staging can hit the heap in production if the table is churning.", code:`CREATE INDEX ON orders (tenant_id) INCLUDE (total);\nSELECT sum(total) FROM orders WHERE tenant_id = 7;\n<span class="cm">-- EXPLAIN: Index Only Scan … Heap Fetches: 0</span>`},
+    {term:"When NOT to index", desc:"Low selectivity, tiny tables, write-heavy columns.", detail:"A boolean column with a 50/50 split, a table of 200 rows, or a counter updated on every request are all cases where the index costs more than it saves. Measure with EXPLAIN rather than guessing.", code:`<span class="cm">-- better: partial index on the rare value</span>\nCREATE INDEX ON jobs (created_at) WHERE status = 'failed';`}
+  ],
+  cards:[
+    {q:"How do you order columns in a composite index?", a:"<b>Equality predicates first, then the range or sort column.</b> For <code>WHERE tenant = ? AND created_at > ?</code> use <code>(tenant_id, created_at)</code>. Remember the leftmost-prefix rule: <code>(a,b,c)</code> serves a, (a,b) and (a,b,c) — never b alone."},
+    {q:"Why might the planner ignore your index?", a:"Low selectivity (the predicate matches too many rows, so a sequential scan is cheaper), a function or cast wrapping the column, a leading wildcard in LIKE, stale statistics, or the leading column of a composite index not being in the predicate."},
+    {q:"What is a covering index / index-only scan?", a:"An index containing every column the query needs (Postgres: <code>INCLUDE (…)</code>), so the engine answers from the index alone without heap lookups. It depends on the visibility map being current, so vacuum affects whether you actually get it."},
+    {q:"What does an index cost?", a:"Every insert, update and delete must maintain it; it consumes disk and shared memory; and building it on a large table locks writes unless you use <code>CREATE INDEX CONCURRENTLY</code>. Unused indexes are pure overhead — audit with <code>pg_stat_user_indexes</code>."}
+  ],
+  quiz:[
+    {q:"Index is on <code>(tenant_id, created_at)</code>. Which query cannot use it?", options:["<code>WHERE created_at &gt; now() - interval '1 day'</code>","<code>WHERE tenant_id = 4</code>","<code>WHERE tenant_id = 4 AND created_at &gt; …</code>","<code>WHERE tenant_id = 4 ORDER BY created_at DESC</code>"], answer:0,
+     why:"The leftmost-prefix rule: without a predicate on <code>tenant_id</code>, the index's ordering is useless for finding rows by <code>created_at</code> alone."},
+    {q:"Why is this slow despite an index on <code>email</code>?", code:`SELECT * FROM users WHERE lower(email) = 'a@b.com';`,
+     options:["The function on the column prevents index use","<code>SELECT *</code> is the problem","Email isn't selective enough","The index is corrupt"], answer:0,
+     why:"The index stores <code>email</code>, not <code>lower(email)</code>, so the planner can't match the predicate. Create an expression index on <code>lower(email)</code>, or store a normalised column."}
+  ],
+  cheat:[
+    "B-tree = O(log n) lookup <b>+ ordering</b> (range queries, ORDER BY without a sort).",
+    "<b>Composite order: equality columns → range/sort column.</b> Leftmost-prefix rule.",
+    "Covering (<code>INCLUDE</code>) ⇒ index-only scan (depends on vacuum/visibility map).",
+    "Partial index (<code>WHERE deleted_at IS NULL</code>) = smaller and faster.",
+    "Types: B-tree · <b>GIN</b> (JSONB/array/FTS) · GiST (geo/range) · <b>BRIN</b> (huge time-ordered) · hash (equality).",
+    "<b>Index killers</b>: function/cast on the column, leading <code>%</code>, low selectivity, stale stats.",
+    "Every index taxes writes. Audit <code>idx_scan = 0</code>. Always <code>CREATE INDEX CONCURRENTLY</code> in prod."
+  ]
+},
+
+{ id:'db-explain', group:'Performance', title:'Reading query plans with EXPLAIN', animate:'partition',
+  lede:"The difference between guessing and knowing — and it takes about five minutes to learn to read one.",
+  say:"<code>EXPLAIN</code> shows the planner's intended plan with estimates; <code>EXPLAIN (ANALYZE, BUFFERS)</code> actually runs it and shows real times and page reads. I read it inside-out, looking for three things: a big gap between estimated and actual rows, which means stale statistics; the node where actual time jumps; and the scan and join types. A sequential scan on a large table, or a nested loop over thousands of rows, is usually the answer.",
+  steps:[
+    "<code>EXPLAIN</code> shows the plan and <b>estimates</b>. <code>EXPLAIN ANALYZE</code> executes the query and shows <b>actual</b> rows and timings. Add <code>BUFFERS</code> to see page reads — cache hits vs disk.",
+    "Read the tree <b>inside-out / bottom-up</b>: the deepest nodes run first and feed their parents.",
+    "<b>Scan types</b>: <i>Seq Scan</i> (read everything — fine for small tables, alarming for large ones), <i>Index Scan</i> (index then heap), <i>Index Only Scan</i> (index alone), <i>Bitmap Heap Scan</i> (many matches — collect page ids, then read pages in order).",
+    "<b>Join types</b>: <i>Nested Loop</i> (great when the inner side is tiny or indexed, terrible for large × large), <i>Hash Join</i> (build a hash of the smaller side — the usual choice for big unsorted joins), <i>Merge Join</i> (both inputs already sorted).",
+    "<b>The single most useful signal</b> is <code>rows=</code> estimated versus <code>actual rows=</code>. A large divergence means the planner is working from bad statistics and every decision above that node is suspect — run <code>ANALYZE</code>.",
+    "Watch for <b>Rows Removed by Filter</b>: reading a million rows to return ten means the predicate isn't served by an index.",
+    "Watch for <b>external merge Disk</b> in a Sort node — the sort spilled to disk because <code>work_mem</code> is too small for it.",
+    "<b>Loops matters</b>: a node showing <code>actual time=0.01 … loops=50000</code> costs 500ms in total, not 0.01ms. Multiply.",
+    "Postgres 16+ can show <code>EXPLAIN (ANALYZE, BUFFERS, SETTINGS, WAL)</code>; <code>auto_explain</code> logs plans for slow queries in production, and <code>pg_stat_statements</code> ranks queries by total time."
+  ],
+  code:`EXPLAIN (ANALYZE, BUFFERS)
+SELECT o.id, u.email
+FROM orders o JOIN users u ON u.id = o.user_id
+WHERE o.tenant_id = 7 AND o.created_at &gt; now() - interval '7 days';
+
+<span class="cm">-- Nested Loop  (cost=… rows=12 width=…) (actual time=0.1..842 rows=48210 loops=1)</span>
+<span class="cm">--   -&gt; Seq Scan on orders o  (actual time=0.02..96 rows=48210 loops=1)</span>
+<span class="cm">--        Filter: (tenant_id = 7 …)   Rows Removed by Filter: 3104882   ← 🚩</span>
+<span class="cm">--   -&gt; Index Scan on users u  (actual time=0.01..0.01 rows=1 loops=48210) ← 🚩 loops!</span>
+
+<span class="cm">-- two red flags: estimate 12 vs actual 48,210 (bad stats),</span>
+<span class="cm">-- and a nested loop executing 48,210 times.</span>
+
+ANALYZE orders;                                     <span class="cm">-- refresh statistics</span>
+CREATE INDEX CONCURRENTLY ON orders (tenant_id, created_at);
+
+<span class="cm">-- find the worst queries in production</span>
+SELECT query, calls, mean_exec_time, total_exec_time
+FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 20;`,
+  traps:[
+    "<code>EXPLAIN ANALYZE</code> <b>actually runs the query</b> — including <code>UPDATE</code>/<code>DELETE</code>. Wrap it in a transaction you roll back.",
+    "Plans depend on data volume and statistics, so a plan from a small dev database tells you very little about production.",
+    "Reading only the total cost number is a mistake — costs are arbitrary units, and the useful information is in the per-node actual times and row counts.",
+    "A single slow query is rarely the biggest problem: <code>pg_stat_statements</code> sorted by <b>total</b> time often reveals a fast query called a million times.",
+    "Raising <code>work_mem</code> globally to avoid disk sorts multiplies across every concurrent connection and can exhaust memory — set it per-session for the query that needs it."
+  ],
+  terms:[
+    {term:"Estimated vs actual rows", desc:"The first thing to look at, every time.", detail:"The planner chooses join and scan strategies from estimated cardinality. If it expects 12 rows and gets 48,000, it will have chosen a nested loop that is now catastrophic. Fix the statistics (<code>ANALYZE</code>, raise <code>default_statistics_target</code>, or add extended statistics for correlated columns) before touching indexes.", code:`CREATE STATISTICS orders_tenant_status (dependencies)\n  ON tenant_id, status FROM orders;\nANALYZE orders;`},
+    {term:"pg_stat_statements", desc:"Aggregate query workload view — where to start, before EXPLAIN.", detail:"Ranks normalised queries by total time, calls, rows and cache hit ratio. Sorting by <code>total_exec_time</code> tells you what the database actually spends its day doing, which is frequently not the query anyone complained about.", code:`SELECT substr(query,1,60), calls, round(mean_exec_time::numeric,2) AS avg_ms,\n       round(total_exec_time::numeric) AS total_ms\nFROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;`}
+  ],
+  cards:[
+    {q:"What's the first thing you look at in an EXPLAIN ANALYZE?", a:"The gap between <code>rows=</code> (estimated) and <code>actual rows=</code>. A large divergence means the planner is working from bad statistics, so every join and scan choice above that node is suspect. Run <code>ANALYZE</code> before blaming indexes."},
+    {q:"EXPLAIN vs EXPLAIN ANALYZE?", a:"<code>EXPLAIN</code> shows the intended plan with estimates and doesn't execute. <code>EXPLAIN ANALYZE</code> runs the query and reports actual row counts and timings — so wrap DML in a transaction you roll back. Add <code>BUFFERS</code> to see cache hits versus disk reads."},
+    {q:"When is a Nested Loop join a problem?", a:"When the outer side returns many rows — the inner side executes once per row. Check the <code>loops=</code> count and multiply it by the per-loop time. For large × large joins you want a Hash Join, which usually means fixing the row estimate or adding an index."},
+    {q:"Where do you start when 'the database is slow'?", a:"<code>pg_stat_statements</code> ordered by <b>total</b> execution time — that shows where the database actually spends its time, which is often a fast query called a million times rather than the one someone reported."}
+  ],
+  quiz:[
+    {q:"A plan shows <code>rows=15</code> but <code>actual rows=90000</code>, and a Nested Loop above it. First action?", options:["Run ANALYZE — the estimate is wrong, so the join choice is wrong","Increase work_mem","Add a hash index","Rewrite as a subquery"], answer:0,
+     why:"The planner picked a nested loop because it expected 15 rows. Fixing the statistics usually flips it to a hash join on its own. Only then consider indexes or rewrites."}
+  ],
+  cheat:[
+    "<code>EXPLAIN (ANALYZE, BUFFERS)</code>; read <b>bottom-up</b>. ANALYZE <b>executes</b> — wrap DML in a rolled-back transaction.",
+    "<b>#1 signal: estimated vs actual rows.</b> Big gap ⇒ run <code>ANALYZE</code> / extended statistics.",
+    "Scans: Seq · Index · <b>Index Only</b> · Bitmap Heap. Joins: <b>Nested Loop</b> (small/indexed inner) · Hash (big unsorted) · Merge (pre-sorted).",
+    "Red flags: <b>Rows Removed by Filter</b>, high <code>loops=</code>, <code>Sort … external merge Disk</code>.",
+    "Multiply per-node time by <code>loops</code>.",
+    "Start from <b><code>pg_stat_statements</code> by total_exec_time</b>; <code>auto_explain</code> for prod plans."
+  ]
+},
+
+{ id:'db-slow', group:'Performance', title:'The recurring slow-query patterns', animate:'nplusone',
+  lede:"Nearly every database performance incident is one of about eight shapes.",
+  say:"The ones I look for first are N+1 queries, unbounded result sets, OFFSET pagination on deep pages, functions wrapping indexed columns, SELECT * pulling large columns, missing indexes on foreign keys, and a chatty ORM hiding all of it. Each has a known fix, and the reason they survive to production is that they're all fast on a development dataset.",
+  steps:[
+    "<b>N+1 queries</b> — one query for a list, then one per item. Fix with a join, eager loading, or batching into <code>WHERE id IN (…)</code>. (Full topic in the Frameworks track.)",
+    "<b>Unbounded queries</b> — no <code>LIMIT</code>, so a table that grew from 10k to 10M rows quietly kills the service. Every list endpoint must paginate.",
+    "<b>OFFSET pagination</b> — <code>OFFSET 100000</code> makes the database read and discard 100,000 rows. Use <b>keyset (cursor) pagination</b> on an indexed, unique ordering column instead.",
+    "<b>Functions on indexed columns</b> — <code>lower(email)</code>, <code>date(created_at)</code>, <code>id::text</code> all prevent index use. Index the expression, or store a normalised column.",
+    "<b><code>SELECT *</code></b> — pulls large TEXT/JSONB columns you don't need, defeats index-only scans, and breaks when the schema changes. Select the columns you use.",
+    "<b>Missing indexes on foreign keys</b> — Postgres doesn't create them automatically, and a delete on the parent then scans the whole child table to check references.",
+    "<b>Counting everything</b> — <code>SELECT count(*)</code> on a large table is a full scan. Use an approximate count from statistics, or a maintained counter, when an exact number isn't required.",
+    "<b>Chatty transactions</b> — a loop of individual inserts instead of one multi-row insert or <code>COPY</code>; each round trip pays network latency.",
+    "All of these are <b>invisible in development</b> because the dataset is tiny. Test against production-scale data, log query counts per request, and alert on the outliers."
+  ],
+  code:`<span class="cm">-- ❌ deep OFFSET: reads and throws away 100,000 rows</span>
+SELECT * FROM orders ORDER BY created_at DESC OFFSET 100000 LIMIT 20;
+
+<span class="cm">-- ✅ keyset pagination: constant cost at any depth</span>
+SELECT * FROM orders
+WHERE (created_at, id) &lt; ($lastCreatedAt, $lastId)   <span class="cm">-- tuple comparison, stable</span>
+ORDER BY created_at DESC, id DESC
+LIMIT 20;
+
+<span class="cm">-- ❌ N round trips</span>
+for (const r of rows) await db.query('INSERT INTO t VALUES ($1)', [r]);
+
+<span class="cm">-- ✅ one round trip</span>
+INSERT INTO t (a, b) SELECT * FROM unnest($1::int[], $2::text[]);
+
+<span class="cm">-- approximate count, instant</span>
+SELECT reltuples::bigint FROM pg_class WHERE relname = 'orders';`,
+  traps:[
+    "Keyset pagination needs a <b>unique, stable</b> ordering key — order by <code>(created_at, id)</code>, not <code>created_at</code> alone, or rows with identical timestamps are skipped or repeated.",
+    "Keyset pagination can't jump to page 57. If the product genuinely needs numbered pages, cap the depth or use a different UX.",
+    "An ORM's lazy relations turn a property access into a query inside a loop — N+1 that looks like ordinary object code.",
+    "Adding <code>LIMIT</code> without <code>ORDER BY</code> gives non-deterministic results across runs.",
+    "`SELECT *` through an ORM often also fetches TOASTed large columns, multiplying the bytes transferred for no benefit."
+  ],
+  terms:[
+    {term:"Keyset (cursor) pagination", desc:"Page from the last row's sort key rather than an offset.", detail:"Cost is constant regardless of depth because the index seeks directly to the position — and it's stable under concurrent inserts, unlike OFFSET, which shifts rows between pages.", code:`<span class="cm">-- index that makes it O(1) per page</span>\nCREATE INDEX ON orders (created_at DESC, id DESC);\n<span class="cm">-- cursor = base64 of (created_at, id) of the last row</span>`},
+    {term:"Query-count-per-request", desc:"The cheapest instrumentation that catches N+1 in production.", detail:"Count queries per request in a middleware or ORM hook, attach it to the request log, and alert on requests above a threshold. Traces show the same thing as a long fan of identical spans.", code:`app.use((req, res, next) =&gt; {\n  req.dbQueries = 0;\n  res.on('finish', () =&gt; {\n    if (req.dbQueries &gt; 20) logger.warn({ route: req.route?.path, n: req.dbQueries }, 'query fan-out');\n  });\n  next();\n});`}
+  ],
+  cards:[
+    {q:"Why is OFFSET pagination slow at depth, and what replaces it?", a:"The database must read and discard every skipped row, so cost grows linearly with the offset. Keyset (cursor) pagination seeks straight to the last row's sort key — constant cost at any depth, and stable under concurrent inserts."},
+    {q:"What must the ordering key be for keyset pagination?", a:"Unique and stable. Order by a tuple that includes the primary key — <code>(created_at, id)</code> — otherwise rows sharing a timestamp get skipped or duplicated across pages."},
+    {q:"Why do these problems only appear in production?", a:"They're all O(n) or O(n²) in data volume, and development datasets are tiny. 201 queries against 200 rows is fast; against 200,000 it isn't. Test against production-scale data and instrument query count per request."},
+    {q:"Name three things that silently disable an index.", a:"A function or cast on the column (<code>lower(email)</code>, <code>id::text</code>), a leading wildcard in <code>LIKE '%x'</code>, and a predicate that isn't selective enough for the planner to prefer the index over a sequential scan. Stale statistics do it too."}
+  ],
+  quiz:[
+    {q:"An endpoint is fast on page 1 and takes 8 seconds on page 5000. Cause?", options:["OFFSET pagination — the database reads and discards all skipped rows","Missing connection pool","Lock contention","Too many indexes"], answer:0,
+     why:"OFFSET cost grows with depth. Keyset pagination against an index on the ordering tuple makes every page cost the same."}
+  ],
+  cheat:[
+    "<b>N+1</b> → join / eager load / <code>IN (…)</code> batch.",
+    "<b>No LIMIT</b> → every list endpoint paginates.",
+    "<b>Deep OFFSET</b> → keyset pagination on <code>(sort_col, id)</code> with a matching index.",
+    "<b>Function on column</b> → expression index or normalised column.",
+    "<b><code>SELECT *</code></b> → name the columns (also enables index-only scans).",
+    "<b>Unindexed FKs</b> → Postgres doesn't add them; parent deletes then scan the child.",
+    "<b>count(*)</b> on big tables → approximate via <code>reltuples</code> or a maintained counter.",
+    "<b>Row-at-a-time inserts</b> → multi-row INSERT / <code>COPY</code> / <code>unnest</code>.",
+    "All invisible in dev ⇒ test at scale + log query count per request."
+  ]
+},
+
+/* ==================== SCALE ==================== */
+{ id:'db-replication', group:'Scale', title:'Replication, read replicas & failover', animate:'loadbalance',
+  lede:"The first scaling move for reads — and the first place where 'I just wrote that' stops being true.",
+  say:"Streaming replication ships the WAL from the primary to replicas. Async replication is the default: commits don't wait for replicas, so replicas lag, and a read immediately after a write can miss it. That read-your-own-writes problem is the thing to design around — route reads that must be fresh to the primary, or wait for the replica's LSN. Synchronous replication removes the lag at the cost of commit latency and availability.",
+  steps:[
+    "<b>Streaming replication</b> continuously ships WAL records from the primary to replicas, which replay them. Replicas are read-only.",
+    "<b>Asynchronous</b> (the default): the primary commits without waiting for replicas. Fast, but replicas lag — typically milliseconds, sometimes far more under load or long queries.",
+    "<b>Synchronous</b>: commit waits for at least one replica to confirm. No data loss on failover, but every write pays the network round trip, and losing the sync replica can stall writes.",
+    "<b>Read replicas</b> scale reads, not writes. All writes still go to the single primary — that's the ceiling that eventually forces sharding or a different datastore.",
+    "<b>Replication lag is the operational metric.</b> Monitor it in seconds and bytes; alert before it becomes user-visible.",
+    "<b>Read-your-own-writes</b> is the classic bug: user updates their profile, the next request reads a replica, and the change 'didn't save'. Fixes: route that user's reads to the primary for a short window, wait for the replica to reach the write's LSN, or read from the primary for anything the user just changed.",
+    "<b>Failover</b> promotes a replica. With async replication you can lose the unreplicated tail; managed services (RDS Multi-AZ, Aurora) automate promotion and DNS/endpoint switching.",
+    "<b>Logical replication</b> ships row-level changes rather than physical WAL, which allows replicating a subset of tables, replicating across major versions, and feeding CDC pipelines.",
+    "Long-running queries on a replica can conflict with replay; Postgres either cancels them or delays replay (<code>hot_standby_feedback</code>), which then causes bloat on the primary — a trade-off worth knowing."
+  ],
+  code:`<span class="cm">-- lag on the replica</span>
+SELECT now() - pg_last_xact_replay_timestamp() AS replica_lag;
+
+<span class="cm">-- read-your-own-writes: remember the write position…</span>
+const { lsn } = await primary.query('SELECT pg_current_wal_lsn() AS lsn');
+
+<span class="cm">-- …and only read from a replica that has caught up</span>
+SELECT pg_last_wal_replay_lsn() &gt;= $1 AS caught_up;
+
+<span class="cm">-- application-level routing</span>
+const db = (needsFresh) =&gt; needsFresh ? primaryPool : replicaPool;
+await db(justWrote).query('SELECT * FROM profile WHERE user_id = $1', [id]);`,
+  traps:[
+    "Routing <i>all</i> reads to replicas without thinking causes intermittent 'my change disappeared' bug reports that are almost impossible to reproduce.",
+    "Replicas don't help write throughput at all — if writes are the bottleneck, replicas are the wrong tool.",
+    "A replica used for heavy analytics can fall far behind, so it's also serving stale data to your application reads. Use a dedicated replica for reporting.",
+    "Async failover can lose recently committed transactions. If that's unacceptable, you need synchronous replication and must accept its latency and availability cost.",
+    "A stuck logical replication slot retains WAL forever and can fill the primary's disk — a genuinely common outage cause."
+  ],
+  terms:[
+    {term:"Read-your-own-writes", desc:"A consistency guarantee that async replication breaks.", detail:"The cheapest practical fix is a short sticky window: after a write, route that user's reads to the primary for a few seconds. The precise fix is LSN-based: record the write's LSN and only use a replica that has replayed at least that far.", code:`<span class="cm">// sticky window, stored in the session/cookie</span>\nif (Date.now() - session.lastWriteAt &lt; 5000) usePrimary();`},
+    {term:"Logical vs physical replication", desc:"Row-level changes vs byte-level WAL.", detail:"Physical is exact and cheap but all-or-nothing and version-locked. Logical decodes WAL into row changes, enabling selective replication, cross-version upgrades, and change-data-capture into Kafka/Kinesis or a search index.", code:`CREATE PUBLICATION orders_pub FOR TABLE orders, order_items;\n<span class="cm">-- consumer: CREATE SUBSCRIPTION … or a CDC tool (Debezium/DMS)</span>`}
+  ],
+  cards:[
+    {q:"What does a read replica actually scale?", a:"Reads only. Every write still goes through the single primary, so replicas move the read ceiling but not the write ceiling — when writes saturate, you need partitioning/sharding or a different datastore."},
+    {q:"What is read-your-own-writes and how do you fix it?", a:"With async replication, a read routed to a replica right after a write can miss it, so the user thinks their change didn't save. Fix by routing that user's reads to the primary for a short sticky window, or by recording the write's LSN and only using a replica that has replayed past it."},
+    {q:"Sync vs async replication trade-off?", a:"Async: fast commits, replicas lag, and a failover can lose the unreplicated tail. Sync: no data loss on failover, but every commit pays a network round trip and losing the sync replica can stall writes entirely."},
+    {q:"What is logical replication used for?", a:"Row-level change streams: replicating a subset of tables, cross-major-version upgrades, and change-data-capture into a search index, warehouse or event stream. Watch out for stuck slots retaining WAL and filling the primary's disk."}
+  ],
+  quiz:[
+    {q:"Users report that profile edits 'don't save', but only sometimes. Reads go to a replica. Most likely cause?", options:["Async replication lag — the read hit a replica before the write replicated","Transaction not committed","Missing index","Connection pool exhaustion"], answer:0,
+     why:"Classic read-your-own-writes violation. Route post-write reads to the primary for a short window, or gate the replica read on its replayed LSN."}
+  ],
+  cheat:[
+    "Streaming replication ships <b>WAL</b>; replicas are read-only.",
+    "<b>Async (default)</b>: fast commit, lag, possible data loss on failover. <b>Sync</b>: no loss, slower commits, availability risk.",
+    "Replicas scale <b>reads only</b>. Writes remain single-primary.",
+    "<b>Read-your-own-writes</b>: sticky-to-primary window, or gate on replayed LSN.",
+    "Monitor lag (seconds <i>and</i> bytes). Dedicated replica for analytics.",
+    "<b>Logical</b> replication = row-level → CDC, subsets, cross-version. Stuck slots fill the disk."
+  ]
+},
+
+{ id:'db-sharding', group:'Scale', title:'Partitioning, sharding & consistent hashing', animate:'shard',
+  lede:"When one primary can't take the writes any more — and why this is the last resort, not the first.",
+  say:"Partitioning splits one table inside one database, usually by time, and mainly buys cheap data lifecycle and better pruning. Sharding splits data across separate databases and is what actually scales writes — at the cost of losing cross-shard joins, transactions and easy re-balancing. Shard key choice is everything: it must be high-cardinality, evenly distributed, and present in almost every query. Consistent hashing is what keeps re-sharding from moving all the data.",
+  steps:[
+    "<b>Partitioning</b> (declarative, in Postgres) splits one logical table into child tables by range, list or hash — inside a single database. The planner prunes irrelevant partitions.",
+    "The biggest practical win of partitioning is <b>data lifecycle</b>: dropping last year's partition is instant, whereas <code>DELETE</code> of a billion rows is a bloat event.",
+    "<b>Sharding</b> distributes data across <b>separate databases</b>. It's what actually scales writes, and it's a significant architectural commitment.",
+    "<b>Shard key</b> requirements: high cardinality, even distribution, and present in nearly every query — because a query without it must fan out to every shard.",
+    "Common keys: <b>tenant/customer id</b> (natural isolation, but a huge tenant becomes a hot shard), <b>user id</b>, or a <b>hash</b> of the id (even distribution, no range queries).",
+    "What you give up: <b>cross-shard joins, foreign keys and transactions</b>. Cross-shard consistency needs a saga or two-phase commit; both are complex.",
+    "<b>Consistent hashing</b> maps shards and keys onto a ring so that adding a shard moves only ~1/n of the keys, instead of the total reshuffle that <code>hash % n</code> causes. <b>Virtual nodes</b> smooth out the distribution.",
+    "An alternative to hashing is a <b>lookup/directory service</b> mapping key → shard: more flexible (you can move a single tenant), at the cost of an extra hop and a component to keep available.",
+    "<b>Exhaust the cheaper options first</b>: indexes, caching, read replicas, partitioning, archiving cold data, and moving the write-heavy table to a datastore designed for it."
+  ],
+  code:`<span class="cm">-- declarative partitioning by month (one database)</span>
+CREATE TABLE events (id bigint, tenant_id int, created_at timestamptz, payload jsonb)
+  PARTITION BY RANGE (created_at);
+CREATE TABLE events_2026_09 PARTITION OF events
+  FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+
+DROP TABLE events_2025_09;      <span class="cm">-- instant retention, no bloat</span>
+
+<span class="cm">// consistent hashing with virtual nodes</span>
+class Ring {
+  constructor(shards, vnodes = 150){
+    this.ring = shards.flatMap(s =&gt;
+      Array.from({length: vnodes}, (_, i) =&gt; ({ hash: hash(\`\${s}#\${i}\`), shard: s })))
+      .sort((a, b) =&gt; a.hash - b.hash);
+  }
+  locate(key){
+    const h = hash(key);
+    return (this.ring.find(n =&gt; n.hash &gt;= h) ?? this.ring[0]).shard;
+  }
+}
+<span class="cm">// adding a shard moves ~1/n of keys — not all of them</span>`,
+  traps:[
+    "<b>Sharding is very hard to undo.</b> Every cheaper option — indexes, caching, replicas, partitioning, archiving — should be exhausted first.",
+    "A query without the shard key must fan out to every shard and merge results in the application — slow, and it gets slower with each shard added.",
+    "<code>hash(key) % n</code> re-maps almost every key when <code>n</code> changes. Consistent hashing exists precisely to avoid that.",
+    "Tenant-based sharding produces hot shards when one customer is 100× the others; you need the ability to move or split a single tenant.",
+    "Partitioning with too many partitions (thousands) slows planning; and every partition needs its own indexes.",
+    "Cross-shard reporting queries usually need a separate analytics store rather than being answered from the shards."
+  ],
+  terms:[
+    {term:"Consistent hashing", desc:"Ring mapping so adding/removing a node moves only ~1/n of keys.", detail:"Both shards and keys are hashed onto the same ring; a key belongs to the first node clockwise. Virtual nodes (many ring positions per physical node) prevent uneven distribution and make removal spread across all remaining nodes.", code:`<span class="cm">// modulo: 4 → 5 shards remaps ~80% of keys</span>\n<span class="cm">// consistent hashing: remaps ~20%</span>`},
+    {term:"Partitioning vs sharding", desc:"One database with child tables vs many databases.", detail:"Partitioning is a query-planning and maintenance feature — same connection, same transactions, same joins. Sharding is a distribution strategy that removes cross-shard transactions and joins entirely. They're often confused in interviews.", code:`<span class="cm">-- partitioning: still one DB, joins and transactions work</span>\nSELECT * FROM events WHERE created_at &gt;= '2026-09-01';  <span class="cm">-- prunes to one partition</span>`}
+  ],
+  cards:[
+    {q:"Partitioning vs sharding?", a:"Partitioning splits one table into child tables <b>within one database</b> — joins, foreign keys and transactions still work, and you gain pruning plus instant retention by dropping partitions. Sharding splits data across <b>separate databases</b> to scale writes, and gives up cross-shard joins, FKs and transactions."},
+    {q:"What makes a good shard key?", a:"High cardinality, even distribution, and present in almost every query — because a query lacking it must fan out to all shards. Tenant id is natural but risks hot shards; a hash of the id distributes evenly but loses range queries."},
+    {q:"Why consistent hashing instead of <code>hash % n</code>?", a:"With modulo, changing the shard count remaps nearly every key, requiring a full data migration. Consistent hashing places nodes and keys on a ring so adding or removing a node moves only about 1/n of the keys; virtual nodes keep the distribution even."},
+    {q:"What should you try before sharding?", a:"Indexes and query fixes, caching, read replicas, table partitioning, archiving cold data, and moving the write-heavy workload to a datastore built for it. Sharding is a large, hard-to-reverse commitment."}
+  ],
+  quiz:[
+    {q:"A sharded system uses <code>hash(user_id) % 8</code>. Adding a 9th shard requires…", options:["Moving roughly 89% of all keys","Moving 1/9 of keys","No data movement","Only new writes to move"], answer:0,
+     why:"Modulo remaps nearly every key when the divisor changes. Consistent hashing would move only about 1/9 of the data — which is exactly the problem it was designed to solve."}
+  ],
+  cheat:[
+    "<b>Partitioning</b> = child tables, one DB → pruning + <b>instant retention via DROP</b>. Joins/transactions intact.",
+    "<b>Sharding</b> = separate DBs → scales <b>writes</b>. Loses cross-shard joins, FKs, transactions.",
+    "Shard key: high cardinality · even · <b>in almost every query</b> (else fan-out).",
+    "<code>hash % n</code> remaps ~everything on resize → <b>consistent hashing + virtual nodes</b> (~1/n moves).",
+    "Directory/lookup service = flexible (move one tenant) + an extra hop.",
+    "<b>Try first</b>: indexes → cache → replicas → partitioning → archive → different datastore."
+  ]
+},
+
+{ id:'db-modelling', group:'Scale', title:'Schema design: normalisation & when to denormalise', animate:'normalise',
+  lede:"Normalise until it hurts, denormalise until it works — with the reasons for each step.",
+  say:"Normalisation removes duplication so a fact lives in exactly one place, which makes updates safe and constraints enforceable. I start there, then denormalise deliberately where a read path is hot and the duplicated data changes rarely — accepting that I now own keeping the copies in sync. Constraints belong in the database, because application-level validation can't survive concurrency or a second writer.",
+  steps:[
+    "<b>1NF</b> — atomic column values, no repeating groups. <b>2NF</b> — no partial dependency on part of a composite key. <b>3NF</b> — no transitive dependency: non-key columns depend only on the key.",
+    "The practical summary: <b>every fact lives in exactly one place</b>. Then an update touches one row and can't leave inconsistent copies behind.",
+    "<b>Denormalise deliberately</b>, for a specific hot read path — a stored <code>order_total</code>, a cached <code>comment_count</code>, a duplicated <code>customer_name</code> on an invoice.",
+    "Every denormalisation creates a <b>synchronisation obligation</b>. Decide up front how it's maintained: a trigger, application code in the same transaction, or a background job, and how you'd detect drift.",
+    "Some duplication is not denormalisation but <b>correctness</b>: an invoice must store the price and address <i>as they were</i>, not join to a table that has since changed.",
+    "<b>Put constraints in the database</b> — not null, foreign keys, unique, check. Application validation cannot hold under concurrency, and there's always a second writer eventually (a script, a migration, another service).",
+    "<b>Choose types precisely</b>: <code>timestamptz</code> not <code>timestamp</code>, <code>numeric</code> for money (never float), <code>text</code> over arbitrary <code>varchar(n)</code> limits, native <code>uuid</code>, and enums or a lookup table rather than free-text status.",
+    "<b>JSONB</b> is excellent for genuinely variable attributes and terrible as a way to avoid designing a schema — you lose constraints, cheap column stats, and clear query plans. Index it with GIN when you do use it.",
+    "<b>Surrogate vs natural keys</b>: prefer a surrogate primary key; if you use UUIDs at scale, use a time-ordered variant (UUIDv7) so inserts don't fragment the index."
+  ],
+  code:`<span class="cm">-- normalised: the customer's name lives in one place</span>
+CREATE TABLE customers (id bigserial PRIMARY KEY, name text NOT NULL);
+CREATE TABLE orders (
+  id          bigserial PRIMARY KEY,
+  customer_id bigint NOT NULL REFERENCES customers(id),
+  placed_at   timestamptz NOT NULL DEFAULT now(),
+  total_cents bigint NOT NULL CHECK (total_cents &gt;= 0)   <span class="cm">-- money as integers</span>
+);
+CREATE INDEX ON orders (customer_id);          <span class="cm">-- FKs are NOT auto-indexed</span>
+
+<span class="cm">-- correctness duplication: the invoice keeps the values as they were</span>
+CREATE TABLE invoice_lines (
+  invoice_id bigint REFERENCES invoices(id),
+  sku        text NOT NULL,
+  description text NOT NULL,        <span class="cm">-- snapshot, not a join</span>
+  unit_price_cents bigint NOT NULL  <span class="cm">-- price at time of sale</span>
+);
+
+<span class="cm">-- deliberate denormalisation, with the sync obligation stated</span>
+ALTER TABLE posts ADD COLUMN comment_count int NOT NULL DEFAULT 0;
+<span class="cm">-- maintained by trigger on comments; reconciled nightly</span>`,
+  traps:[
+    "<b>Floats for money.</b> <code>0.1 + 0.2 ≠ 0.3</code> in binary floating point. Use integer minor units or <code>numeric</code>.",
+    "<code>timestamp</code> without time zone loses the offset and produces bugs that only appear across DST or regions. Use <code>timestamptz</code> and store UTC.",
+    "Postgres does <b>not</b> index foreign keys automatically — deletes on the parent then scan the whole child table.",
+    "Using JSONB to skip schema design means no constraints, poor statistics, and queries the planner can't optimise well.",
+    "Random UUIDv4 primary keys on a large, insert-heavy table fragment the B-tree and hurt cache locality; UUIDv7 (time-ordered) avoids most of it.",
+    "A denormalised counter with no reconciliation job drifts silently, and nobody notices until a customer does."
+  ],
+  terms:[
+    {term:"Denormalisation with a sync plan", desc:"Never duplicate data without deciding how it stays correct.", detail:"The three options are: maintain it in the same transaction (correct, slightly slower writes), a database trigger (correct, invisible to application developers), or an async job (fast, eventually consistent, needs reconciliation). Pick one explicitly and write down how drift is detected.", code:`CREATE FUNCTION bump_count() RETURNS trigger AS $$\nBEGIN\n  UPDATE posts SET comment_count = comment_count + 1 WHERE id = NEW.post_id;\n  RETURN NEW;\nEND $$ LANGUAGE plpgsql;\nCREATE TRIGGER t AFTER INSERT ON comments FOR EACH ROW EXECUTE FUNCTION bump_count();`},
+    {term:"Constraints as the last line of defence", desc:"The only validation that survives concurrency and a second writer.", detail:"A uniqueness check done as SELECT-then-INSERT is a race; a unique index is not. Application validation is for good error messages; the constraint is for correctness.", code:`<span class="cm">-- race-free uniqueness, including case-insensitive</span>\nCREATE UNIQUE INDEX ON users (lower(email));\n\n<span class="cm">-- exclusion constraint: no overlapping bookings for a room</span>\nALTER TABLE bookings ADD EXCLUDE USING gist\n  (room_id WITH =, during WITH &amp;&amp;);`}
+  ],
+  cards:[
+    {q:"Summarise 3NF in one sentence.", a:"Every non-key column depends on the key, the whole key, and nothing but the key — i.e. each fact is stored in exactly one place, so an update touches one row and can't leave inconsistent duplicates."},
+    {q:"When should you denormalise?", a:"For a specific hot read path where the duplicated data changes rarely, and only after deciding how the copy is kept in sync (same transaction, trigger, or reconciled background job) and how drift would be detected."},
+    {q:"Is storing a product's price on the invoice line denormalisation?", a:"No — that's correctness. An invoice must record the price and address <i>as they were at the time</i>, not join to a table whose values have since changed. Historical snapshots are a different concept from duplicated current state."},
+    {q:"Name four schema type choices people get wrong.", a:"Floats for money (use integer minor units or <code>numeric</code>); <code>timestamp</code> instead of <code>timestamptz</code>; free-text status instead of an enum or lookup table; and random UUIDv4 primary keys on large insert-heavy tables (use UUIDv7)."}
+  ],
+  quiz:[
+    {q:"Deleting a customer takes 40 seconds on a table with a million orders. Most likely cause?", options:["No index on the orders.customer_id foreign key","Missing primary key","Wrong isolation level","Table bloat"], answer:0,
+     why:"Postgres doesn't index foreign key columns automatically. To enforce the reference on delete it must scan the child table. Index every FK column you delete or join on."}
+  ],
+  cheat:[
+    "Normalise to 3NF: <b>each fact in exactly one place</b>. Denormalise <b>deliberately</b>, with a stated sync mechanism.",
+    "Historical snapshots (invoice price/address) = correctness, not denormalisation.",
+    "<b>Constraints belong in the DB</b>: NOT NULL, FK, UNIQUE (incl. expression), CHECK, EXCLUDE.",
+    "Types: <code>timestamptz</code> · money as <b>integer minor units</b>/<code>numeric</code> · <code>text</code> · native <code>uuid</code> (UUIDv7 at scale) · enum/lookup for status.",
+    "<b>Postgres does not index FKs</b> — add them yourself.",
+    "JSONB for genuinely variable attributes only; index with GIN."
+  ]
+},
+
+{ id:'db-choose', group:'Scale', title:'Choosing a datastore: SQL, document, key-value, columnar', animate:'datastore',
+  lede:"The question isn't which database is best — it's which access patterns you need and which guarantees you can give up.",
+  say:"I start from access patterns and guarantees, not from the product. Relational when the data is relational and you need ad-hoc queries plus transactions — which is most business software. Key-value or document when the access pattern is known, single-entity and needs predictable latency at scale. Columnar when the workload is analytical scans over huge datasets. And the honest default is Postgres, because it now covers JSON, full-text, geospatial and queues well enough that a second datastore has to earn its operational cost.",
+  steps:[
+    "<b>Relational (Postgres, MySQL, Aurora)</b> — strong consistency, transactions, joins, ad-hoc queries, constraints. Best default for business data, and it scales further than most people assume.",
+    "<b>Key-value / wide-column (DynamoDB, Cassandra)</b> — predictable single-digit-millisecond latency at any scale, but you must design around known access patterns; ad-hoc queries and joins are not available.",
+    "<b>Document (MongoDB, DocumentDB)</b> — flexible nested documents; good when the aggregate is naturally one document. Weak fit when you keep needing cross-document joins.",
+    "<b>Columnar / analytical (Redshift, BigQuery, ClickHouse, Athena over Parquet)</b> — scans and aggregates over billions of rows; terrible for single-row OLTP lookups.",
+    "<b>Search (OpenSearch, Elasticsearch)</b> — relevance ranking, fuzzy matching, facets. A derived index, never the system of record.",
+    "<b>In-memory (Redis, ElastiCache)</b> — caching, counters, rate limiting, leaderboards, locks, ephemeral state. Persistence exists but treat it as a cache unless you've thought hard about it.",
+    "The real questions to ask: <i>what are the access patterns? read/write ratio? consistency requirement? data volume and growth? query flexibility needed later? who operates it?</i>",
+    "<b>Polyglot persistence has a real cost</b>: every extra store adds operations, backups, failover, monitoring, a consistency boundary and an on-call burden. Each one must earn that.",
+    "The commonest sound architecture is <b>Postgres as the system of record</b>, plus Redis for cache/ephemeral state, plus a search index or analytics store fed by CDC."
+  ],
+  code:`<span class="cm">-- Postgres covers more than people expect:</span>
+SELECT * FROM docs WHERE attrs @&gt; '{"tier":"pro"}';       <span class="cm">-- JSONB + GIN</span>
+SELECT * FROM articles
+  WHERE to_tsvector('english', body) @@ plainto_tsquery('serverless');  <span class="cm">-- full text</span>
+SELECT * FROM stores ORDER BY location &lt;-&gt; point(6.9,79.8) LIMIT 5;     <span class="cm">-- PostGIS</span>
+SELECT * FROM jobs WHERE status='queued'
+  ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 10;             <span class="cm">-- a real work queue</span>
+
+<span class="cm">-- the common shape</span>
+<span class="cm">Postgres (source of truth) --CDC--&gt; OpenSearch (search)</span>
+<span class="cm">                           --CDC--&gt; S3/Parquet + Athena (analytics)</span>
+<span class="cm">        Redis (cache, rate limits, locks, sessions)</span>`,
+  traps:[
+    "Choosing a datastore for its scaling story when your data is 20GB and relational is the most common over-engineering mistake in this area.",
+    "Using a search index as the system of record — it's a derived, eventually-consistent, lossy view.",
+    "Adding a second datastore without deciding how the two stay consistent creates a permanent class of 'the data doesn't match' bugs.",
+    "'NoSQL is faster' is only true for the access patterns it was modelled for; an unmodelled query pattern can be far worse than SQL.",
+    "Ignoring the operational cost: backups, restores tested, failover, version upgrades, monitoring and someone who understands it at 3am."
+  ],
+  table:{title:'Fit by workload', head:['Need','Reach for'], rows:[
+    ['Transactions, joins, ad-hoc queries','Relational (Postgres/Aurora)'],
+    ['Known key-based access at massive scale','DynamoDB / Cassandra'],
+    ['Naturally document-shaped aggregates','Document store'],
+    ['Aggregates over billions of rows','Columnar / Athena over Parquet'],
+    ['Relevance, fuzzy match, facets','Search index (derived)'],
+    ['Cache, counters, locks, sessions','Redis'],
+    ['Ordered, replayable event stream','Kinesis / Kafka']
+  ]},
+  cards:[
+    {q:"How do you choose a datastore in an interview?", a:"Work from requirements, not products: access patterns, read/write ratio, consistency requirement, data volume and growth, how much query flexibility you'll need later, and who operates it. Then name the trade-off you're accepting."},
+    {q:"What's the strongest argument for defaulting to Postgres?", a:"It covers relational data, JSONB, full-text search, geospatial, and even a workable job queue (<code>FOR UPDATE SKIP LOCKED</code>), with real transactions and constraints. A second datastore has to earn its operational cost — backups, failover, monitoring, expertise."},
+    {q:"When is DynamoDB the right call over Postgres?", a:"When access patterns are known and key-based, you need predictable single-digit-millisecond latency at very large scale with no capacity planning, and you can accept losing joins and ad-hoc queries. If you'll need unanticipated query shapes, that's a strong argument the other way."},
+    {q:"What's the hidden cost of polyglot persistence?", a:"Each store adds operations, backups and restore testing, failover, upgrades, monitoring, on-call knowledge — and a consistency boundary between it and the source of truth that becomes a permanent source of bugs."}
+  ],
+  quiz:[
+    {q:"A team wants DynamoDB for a 15GB relational dataset with evolving reporting requirements. Best advice?", options:["Use a relational database — query flexibility is the actual requirement","DynamoDB, it scales better","MongoDB for flexibility","Split across both"], answer:0,
+     why:"DynamoDB requires access patterns to be known up front; evolving ad-hoc reporting is precisely what it's bad at. At 15GB, scale is not the constraint — query flexibility is."}
+  ],
+  cheat:[
+    "Choose from <b>access patterns + guarantees</b>, never from the product name.",
+    "Relational = transactions, joins, ad-hoc. KV/wide-column = known key access at scale. Document = natural aggregates. Columnar = big scans. Search = derived index. Redis = cache/counters/locks.",
+    "<b>Default to Postgres</b> — JSONB, FTS, PostGIS, <code>FOR UPDATE SKIP LOCKED</code> queue all included.",
+    "Common shape: Postgres (truth) + Redis (cache) + CDC → search / analytics.",
+    "Every extra store costs ops, backups, failover, monitoring, on-call <b>and a consistency boundary</b>.",
+    "Never make a search index the system of record."
+  ]
+},
+
+/* ==================== DATA PLATFORM ==================== */
+{ id:'db-redis', group:'Data platform', title:'Redis in practice: caching, locks & rate limits', animate:'cachelayers',
+  lede:"The default shared-state store next to your database — and the patterns worth knowing precisely.",
+  say:"Redis is single-threaded for command execution, which is why every command is atomic and why one slow command like <code>KEYS *</code> blocks everything. I use it for cache-aside with a TTL, distributed rate limiting, and sometimes locks — with the caveat that a correct lock needs a unique token, an atomic release via Lua, and an honest acknowledgement that Redlock is contested. Always set a TTL and an eviction policy, or it fills up.",
+  steps:[
+    "<b>Single-threaded command execution</b> means every command is atomic and ordering is predictable — and that a single O(n) command blocks every other client. Never run <code>KEYS *</code> in production; use <code>SCAN</code>.",
+    "<b>Cache-aside</b> is the default pattern: check cache → miss → read source → populate with a TTL. It degrades gracefully because an empty cache is still correct, just slower.",
+    "<b>Invalidate on write by deleting</b> the key rather than updating it — the next read repopulates correctly, and you avoid the cache and source drifting apart.",
+    "<b>Cache stampede</b>: a hot key expires and every concurrent request misses at once. Mitigate with request coalescing (a short lock so one caller fetches), staggered/jittered TTLs, or serving stale while revalidating.",
+    "<b>Data structures matter</b>: strings, hashes (partial field updates), sorted sets (leaderboards, sliding windows, delayed queues), sets, streams (consumer groups), HyperLogLog (approximate cardinality), bitmaps.",
+    "<b>Distributed rate limiting</b>: a sorted set of timestamps gives a true sliding window; <code>INCR</code> + <code>EXPIRE</code> gives a cheaper fixed window with edge bursts. Do the whole thing in one Lua script so it's atomic.",
+    "<b>Distributed locks</b>: <code>SET key token NX PX ttl</code> to acquire, and release with a Lua script that checks the token before deleting — otherwise you can delete someone else's lock. Redlock across multiple nodes is <b>contested</b>; don't claim it's safe for correctness-critical work.",
+    "<b>Eviction policy</b>: with <code>maxmemory</code> set, choose <code>allkeys-lru</code> for a pure cache. The default <code>noeviction</code> makes writes fail when full — a surprising outage.",
+    "<b>Persistence</b>: RDB snapshots and AOF exist, but treat Redis as a cache unless you have deliberately designed for durability; a failover can lose recent writes."
+  ],
+  code:`<span class="cm">// cache-aside with jittered TTL (avoids synchronised expiry)</span>
+async function getUser(id){
+  const k = \`user:\${id}\`;
+  const hit = await redis.get(k);
+  if (hit) return JSON.parse(hit);
+  const user = await db.users.find(id);
+  await redis.set(k, JSON.stringify(user), 'EX', 300 + Math.floor(Math.random() * 60));
+  return user;
+}
+await db.users.update(id, patch);
+await redis.del(\`user:\${id}\`);        <span class="cm">// invalidate by deleting, not updating</span>
+
+<span class="cm">-- sliding-window rate limit, atomic in one round trip</span>
+local now, window, limit = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, now - window)
+if redis.call('ZCARD', KEYS[1]) &gt;= limit then return 0 end
+redis.call('ZADD', KEYS[1], now, ARGV[4])
+redis.call('PEXPIRE', KEYS[1], window)
+return 1
+
+<span class="cm">-- safe lock release: only if the token is still mine</span>
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end`,
+  traps:[
+    "<code>KEYS *</code>, large <code>SMEMBERS</code>, or a huge <code>DEL</code> block the single thread and stall every other client. Use <code>SCAN</code> and <code>UNLINK</code>.",
+    "Deleting a lock without checking a unique token can delete a lock another process now holds — after your TTL expired mid-work.",
+    "No TTL plus <code>noeviction</code> means Redis fills up and writes start failing. Set <code>maxmemory</code> and an eviction policy explicitly.",
+    "Treating Redis as durable storage: a failover or restart can lose recent writes even with AOF, depending on fsync settings.",
+    "Caching without measuring the hit ratio adds staleness risk and complexity for possibly no benefit — instrument it.",
+    "Big keys (multi-megabyte values or million-element collections) cause latency spikes on every operation touching them."
+  ],
+  terms:[
+    {term:"Cache stampede", desc:"Many concurrent misses on the same hot key hammering the source at once.", detail:"Three practical mitigations: jittered TTLs so keys don't expire together; request coalescing so only one caller fetches while others wait; and stale-while-revalidate, serving the old value briefly while one worker refreshes.", code:`<span class="cm">// coalescing: one fetch per key, per process</span>\nconst inflight = new Map();\nfunction load(key){\n  if (inflight.has(key)) return inflight.get(key);\n  const p = fetchAndCache(key).finally(() =&gt; inflight.delete(key));\n  inflight.set(key, p);\n  return p;\n}`},
+    {term:"Distributed lock caveats", desc:"Correct enough for coordination; not a substitute for a database constraint.", detail:"Any lock with a TTL can expire while you're still working, so a second holder can appear. If correctness depends on mutual exclusion, back it with a database constraint or a conditional write — use the lock to reduce contention, not to guarantee safety.", code:`const token = crypto.randomUUID();\nconst ok = await redis.set(key, token, 'NX', 'PX', 10000);\ntry { if (ok) await work(); }\nfinally { await redis.eval(RELEASE_LUA, 1, key, token); }`}
+  ],
+  cards:[
+    {q:"Why is <code>KEYS *</code> dangerous?", a:"Redis executes commands on a single thread, so an O(n) command over the whole keyspace blocks every other client for its duration. Use <code>SCAN</code> for iteration and <code>UNLINK</code> for large deletes."},
+    {q:"Describe cache-aside and how you invalidate.", a:"Check the cache; on a miss read the source and populate with a TTL. On write, <b>delete</b> the key rather than updating it — the next read repopulates correctly and you avoid drift between cache and source."},
+    {q:"What is a cache stampede and how do you mitigate it?", a:"A hot key expires and every concurrent request misses simultaneously, hammering the source. Mitigate with jittered TTLs, request coalescing (one fetch while others wait), or stale-while-revalidate."},
+    {q:"How do you implement a Redis lock correctly?", a:"<code>SET key uniqueToken NX PX ttl</code> to acquire, and release with a Lua script that deletes only if the stored token matches yours. Note the honest caveat: the TTL can expire mid-work, so don't rely on it for correctness — back that with a database constraint."},
+    {q:"What eviction policy should a pure cache use?", a:"<code>allkeys-lru</code> (or <code>allkeys-lfu</code>) with <code>maxmemory</code> set. The default <code>noeviction</code> causes writes to fail once memory is full, which looks like a sudden outage."}
+  ],
+  quiz:[
+    {q:"A service releases a Redis lock with <code>DEL key</code>. What can go wrong?", options:["If the TTL expired mid-work, it deletes a lock another process now holds","Nothing","DEL is too slow","The key never expires"], answer:0,
+     why:"Without checking a unique token, you can delete someone else's lock. Store a random token at acquire time and release with a Lua compare-and-delete."}
+  ],
+  cheat:[
+    "<b>Single-threaded</b> ⇒ atomic commands, but one O(n) command blocks all. <code>SCAN</code> not <code>KEYS</code>, <code>UNLINK</code> not <code>DEL</code>.",
+    "<b>Cache-aside</b> + TTL; <b>invalidate by DEL</b> on write.",
+    "<b>Stampede</b> → jittered TTLs · coalescing · stale-while-revalidate.",
+    "Structures: hash (partial updates) · <b>zset</b> (leaderboards, sliding windows, delayed jobs) · streams (consumer groups) · HyperLogLog.",
+    "Rate limit: zset sliding window or <code>INCR</code>+<code>EXPIRE</code> fixed window — <b>in one Lua script</b>.",
+    "Lock: <code>SET k token NX PX ttl</code> + Lua compare-and-delete. <b>Redlock is contested</b> — back correctness with a DB constraint.",
+    "Set <code>maxmemory</code> + <code>allkeys-lru</code>; default <code>noeviction</code> fails writes. Track hit ratio."
+  ]
+},
+
+{ id:'db-lake', group:'Data platform', title:'Data lakes: S3, Glue, Parquet & Athena', animate:'lakepipe',
+  lede:"Getting analytics off the transactional database — and why file format and partitioning decide the bill.",
+  say:"The pattern is: land raw data in S3, catalogue it with Glue, convert to columnar Parquet partitioned by the columns you filter on, and query with Athena. Athena charges by bytes scanned, so partitioning and Parquet are not tuning — they're the cost model. Converting JSON to partitioned Parquet routinely cuts both scan volume and query time by an order of magnitude.",
+  steps:[
+    "<b>Why not query the OLTP database?</b> Analytical scans compete with transactional traffic for cache and I/O, hold long read transactions that block vacuum, and index-optimised row storage is the wrong shape for column aggregates.",
+    "<b>Landing zone</b>: raw events into S3, usually via Firehose or a batch export, in a <code>raw/</code> prefix that you never mutate — keeping the raw copy is what lets you reprocess after a bug.",
+    "<b>Catalogue</b>: AWS Glue Data Catalog holds table definitions and partitions. A crawler can infer schema, but explicit table definitions are more predictable in production.",
+    "<b>Convert to Parquet</b>: columnar, compressed, with per-column statistics. A query touching 3 of 50 columns reads only those three — often a 10× reduction versus JSON or CSV.",
+    "<b>Partition by what you filter on</b>, almost always date (<code>year=/month=/day=</code>) plus perhaps tenant. Partition pruning is what stops a query scanning the entire history.",
+    "<b>Athena is serverless Presto and bills per byte scanned</b>, so partitioning + Parquet + selecting only needed columns is directly a cost decision, not just a latency one.",
+    "<b>The small-files problem</b>: thousands of tiny objects make queries slow because of per-file overhead. Compact into files of roughly 128MB–1GB.",
+    "<b>Table formats</b> (Iceberg, Delta, Hudi) add ACID, schema evolution, time travel and row-level deletes on top of object storage — and Athena supports Iceberg, which matters for GDPR-style deletions.",
+    "<b>Medallion layering</b>: raw → cleaned/conformed → aggregated marts. Each layer is reproducible from the one before, which is what makes backfills safe."
+  ],
+  code:`<span class="cm">-- Hive-style partitioning: the folder layout IS the index</span>
+s3://lake/events/year=2026/month=09/day=08/part-0001.parquet
+
+CREATE EXTERNAL TABLE events (
+  event_id string, tenant_id int, action string, ts timestamp
+)
+PARTITIONED BY (year int, month int, day int)
+STORED AS PARQUET
+LOCATION 's3://lake/events/';
+
+MSCK REPAIR TABLE events;    <span class="cm">-- or partition projection, no repair needed</span>
+
+<span class="cm">-- ✅ prunes partitions and reads 2 columns: scans megabytes</span>
+SELECT action, count(*) FROM events
+WHERE year = 2026 AND month = 9 GROUP BY action;
+
+<span class="cm">-- ❌ no partition filter, SELECT *: scans the entire lake</span>
+SELECT * FROM events WHERE action = 'login';`,
+  traps:[
+    "<b>Forgetting the partition filter</b> turns a 200MB query into a full-history scan — and Athena bills for every byte.",
+    "Leaving data as JSON/CSV instead of Parquet multiplies both scan cost and query time.",
+    "Thousands of small files: per-file overhead dominates. Compact them on a schedule.",
+    "Over-partitioning (e.g. by hour <i>and</i> tenant <i>and</i> action) creates millions of tiny partitions and slows planning.",
+    "Glue crawlers inferring schema from mixed data produce surprising types; define tables explicitly for anything important.",
+    "Deleting a specific user's rows from plain Parquet means rewriting whole files — which is exactly why Iceberg exists."
+  ],
+  terms:[
+    {term:"Why Parquet", desc:"Columnar layout with per-column compression and statistics.", detail:"Row formats must read every column of every row. Parquet stores columns contiguously with min/max statistics per row group, so the engine skips both unneeded columns and row groups that can't match the predicate — that's predicate pushdown.", code:`<span class="cm">-- 50 columns, query needs 3 → reads ~6% of the bytes</span>\n<span class="cm">-- plus compression: often another 5–10× smaller than JSON</span>`},
+    {term:"Partition projection", desc:"Tell Athena the partition pattern instead of maintaining a partition list.", detail:"Removes the need for <code>MSCK REPAIR</code> or per-partition <code>ALTER TABLE ADD PARTITION</code>, and speeds up planning on tables with very many partitions.", code:`TBLPROPERTIES (\n  'projection.enabled'='true',\n  'projection.day.type'='date',\n  'projection.day.range'='2024/01/01,NOW',\n  'projection.day.format'='yyyy/MM/dd'\n)`}
+  ],
+  cards:[
+    {q:"Why does Athena cost depend on your file layout?", a:"Athena bills per byte scanned. Columnar Parquet means only the referenced columns are read; partitioning means only the relevant prefixes are read. Together they routinely cut both cost and latency by an order of magnitude versus unpartitioned JSON."},
+    {q:"How should a data lake be partitioned?", a:"By the columns you filter on — almost always date (<code>year=/month=/day=</code>), sometimes plus tenant. Enough to enable pruning, not so many that you create millions of tiny partitions and slow query planning."},
+    {q:"What is the small-files problem?", a:"Thousands of tiny objects mean per-file open/read overhead dominates the query. Compact into roughly 128MB–1GB files on a schedule; streaming ingestion (Firehose) needs buffering configured with this in mind."},
+    {q:"Why would you use Iceberg instead of plain Parquet?", a:"It adds ACID transactions, schema evolution, time travel and <b>row-level deletes/updates</b> on object storage. Deleting one user's rows from plain Parquet means rewriting entire files — Iceberg makes GDPR-style deletion and upserts practical."}
+  ],
+  quiz:[
+    {q:"An Athena query costs $12 and takes 4 minutes over JSON files in S3. Best first change?", options:["Convert to partitioned Parquet and select only needed columns","Increase the Athena timeout","Add more S3 buckets","Use a bigger Glue crawler"], answer:0,
+     why:"Athena bills by bytes scanned. Columnar Parquet plus partition pruning plus projecting only required columns attacks that directly — typically an order of magnitude on both cost and time."}
+  ],
+  cheat:[
+    "<b>S3 raw → Glue catalogue → Parquet, partitioned → Athena.</b> Keep the raw copy for reprocessing.",
+    "<b>Athena bills per byte scanned</b> ⇒ partitioning + Parquet + named columns = the cost model.",
+    "Partition by what you filter on (date, maybe tenant). Don't over-partition.",
+    "Compact <b>small files</b> to ~128MB–1GB.",
+    "Partition projection avoids <code>MSCK REPAIR</code>.",
+    "<b>Iceberg</b> for ACID, schema evolution, time travel, row-level deletes (GDPR).",
+    "Layer raw → cleaned → marts so backfills are reproducible."
+  ]
+},
+
+{ id:'db-cdc', group:'Data platform', title:'CDC, the outbox pattern & dual-write consistency', animate:'cdcflow',
+  lede:"How a database change reliably becomes an event — and why publishing directly from your handler is a bug.",
+  say:"The dual-write problem is that writing to the database and publishing an event are two separate operations that can't be made atomic — a crash between them silently loses the event or emits one for a transaction that rolled back. The transactional outbox fixes it: write the event into an outbox table in the <i>same</i> transaction, then a separate relay publishes it. Change-data-capture from the WAL or a stream is the same idea implemented by infrastructure.",
+  steps:[
+    "<b>The dual-write problem</b>: <code>await db.save(order)</code> then <code>await queue.publish(event)</code> are two operations with no shared transaction. A crash between them loses the event; a rollback after publishing emits an event for something that never happened.",
+    "<b>Transactional outbox</b>: insert the event row into an <code>outbox</code> table <b>inside the same transaction</b> as the business write. Atomic by construction.",
+    "A separate <b>relay</b> polls (or tails the WAL) and publishes outbox rows, marking them sent. If it crashes after publishing but before marking, the event is republished — <b>at-least-once, so consumers must be idempotent</b>.",
+    "<b>Change data capture (CDC)</b> is the same guarantee provided by infrastructure: Debezium or AWS DMS reads the WAL/binlog, DynamoDB Streams reads the table's change log, and emits row-level changes downstream.",
+    "CDC is how you keep a <b>search index, cache, warehouse or read model</b> in sync without the application writing to two places.",
+    "<b>Ordering</b> is guaranteed per key/partition, not globally. Use the entity id as the partition key so all changes to one entity stay ordered.",
+    "<b>Idempotency on the consumer</b> is mandatory: dedupe on the event id or use a conditional/upsert write, because every one of these paths is at-least-once.",
+    "The <b>inbox pattern</b> is the mirror image: record processed event ids in the consumer's own database, in the same transaction as its effects, so a redelivery is a safe no-op.",
+    "<b>Trade-off</b>: outbox is simple, portable and visible in your schema, but adds a table and a relay. CDC is lower-latency and application-transparent, but is infrastructure you must operate — and a stuck replication slot will fill the primary's disk."
+  ],
+  code:`<span class="cm">-- outbox table</span>
+CREATE TABLE outbox (
+  id bigserial PRIMARY KEY,
+  aggregate_id text NOT NULL,
+  type text NOT NULL,
+  payload jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  published_at timestamptz
+);
+CREATE INDEX ON outbox (id) WHERE published_at IS NULL;   <span class="cm">-- partial: unsent only</span>
+
+<span class="cm">// ✅ one transaction — cannot drift</span>
+await db.transaction(async (tx) =&gt; {
+  const order = await tx.orders.insert(dto);
+  await tx.outbox.insert({ aggregate_id: order.id, type: 'OrderPlaced', payload: order });
+});
+
+<span class="cm">-- relay: SKIP LOCKED lets several relay instances run safely</span>
+BEGIN;
+  SELECT * FROM outbox WHERE published_at IS NULL
+  ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 100;
+  <span class="cm">-- publish…</span>
+  UPDATE outbox SET published_at = now() WHERE id = ANY($1);
+COMMIT;`,
+  traps:[
+    "Publishing before committing emits events for transactions that later roll back — subscribers act on things that never happened.",
+    "Publishing after committing loses events if the process dies in between; retries in the handler don't fix it, because the process may not survive to retry.",
+    "Forgetting consumer idempotency: the relay's at-least-once behaviour then produces duplicate emails, charges or records.",
+    "An outbox table with no cleanup grows forever — archive or delete published rows on a schedule.",
+    "CDC emits <i>row</i> changes, not domain events. A consumer coupled to your table structure breaks whenever you refactor the schema — many teams map CDC into domain events deliberately.",
+    "A stuck logical replication slot retains WAL indefinitely and can fill the primary's disk."
+  ],
+  terms:[
+    {term:"FOR UPDATE SKIP LOCKED", desc:"Makes Postgres a workable queue and lets multiple relays run concurrently.", detail:"Each worker locks the rows it takes and skips rows another worker already holds, so there's no contention and no duplicate processing within the transaction window. It's also the basis of lightweight job queues in Postgres.", code:`SELECT * FROM jobs\nWHERE status = 'queued'\nORDER BY id\nFOR UPDATE SKIP LOCKED\nLIMIT 10;`},
+    {term:"Inbox / idempotent consumer", desc:"Record what you've processed, in the same transaction as its effects.", detail:"This converts at-least-once delivery into effectively-once processing without any distributed transaction — the standard, boring, correct answer.", code:`await db.transaction(async (tx) =&gt; {\n  const fresh = await tx.inbox.insertIgnore({ event_id: evt.id });\n  if (!fresh) return;                <span class="cm">// already processed</span>\n  await tx.apply(evt);\n});`}
+  ],
+  cards:[
+    {q:"What is the dual-write problem?", a:"Writing to the database and publishing an event are two separate operations with no shared transaction. A crash between them loses the event; publishing before committing can emit an event for a transaction that later rolls back. There's no ordering of the two that is safe."},
+    {q:"How does the transactional outbox solve it?", a:"The event is inserted into an outbox table inside the <b>same transaction</b> as the business write, so they commit or fail together. A separate relay then publishes unsent rows and marks them sent — at-least-once, so consumers must be idempotent."},
+    {q:"CDC vs outbox — what's the trade-off?", a:"Outbox is simple, portable and explicit in your schema, but adds a table and a relay to operate. CDC (Debezium, DMS, DynamoDB Streams) is lower-latency and requires no application change, but is infrastructure to run, emits row-level rather than domain events, and a stuck slot can fill the primary's disk."},
+    {q:"What is the inbox pattern?", a:"The consumer records processed event ids in its own database, in the same transaction as the effects. A redelivered event finds its id already present and becomes a no-op — turning at-least-once delivery into effectively-once processing with no distributed transaction."}
+  ],
+  quiz:[
+    {q:"An order service saves to Postgres then publishes to SNS. Occasionally an order exists with no downstream event. Best fix?", options:["Transactional outbox — write the event in the same transaction, relay publishes it","Retry the publish in a catch block","Publish before saving","Use a bigger SNS timeout"], answer:0,
+     why:"The gap between commit and publish can't be closed by retries — the process may die in it. Only writing the event atomically with the business data removes the failure mode."}
+  ],
+  cheat:[
+    "<b>Dual write is unsafe in both orders</b> (lose events, or emit for rolled-back work).",
+    "<b>Outbox</b>: event row in the <b>same transaction</b> → relay publishes → mark sent. At-least-once.",
+    "Relay uses <code>FOR UPDATE SKIP LOCKED</code> so multiple instances are safe.",
+    "<b>CDC</b> = same guarantee from infra (Debezium/DMS/DynamoDB Streams) → search index, cache, warehouse, read models.",
+    "Ordering per <b>key/partition</b>, not global → partition by entity id.",
+    "<b>Consumers must be idempotent</b> — inbox table or conditional write.",
+    "Archive published outbox rows; watch replication slots for WAL retention."
+  ]
+},
+
+{ id:'demo-db', group:'Interactive', title:'Live demo: isolation, locks & index scans', type:'demo', demoGroup:'db',
+  lede:"Two concurrent transactions stepped side by side — watch a non-repeatable read, write skew, and a deadlock happen, then watch the planner choose between a sequential scan and an index." }
+];
+
+
+
 /* ===== 90-demos.js ===== */
 
 /* ============================================================
@@ -6272,6 +7144,177 @@ node: [
   ]}
 ],
 
+/* ============================ DATABASES ============================ */
+db: [
+{ key:'nonrepeatable', label:'Non-repeatable read (Read Committed)',
+  phases:[
+    {k:'t1',     label:'T1 acts',   c:'accent'},
+    {k:'t2',     label:'T2 acts',   c:'aws'},
+    {k:'commit', label:'Commit',    c:'node'},
+    {k:'bad',    label:'Anomaly',   c:'tick'}
+  ],
+  cols:[
+    {k:'t1',   label:'Transaction 1 (reader)', c:'accent'},
+    {k:'t2',   label:'Transaction 2 (writer)', c:'aws'},
+    {k:'data', label:'Committed table state',  c:'db'}
+  ],
+  takeaway:"Read Committed takes a <b>fresh snapshot per statement</b>, so the same query twice in one transaction can return different values. Repeatable Read pins one snapshot for the whole transaction.",
+  code:[
+    `<span class="cm">-- T1                          -- T2</span>`,
+    `BEGIN;  <span class="cm">-- READ COMMITTED</span>`,
+    `SELECT balance FROM acct`,
+    `  WHERE id = 1;    <span class="cm">-- 500</span>`,
+    `                                <span class="cm">-- BEGIN;</span>`,
+    `                                <span class="cm">-- UPDATE acct SET balance = 900</span>`,
+    `                                <span class="cm">--   WHERE id = 1;</span>`,
+    `                                <span class="cm">-- COMMIT;</span>`,
+    `SELECT balance FROM acct`,
+    `  WHERE id = 1;    <span class="cm">-- 900 (!)</span>`,
+    `COMMIT;`
+  ],
+  steps:[
+    {line:1, phase:'t1', out:['T1: BEGIN (READ COMMITTED)'], cols:{t1:[Fd('stack','snapshot: per statement')], data:[Fd('db','acct(1).balance = 500')]},
+     note:"T1 opens at <b>Read Committed</b> — the default in Postgres, MySQL and most engines. Note what this level promises: no dirty reads. It promises nothing about repeated reads."},
+    {line:2, phase:'t1', out:['T1: BEGIN','T1 reads balance → 500'], cols:{t1:[Fd('stack','read balance = 500')], data:[Fd('db','acct(1).balance = 500')]},
+     note:"First read returns 500. T1 might now branch on that value — 'the customer can afford this'."},
+    {line:5, phase:'t2', out:['T1: BEGIN','T1 reads balance → 500','T2: UPDATE balance = 900'], cols:{t1:[Fd('stack','read balance = 500')], t2:[Fd('aws','UPDATE balance = 900','uncommitted')], data:[Fd('db','acct(1).balance = 500','+ uncommitted version')]},
+     note:"T2 updates the same row. Under MVCC this writes a <b>new row version</b>; the old one is still visible to everyone else. T1 sees nothing yet — that would be a dirty read, which this level does prevent."},
+    {line:7, phase:'commit', out:['T1: BEGIN','T1 reads balance → 500','T2: UPDATE balance = 900','T2: COMMIT'], cols:{t1:[Fd('stack','read balance = 500')], t2:[Fd('node','COMMIT','done')], data:[Fd('db','acct(1).balance = 900','committed')]},
+     note:"T2 commits. The new version is now visible to any snapshot taken from this moment on."},
+    {line:8, phase:'bad', out:['T1: BEGIN','T1 reads balance → 500','T2: UPDATE balance = 900','T2: COMMIT','T1 reads balance → 900 ⚠'], cols:{t1:[Fd('bad','read balance = 900','same query, different answer')], data:[Fd('db','acct(1).balance = 900')]},
+     note:"<b>Non-repeatable read.</b> T1 ran the identical query and got a different answer, because Read Committed takes a <b>fresh snapshot for every statement</b>. Any logic T1 built on the first value is now operating on stale assumptions."},
+    {line:-1, phase:'commit', out:['Fix A: BEGIN ISOLATION LEVEL REPEATABLE READ','Fix B: SELECT … FOR UPDATE','Fix C: make the write atomic'], cols:{t1:[Fd('node','one snapshot per transaction')]},
+     note:"<b>Three fixes, in increasing order of preference.</b> <b>A)</b> Repeatable Read pins one snapshot for the whole transaction — both reads return 500. <b>B)</b> <code>SELECT … FOR UPDATE</code> locks the row so T2 blocks. <b>C)</b> Best of all, avoid read-modify-write entirely: <code>UPDATE acct SET balance = balance - 100 WHERE id = 1 AND balance &gt;= 100</code> is atomic and needs no elevated isolation."}
+  ]},
+
+{ key:'writeskew', label:'Write skew (why Serializable exists)',
+  phases:[
+    {k:'t1',     label:'T1 acts',  c:'accent'},
+    {k:'t2',     label:'T2 acts',  c:'aws'},
+    {k:'commit', label:'Commit',   c:'node'},
+    {k:'bad',    label:'Invariant broken', c:'tick'}
+  ],
+  cols:[
+    {k:'t1',   label:'Transaction 1',        c:'accent'},
+    {k:'t2',   label:'Transaction 2',        c:'aws'},
+    {k:'data', label:'Committed table state', c:'db'}
+  ],
+  takeaway:"Two transactions can each read a set, each make an <i>individually valid</i> decision, and together break an invariant — with <b>no row conflict</b> for snapshot isolation to detect. Only Serializable catches it.",
+  code:[
+    `<span class="cm">-- invariant: at least one doctor must stay on call</span>`,
+    `<span class="cm">-- both run at REPEATABLE READ, concurrently</span>`,
+    ``,
+    `<span class="cm">-- T1 (Alice)                  -- T2 (Bob)</span>`,
+    `BEGIN;                          <span class="cm">-- BEGIN;</span>`,
+    `SELECT count(*) FROM doctors`,
+    `  WHERE on_call;   <span class="cm">-- 2</span>       <span class="cm">-- SELECT count(*) … -- 2</span>`,
+    `UPDATE doctors SET on_call=false`,
+    `  WHERE id = 1;                 <span class="cm">-- UPDATE … WHERE id = 2;</span>`,
+    `COMMIT;                         <span class="cm">-- COMMIT;</span>`
+  ],
+  steps:[
+    {line:4, phase:'t1', out:['invariant: count(on_call) >= 1'], cols:{t1:[Fd('stack','BEGIN (repeatable read)')], t2:[Fd('aws','BEGIN (repeatable read)')], data:[Fd('db','Alice on_call = true'),Fd('db','Bob on_call = true')]},
+     note:"Both transactions start at <b>Repeatable Read</b> — snapshot isolation. Each will see a consistent snapshot for its whole lifetime, which feels like it should be enough."},
+    {line:5, phase:'t1', out:['invariant: count(on_call) >= 1','T1 counts on_call → 2'], cols:{t1:[Fd('stack','count = 2 → safe to leave')], t2:[Fd('aws','BEGIN')], data:[Fd('db','Alice = true'),Fd('db','Bob = true')]},
+     note:"T1 checks the invariant: two doctors on call, so it is safe for Alice to go off call. <b>This reasoning is correct given what T1 can see.</b>"},
+    {line:6, phase:'t2', out:['invariant: count(on_call) >= 1','T1 counts on_call → 2','T2 counts on_call → 2'], cols:{t1:[Fd('stack','count = 2')], t2:[Fd('aws','count = 2 → safe to leave')], data:[Fd('db','Alice = true'),Fd('db','Bob = true')]},
+     note:"T2 runs the same check against its own snapshot and reaches the same conclusion. Both are individually right; neither can see the other's intention."},
+    {line:7, phase:'t1', out:['invariant: count(on_call) >= 1','T1 counts → 2','T2 counts → 2','T1: UPDATE Alice off call'], cols:{t1:[Fd('stack','UPDATE Alice → false')], t2:[Fd('aws','count = 2')], data:[Fd('db','Alice = true','+ uncommitted change'),Fd('db','Bob = true')]},
+     note:"T1 takes Alice off call. Note it writes <b>row 1</b>."},
+    {line:8, phase:'t2', out:['invariant: count(on_call) >= 1','T1 counts → 2','T2 counts → 2','T1: UPDATE Alice off call','T2: UPDATE Bob off call'], cols:{t1:[Fd('stack','UPDATE Alice')], t2:[Fd('aws','UPDATE Bob → false')], data:[Fd('db','Alice','uncommitted'),Fd('db','Bob','uncommitted')]},
+     note:"T2 takes Bob off call — writing <b>row 2</b>. <b>The two transactions wrote different rows</b>, so there is no write-write conflict for the engine to detect."},
+    {line:9, phase:'bad', out:['invariant: count(on_call) >= 1','T1: COMMIT ✓','T2: COMMIT ✓','⚠ count(on_call) = 0 — invariant violated'], cols:{t1:[Fd('node','COMMIT ok')], t2:[Fd('node','COMMIT ok')], data:[Fd('bad','Alice = false'),Fd('bad','Bob = false'),Fd('bad','ZERO doctors on call')]},
+     note:"<b>Both commit successfully and the invariant is broken.</b> Snapshot isolation guarantees each transaction saw a consistent view — it does <i>not</i> guarantee the combined result is one a serial execution could produce. That gap is write skew."},
+    {line:-1, phase:'commit', out:['Fix A: SERIALIZABLE → one transaction gets 40001, retry','Fix B: SELECT … FOR UPDATE on the whole set','Fix C: materialise the invariant as a constraint'], cols:{t1:[Fd('node','SERIALIZABLE')], t2:[Fd('bad','serialization_failure 40001','application retries')]},
+     note:"<b>A)</b> Serializable (Postgres SSI tracks the <i>predicate</i> each transaction read, sees the dependency cycle, and aborts one with <code>40001</code> — your code must retry). <b>B)</b> Lock the rows you read, not just the ones you write: <code>SELECT … WHERE on_call FOR UPDATE</code>. <b>C)</b> Best where possible — turn the invariant into something the database enforces, e.g. a counter row with a CHECK, so it cannot be violated by any interleaving."}
+  ]},
+
+{ key:'deadlock', label:'Deadlock from inconsistent lock order',
+  phases:[
+    {k:'t1',     label:'T1 acts',   c:'accent'},
+    {k:'t2',     label:'T2 acts',   c:'aws'},
+    {k:'bad',    label:'Deadlock',  c:'tick'},
+    {k:'commit', label:'Resolved',  c:'node'}
+  ],
+  cols:[
+    {k:'t1',    label:'Transaction 1', c:'accent'},
+    {k:'t2',    label:'Transaction 2', c:'aws'},
+    {k:'locks', label:'Row locks held', c:'db'}
+  ],
+  takeaway:"Deadlock is two transactions acquiring the same locks in <b>opposite order</b>. Fix it by always locking rows in a consistent order — <code>ORDER BY id FOR UPDATE</code> — plus short transactions and a retry.",
+  code:[
+    `<span class="cm">-- T1: transfer 100 from account 1 → 2</span>`,
+    `BEGIN;`,
+    `UPDATE acct SET bal = bal-100 WHERE id = 1;   <span class="cm">-- locks row 1</span>`,
+    `UPDATE acct SET bal = bal+100 WHERE id = 2;   <span class="cm">-- wants row 2</span>`,
+    `COMMIT;`,
+    ``,
+    `<span class="cm">-- T2: transfer 50 from account 2 → 1  (opposite order!)</span>`,
+    `BEGIN;`,
+    `UPDATE acct SET bal = bal-50  WHERE id = 2;   <span class="cm">-- locks row 2</span>`,
+    `UPDATE acct SET bal = bal+50  WHERE id = 1;   <span class="cm">-- wants row 1</span>`,
+    `COMMIT;`
+  ],
+  steps:[
+    {line:2, phase:'t1', out:['T1: BEGIN'], cols:{t1:[Fd('stack','UPDATE row 1')], locks:[Fd('db','row 1 → held by T1')]},
+     note:"T1 updates account 1. The <code>UPDATE</code> itself takes an exclusive <b>row lock</b>, held until the transaction ends — no explicit <code>FOR UPDATE</code> needed."},
+    {line:8, phase:'t2', out:['T1: BEGIN','T2: BEGIN'], cols:{t1:[Fd('stack','holds row 1')], t2:[Fd('aws','UPDATE row 2')], locks:[Fd('db','row 1 → T1'),Fd('db','row 2 → T2')]},
+     note:"T2 updates account 2 and takes that row's lock. So far no contention at all — the two transactions are touching different rows."},
+    {line:3, phase:'t1', out:['T1: BEGIN','T2: BEGIN','T1 blocked waiting for row 2'], cols:{t1:[Fd('bad','WAITING for row 2','holds row 1')], t2:[Fd('aws','holds row 2')], locks:[Fd('db','row 1 → T1'),Fd('db','row 2 → T2')]},
+     note:"T1 now wants row 2 — held by T2. T1 blocks. On its own this is ordinary lock waiting and would resolve as soon as T2 commits."},
+    {line:9, phase:'bad', out:['T1: BEGIN','T2: BEGIN','T1 blocked waiting for row 2','T2 blocked waiting for row 1'], cols:{t1:[Fd('bad','WAITING for row 2')], t2:[Fd('bad','WAITING for row 1')], locks:[Fd('bad','row 1 → T1 (T2 waiting)'),Fd('bad','row 2 → T2 (T1 waiting)')]},
+     note:"<b>The cycle closes.</b> T2 wants row 1, which T1 holds while waiting for row 2. Neither can proceed and neither will ever release — this is a genuine deadlock, not slow progress."},
+    {line:-1, phase:'bad', out:['T1: BEGIN','T2: BEGIN','deadlock detected','ERROR 40P01: deadlock detected — T2 aborted'], cols:{t1:[Fd('node','proceeds','acquired row 2')], t2:[Fd('bad','ABORTED 40P01','rolled back')], locks:[Fd('db','row 1 → T1'),Fd('db','row 2 → T1')]},
+     note:"The deadlock detector (Postgres checks after <code>deadlock_timeout</code>, default 1s) finds the cycle and <b>kills one transaction as the victim</b>. The survivor proceeds. Note the cost: a full second of both transactions blocked before detection."},
+    {line:-1, phase:'commit', out:['Fix: always lock in a consistent order'], cols:{t1:[Fd('node','ORDER BY id → locks 1 then 2')], t2:[Fd('node','ORDER BY id → locks 1 then 2')], locks:[Fd('db','no cycle possible')]},
+     note:"<b>The fix is ordering, not locking less.</b> If both transactions always take rows in ascending id order, the second one simply waits for the first — no cycle can form. In code: <code>SELECT * FROM acct WHERE id = ANY($1) ORDER BY id FOR UPDATE</code> before doing the updates."},
+    {line:-1, phase:'commit', out:['Fix: consistent order','+ short transactions','+ lock_timeout','+ retry on 40P01'], cols:{},
+     note:"<b>The full defence:</b> consistent lock ordering; keep transactions short so lock windows are small; set <code>lock_timeout</code> so a pathological wait fails fast rather than piling up connections; and <b>retry on <code>40P01</code></b> with backoff — under real concurrency, deadlocks are an expected outcome to handle, not necessarily a bug to eliminate."}
+  ]},
+
+{ key:'planner', label:'Seq scan vs index — and how to defeat one',
+  phases:[
+    {k:'seq',  label:'Seq Scan',        c:'tick'},
+    {k:'idx',  label:'Index Scan',      c:'node'},
+    {k:'only', label:'Index Only Scan', c:'db'},
+    {k:'bad',  label:'Index defeated',  c:'js'}
+  ],
+  cols:[
+    {k:'plan', label:'Plan chosen',      c:'db'},
+    {k:'work', label:'Work performed',   c:'js'},
+    {k:'res',  label:'Result',           c:'node'}
+  ],
+  takeaway:"The planner picks a plan from <b>estimated selectivity</b>. Wrapping the column in a function, or matching too many rows, sends it straight back to a sequential scan.",
+  code:[
+    `<span class="cm">-- orders: 5,000,000 rows</span>`,
+    `SELECT * FROM orders WHERE tenant_id = 7;`,
+    ``,
+    `CREATE INDEX CONCURRENTLY idx_t`,
+    `  ON orders (tenant_id, created_at DESC);`,
+    ``,
+    `SELECT id FROM orders`,
+    `  WHERE tenant_id = 7 ORDER BY created_at DESC LIMIT 20;`,
+    ``,
+    `SELECT * FROM orders WHERE lower(email) = 'a@b.com';`,
+    ``,
+    `SELECT * FROM orders WHERE status = 'paid';  <span class="cm">-- 60% of rows</span>`
+  ],
+  steps:[
+    {line:1, phase:'seq', out:['no index yet'], cols:{plan:[Fd('bad','Seq Scan on orders')], work:[Fd('macro','5,000,000 rows read'),Fd('macro','Rows Removed by Filter: 4,988,000')], res:[Fd('bad','2,400 ms')]},
+     note:"No usable index, so every row is read and almost all are discarded. <b><code>Rows Removed by Filter</code> is the signal</b>: reading five million rows to return twelve thousand."},
+    {line:3, phase:'idx', out:['no index yet','index created'], cols:{plan:[Fd('db','Index Scan using idx_t')], work:[Fd('macro','~12,000 index entries'),Fd('macro','+ heap fetches for SELECT *')], res:[Fd('node','18 ms')]},
+     note:"With <code>(tenant_id, created_at)</code> the B-tree seeks directly to this tenant's range. <code>SELECT *</code> still requires a heap fetch per row to get the other columns."},
+    {line:6, phase:'only', out:['index created','projecting only indexed columns'], cols:{plan:[Fd('db','Index Only Scan using idx_t'),Fd('db','Heap Fetches: 0')], work:[Fd('macro','20 index entries read'),Fd('macro','no sort — index already ordered')], res:[Fd('node','0.4 ms')]},
+     note:"<b>Index-only scan.</b> Every column needed is in the index, so the heap is never touched — and because the index is already sorted by <code>created_at DESC</code>, the <code>ORDER BY … LIMIT 20</code> needs no sort step at all. This is why composite column order matters."},
+    {line:8, phase:'bad', out:['index created','function on the column'], cols:{plan:[Fd('bad','Seq Scan on orders')], work:[Fd('macro','5,000,000 rows'),Fd('macro','lower() evaluated per row')], res:[Fd('bad','3,100 ms')]},
+     note:"<b>The index is silently defeated.</b> The index stores <code>email</code>, but the predicate asks about <code>lower(email)</code> — a different value the planner cannot match. Same for <code>date(created_at)</code> and <code>id::text</code>. Fix: <code>CREATE INDEX ON orders (lower(email))</code>, or store a normalised column."},
+    {line:10, phase:'seq', out:['index created','low-selectivity predicate'], cols:{plan:[Fd('bad','Seq Scan on orders'),Fd('db','(an index on status exists)')], work:[Fd('macro','3,000,000 matching rows (60%)')], res:[Fd('node','1,900 ms — and this is correct')]},
+     note:"<b>Here the sequential scan is the right choice.</b> Matching 60% of the table means random index lookups plus heap fetches would cost more than reading the pages sequentially. This is not a bug — an index is only worth using when it eliminates most of the table."},
+    {line:-1, phase:'only', out:['Summary'], cols:{plan:[Fd('db','estimated selectivity decides the plan')], work:[Fd('macro','check estimated vs actual rows first')], res:[Fd('node','ANALYZE before adding indexes')]},
+     note:"<b>Order of investigation:</b> 1) compare estimated vs actual rows — if they diverge, run <code>ANALYZE</code>, because every plan choice above that node is based on a wrong number. 2) Look for <code>Rows Removed by Filter</code> and high <code>loops=</code>. 3) Only then add an index — and check whether a function, a cast, or a leading wildcard is stopping the one you already have from being used."}
+  ]}
+],
+
 /* ============================ FRAMEWORKS ============================ */
 fw: [
 { key:'middleware', label:'Express middleware pipeline',
@@ -6420,7 +7463,8 @@ var TABS = [
   { k:'node', label:'Node.js',      topics: nodeTopics },
   { k:'ts',   label:'TypeScript',   topics: tsTopics   },
   { k:'fw',   label:'Frameworks',   topics: fwTopics   },
-  { k:'aws',  label:'AWS & Serverless', topics: awsTopics }
+  { k:'aws',  label:'AWS & Serverless', topics: awsTopics },
+  { k:'db',   label:'Databases & Data', topics: dbTopics  }
 ];
 
 
