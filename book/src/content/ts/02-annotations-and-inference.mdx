@@ -1,0 +1,169 @@
+---
+title: Annotations, inference and the basic types
+part: Foundations
+order: 2
+level: foundation
+summary: When to write types and when to let TypeScript work them out — plus the everyday types every program uses.
+---
+
+You don't have to annotate everything in TypeScript. The compiler **infers** most types from how values are created and used: `const count = 0` is a `number` without you saying so. You write **annotations** where inference can't know your intent — function parameters, public APIs, and values that start empty. Knowing the difference keeps code both safe and uncluttered.
+
+<Analogy>
+  A good assistant who watches what you do. If you hand them a cup of coffee, they know it's coffee — you don't need to label it. But if you give them an empty box and say "this is for invoices", you need the label, because they can't guess from an empty box.
+</Analogy>
+
+## Why it matters
+
+Over-annotated code is noisy; under-annotated boundaries let mistakes through. Interviewers look for idiomatic TypeScript: annotate inputs and exported contracts, let inference handle the rest.
+
+## The basic types
+
+```ts
+let title: string = 'Report';
+let pages: number = 12;              // integers and decimals
+let big: bigint = 10n;
+let done: boolean = false;
+let nothing: null = null;
+let notSet: undefined = undefined;
+let id: symbol = Symbol('id');
+
+let tags: string[] = ['a', 'b'];     // or Array<string>
+let pair: [string, number] = ['age', 36];   // tuple: fixed length and positions
+let user: { name: string; age?: number } = { name: 'Ada' };   // ? = optional
+
+function log(msg: string): void {}           // returns nothing useful
+function fail(msg: string): never { throw new Error(msg); }   // never returns
+```
+
+<Diagram
+  caption="The type hierarchy, simplified. unknown accepts everything; never fits into everything; any escapes the system."
+  chart={`flowchart TB
+    UNK["unknown<br/>(top: any value)"] --> OBJ["object types<br/>{ … }, arrays, functions"]
+    UNK --> PRIM["string · number · boolean ·<br/>bigint · symbol"]
+    UNK --> NU["null · undefined"]
+    PRIM --> LIT["literal types<br/>'admin' · 42 · true"]
+    OBJ --> NEV["never<br/>(bottom: no value)"]
+    LIT --> NEV
+    NU --> NEV
+    ANY["any — opts out of the hierarchy"]`}
+/>
+
+## Inference
+
+```ts
+const total = 42;                 // type: 42 (a const can't change, so it's the literal)
+let count = 0;                    // type: number (a let can change)
+const names = ['Ada', 'Grace'];   // string[]
+const user = { id: 1, name: 'Ada' };   // { id: number; name: string }
+
+const doubled = names.map((n) => n.length * 2);   // number[] — n inferred as string
+
+function add(a: number, b: number) {
+  return a + b;                   // return type inferred: number
+}
+```
+
+TypeScript also infers types **contextually**: in `names.map((n) => …)` it knows `n` is a string from `names`. Event handlers, promise callbacks and array methods all benefit.
+
+<Diagram
+  caption="Where to write types and where to let inference work."
+  chart={`flowchart TB
+    Q{"Is this…"} --> P["a function parameter?"] --> A1["annotate (can't be inferred)"]
+    Q --> EX["an exported function's<br/>return type / public API?"] --> A2["annotate (a stable contract,<br/>clearer errors)"]
+    Q --> EMP["an empty value filled later<br/>([], {}, null)?"] --> A3["annotate:<br/>const ids: string[] = []"]
+    Q --> LOC["a local initialised<br/>with a value?"] --> A4["let it infer"]
+    Q --> CB["a callback parameter?"] --> A5["usually inferred contextually"]`}
+/>
+
+### Widening
+
+Inference picks a reasonable "wide" type for mutable values:
+
+```ts
+let role = 'admin';          // string — could be reassigned to any string
+const role2 = 'admin';       // 'admin' — const never changes
+
+const config = { mode: 'dark' };        // { mode: string }
+config.mode = 'banana';                 // allowed, because mode is string
+const config2 = { mode: 'dark' } as const;   // { readonly mode: 'dark' }
+```
+
+`as const` keeps literal types and makes everything `readonly` — useful for configuration and lookup tables (see *Enums, literals and as const*).
+
+## Objects: type aliases and interfaces
+
+```ts
+type Address = { street: string; city: string; postcode?: string };
+
+interface Customer {
+  readonly id: string;           // can't be reassigned
+  name: string;
+  address: Address;
+  tags: readonly string[];       // array can't be mutated through this reference
+  [key: `meta_${string}`]: unknown;   // index signature for extra keys
+}
+```
+
+`?` makes a property optional (its type includes `undefined`). `readonly` prevents reassignment (compile-time only). The next chapters compare `type` and `interface` in detail.
+
+## `null` and `undefined` under `strictNullChecks`
+
+With strict mode, `null` and `undefined` are **not** part of other types. A `string` can never be `null` unless you say `string | null`, and the compiler forces you to handle the missing case:
+
+```ts
+function findUser(id: string): User | undefined { /* … */ }
+
+const u = findUser('7');
+u.name;                 // ✘ 'u' is possibly 'undefined'
+u?.name;                // ✓ optional chaining
+if (u) u.name;          // ✓ narrowed
+u!.name;                // compiles — "trust me" non-null assertion (avoid)
+```
+
+This single setting removes a huge class of "cannot read properties of undefined" crashes.
+
+## Type assertions
+
+`value as Type` tells the compiler "I know better". It doesn't convert or check anything at runtime.
+
+```ts
+const input = document.getElementById('email') as HTMLInputElement;   // reasonable: you know the DOM
+const user = JSON.parse(raw) as User;                                  // risky: unchecked data
+```
+
+Use assertions sparingly, where you genuinely have information the compiler can't; prefer narrowing and validation.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Annotating every local variable (noise, and sometimes a wider, less precise type).
+- Leaving empty arrays unannotated (`const items = []` becomes `any[]` or `never[]`).
+- Using `!` and `as` to silence errors.
+- Turning off `strictNullChecks`.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="When do you add type annotations in TypeScript, and when do you rely on inference?">
+
+I let TypeScript infer types for local variables initialised with a value, callback parameters and most return values inside a module, because inference is precise and annotations there add noise. I annotate function parameters, since they can't be inferred; exported functions' return types and public interfaces, so they're stable contracts with clear error messages; and values that start empty, like an array or a nullable variable filled later. I keep `strict` mode on, so `null` and `undefined` must be handled explicitly, use `as const` when I want literal types preserved, and avoid `as` assertions and the non-null `!` except where I genuinely know more than the compiler.
+
+<Fragment slot="deeper">
+
+- **What is widening?** Inferring a general type (`string`) for a mutable value initialised with a literal.
+- **`void` vs `never`?** Returns nothing useful vs never returns (throws or loops).
+- **What does `as` do at runtime?** Nothing — it only changes the compiler's view.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Type annotation", "Explicitly writing a type, e.g. `name: string`."],
+  ["Type inference", "The compiler deducing a type from values and usage."],
+  ["Contextual typing", "Inferring a type from where a value is used, e.g. callback parameters."],
+  ["Literal type", "A type of exactly one value, like `'admin'` or `42`."],
+  ["`strictNullChecks`", "Setting that makes null/undefined separate types to be handled."],
+  ["Type assertion", "`as Type`: overriding the compiler's view without runtime checks."],
+]} />

@@ -1,0 +1,139 @@
+---
+title: The libuv thread pool
+part: Runtime
+order: 3
+level: core
+summary: Four background threads quietly do Node's file, DNS, compression and crypto work. When they are all busy, unrelated requests start to slow down.
+demo: node-threadpool-saturation
+---
+
+Some operating-system operations have no truly asynchronous version — reading a file, looking up a hostname with `getaddrinfo`, hashing a password. If Node ran them on the main thread, everything would stop. So libuv keeps a small **thread pool** — **4 threads by default** — and hands those jobs to it. A pool thread does the blocking work, and when it finishes, the completion callback is queued for the main JavaScript thread to run in the poll phase.
+
+<Analogy>
+  A restaurant's waiter (the JS thread) never cooks. Orders that need slow, hands-on work go to the kitchen, which has four cooks (the pool). If ten complicated orders arrive at once, four are cooked and six wait for a free cook — and a simple side salad ordered after them waits too, even though it would only take a minute.
+</Analogy>
+
+## Why it matters
+
+Pool saturation is a classic hidden latency source: a burst of password hashing or large file reads slows down unrelated endpoints, while CPU looks fine and nothing appears "blocked". Interviewers ask which operations use the pool, its default size, and why networking doesn't.
+
+## What uses the pool, and what doesn't
+
+<Diagram
+  caption="Network I/O goes straight to the OS kernel's async mechanisms. Blocking-only operations go to the thread pool."
+  chart={`flowchart TB
+    JS["JavaScript (main thread)"] --> NET["Network: TCP, HTTP, UDP,<br/>pipes, dns.resolve*"]
+    JS --> POOL["libuv thread pool (4)"]
+    NET --> K["OS kernel<br/>epoll · kqueue · IOCP<br/>no extra threads"]
+    POOL --> FS["fs.* async calls"]
+    POOL --> DNS["dns.lookup<br/>(used by http.request)"]
+    POOL --> CR["crypto: pbkdf2, scrypt,<br/>randomBytes, generateKeyPair"]
+    POOL --> Z["zlib async compression"]`}
+/>
+
+| Uses the thread pool | Does **not** use it |
+|---|---|
+| `fs.readFile`, `fs.writeFile`, `fs.promises.*` (all async fs) | TCP/HTTP sockets, `net`, `http`, `https` data transfer |
+| `dns.lookup` (and thus `http.get('http://hostname')`) | `dns.resolve*` (uses c-ares, truly async) |
+| `crypto.pbkdf2`, `scrypt`, `randomBytes` (async), key generation | `crypto.createHash().update()` (synchronous, on the main thread!) |
+| `zlib.gzip` and other async compression | Timers |
+
+Networking does not need threads because the OS can watch thousands of sockets at once and report which ones are ready. That is how one Node process holds tens of thousands of connections.
+
+## Saturation
+
+With four threads, the fifth concurrent pool job **waits**.
+
+```js
+const crypto = require('node:crypto');
+const start = Date.now();
+
+for (let i = 1; i <= 6; i++) {
+  crypto.pbkdf2('secret', 'salt', 300_000, 64, 'sha512', () => {
+    console.log(`job ${i} done after ${Date.now() - start} ms`);
+  });
+}
+// four jobs finish around T ms; jobs 5 and 6 around 2T ms
+```
+
+<Diagram
+  caption="Six equal jobs on four threads: the last two start only when a thread frees up, so they take twice as long."
+  chart={`flowchart LR
+    subgraph Pool["Thread pool"]
+      direction TB
+      T1["thread 1: job 1 → job 5"]
+      T2["thread 2: job 2 → job 6"]
+      T3["thread 3: job 3"]
+      T4["thread 4: job 4"]
+    end
+    Q["work queue:<br/>job 5, job 6, and any<br/>fs.readFile issued now"] --> Pool`}
+  steps={[
+    { nodes: ["T1", "T2", "T3", "T4"], text: "Jobs 1–4 start immediately, one per thread." },
+    { nodes: ["Q"], text: "Jobs 5 and 6 wait in libuv's work queue. So would any `fs.readFile` issued now — by a completely different request." },
+    { nodes: ["T1", "T2"], text: "When jobs 1 and 2 finish, threads 1 and 2 pick up jobs 5 and 6. Their total latency is about double." },
+  ]}
+/>
+
+<DemoLink id="node-threadpool-saturation" />
+
+## Sizing the pool
+
+Set the environment variable **before the process starts**:
+
+```bash
+UV_THREADPOOL_SIZE=16 node server.js
+```
+
+- Maximum is 1024. libuv reads it when the pool is first used, so setting `process.env.UV_THREADPOOL_SIZE` inside your code only works if no pool work has happened yet (and some modules use the pool during startup). Prefer the real environment variable.
+- More threads help for **I/O-ish** pool work (many file reads, DNS lookups) up to a point.
+- For **CPU-bound** pool work (pbkdf2, scrypt), more threads than CPU cores just adds context switching. Measure; don't guess.
+
+## Practical guidance
+
+- **Password hashing at scale**: use the async API (never `*Sync` in a request) and consider a dedicated worker pool or service so logins don't starve file access.
+- **DNS**: if you make many outbound HTTP calls to hostnames, `dns.lookup` can saturate the pool. Use keep-alive agents (fewer lookups), cache DNS, or a resolver based on `dns.resolve`.
+- **`fs.promises` is not more parallel** than callback `fs` — both use the same pool.
+- **Streams** read files in chunks through the pool; many concurrent large file streams compete for threads.
+- **Synchronous crypto hashing** (`createHash`) runs on the main thread; hashing a huge buffer blocks the loop. Stream large inputs.
+
+## How you'd notice saturation
+
+Symptoms: latency rising on endpoints that only read a small file or make an outbound call, while CPU isn't pegged, correlated with traffic on hashing or file-heavy endpoints. Confirm by:
+
+- measuring event-loop delay (if it's low, the main thread isn't the problem),
+- tracing how long pool operations wait vs. run,
+- testing whether raising `UV_THREADPOOL_SIZE` improves p99 latency.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Believing HTTP requests use the thread pool. Network sockets don't (but `dns.lookup` for the hostname does).
+- Setting `UV_THREADPOOL_SIZE` too late in code.
+- Raising the pool size far beyond the core count for CPU-bound work.
+- Putting genuinely CPU-heavy computation in the pool instead of worker threads.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is the libuv thread pool and what runs on it?">
+
+libuv keeps a pool of four threads by default for operations the OS can only do in a blocking way: file system calls, `dns.lookup`, async crypto like `pbkdf2` and `scrypt`, and zlib compression. The main thread hands the job to the pool and keeps going; the callback runs back on the main thread in the poll phase. Networking doesn't use the pool — sockets are watched by the kernel through epoll or kqueue — which is why Node handles so many connections. The risk is saturation: with four threads busy hashing passwords, unrelated file reads queue behind them. You can raise `UV_THREADPOOL_SIZE` at startup, but for CPU-heavy work worker threads or a separate service are better.
+
+<Fragment slot="deeper">
+
+- **Why is `dns.lookup` on the pool but `dns.resolve` not?** `lookup` uses the OS's blocking `getaddrinfo`; `resolve` uses c-ares, which is asynchronous.
+- **Does `fs.promises` avoid the pool?** No.
+- **How would you size the pool?** Measure: increase towards core count for CPU-bound pool work, higher for I/O-bound, and watch p99.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Thread pool", "libuv's background threads for blocking operations; 4 by default."],
+  ["`UV_THREADPOOL_SIZE`", "Environment variable that sets the pool size (max 1024)."],
+  ["Saturation", "All pool threads busy, so new jobs wait in the queue."],
+  ["`dns.lookup` vs `dns.resolve`", "Blocking OS resolver on the pool versus async c-ares queries."],
+  ["epoll / kqueue / IOCP", "OS mechanisms for watching many sockets without a thread each."],
+]} />

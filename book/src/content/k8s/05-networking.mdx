@@ -1,0 +1,154 @@
+---
+title: "Networking: Services, Ingress, DNS and network policies"
+part: Kubernetes core
+order: 5
+level: core
+summary: How traffic finds pods whose IPs keep changing — inside the cluster with Services and DNS, from outside with Ingress and load balancers, and how to lock it down.
+---
+
+Pods come and go, and each new pod gets a new IP address. Kubernetes networking solves "how do I reach my service?" with a few layers. Every pod gets its own IP on a flat cluster network. A **Service** gives a group of pods one **stable** virtual IP and DNS name and load-balances across them. An **Ingress** (or the newer **Gateway API**) routes external HTTP traffic to Services by host and path. **NetworkPolicies** decide which pods may talk to which.
+
+<Analogy>
+  A company switchboard. Employees (pods) move desks constantly, so nobody dials desk numbers directly. You call "Sales" (the Service), and the switchboard connects you to whoever is free in Sales today. The building's front reception (Ingress) directs visitors from the street to the right department. Security rules (NetworkPolicies) say which departments may phone which.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask about Service types, how DNS works in a cluster, Ingress vs LoadBalancer, and how to restrict traffic. Most "it can't connect" debugging on Kubernetes is one of these layers.
+
+## The pod network
+
+- Every pod gets a unique IP; pods can reach any other pod directly, across nodes, without NAT — implemented by a **CNI plugin** (Calico, Cilium, the AWS VPC CNI…).
+- Containers in the same pod share an IP and talk via `localhost`.
+- Pod IPs are **ephemeral** — never hard-code them.
+
+## Services
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata: { name: orders-api }
+spec:
+  selector: { app: orders-api }        # pods with this label are endpoints
+  ports: [{ port: 80, targetPort: 3000 }]
+  type: ClusterIP
+```
+
+<Diagram
+  caption="A Service selects pods by label and gives them a stable virtual IP and DNS name. Endpoints update automatically as pods come and go — and only Ready pods receive traffic."
+  chart={`flowchart LR
+    C["checkout pod"] -- "http://orders-api" --> DNS["CoreDNS<br/>orders-api.default.svc.cluster.local → 10.96.12.4"]
+    DNS --> SVC["Service orders-api<br/>ClusterIP 10.96.12.4:80"]
+    SVC --> P1["pod 10.0.1.7:3000 ✓ Ready"]
+    SVC --> P2["pod 10.0.2.3:3000 ✓ Ready"]
+    SVC -. "not Ready: no traffic" .-> P3["pod 10.0.3.9 (starting)"]`}
+  steps={[
+    { nodes: ["C", "DNS"], text: "A client pod calls `http://orders-api`. Cluster DNS (CoreDNS) resolves the Service name to its stable virtual IP." },
+    { nodes: ["DNS", "SVC"], text: "The Service's ClusterIP never changes, even though its pods do." },
+    { nodes: ["SVC", "P1", "P2"], text: "kube-proxy (iptables/IPVS) or eBPF in the CNI forwards each connection to one of the Service's ready endpoints." },
+    { nodes: ["SVC", "P3"], text: "Pods failing their readiness probe are removed from the endpoints, so they get no traffic — this is what makes rolling updates and graceful shutdown work." },
+  ]}
+/>
+
+| Service type | Reachable from | Use |
+|---|---|---|
+| **ClusterIP** (default) | inside the cluster | service-to-service traffic |
+| **NodePort** | every node's IP on a high port | rarely directly; building block |
+| **LoadBalancer** | the internet / VPC via a cloud load balancer | exposing one service (L4), non-HTTP protocols |
+| **ExternalName** | DNS alias to something outside | pointing at a managed database hostname |
+| **Headless** (`clusterIP: None`) | DNS returns pod IPs directly | StatefulSets, client-side load balancing |
+
+DNS names: `<service>.<namespace>.svc.cluster.local` — within the same namespace, just `<service>`.
+
+## Ingress and the Gateway API
+
+Creating a cloud load balancer per Service is expensive and gives no HTTP routing. An **Ingress** describes HTTP routing rules; an **Ingress controller** (NGINX, Traefik, AWS Load Balancer Controller, GKE) implements them.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  annotations: { cert-manager.io/cluster-issuer: letsencrypt }
+spec:
+  ingressClassName: nginx
+  tls: [{ hosts: [shop.example.com], secretName: shop-tls }]
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - { path: /api/orders, pathType: Prefix, backend: { service: { name: orders-api, port: { number: 80 } } } }
+          - { path: /,           pathType: Prefix, backend: { service: { name: web,        port: { number: 80 } } } }
+```
+
+<Diagram
+  caption="External traffic: one cloud load balancer → Ingress controller → Services → pods, with TLS terminated at the edge."
+  chart={`flowchart LR
+    U["users"] --> LB["cloud load balancer"]
+    LB --> IC["Ingress controller pods<br/>TLS, host/path routing"]
+    IC -- "/api/orders" --> S1["Service orders-api"]
+    IC -- "/" --> S2["Service web"]
+    S1 --> PA["orders pods"]
+    S2 --> PW["web pods"]`}
+/>
+
+The **Gateway API** is the newer, more expressive successor to Ingress (role-separated `Gateway` and `HTTPRoute` objects, traffic splitting, header matching). **cert-manager** automates TLS certificates.
+
+## NetworkPolicies
+
+By default, every pod can talk to every other pod — a flat network where one compromised pod can reach everything. **NetworkPolicies** (enforced by the CNI) restrict this.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: orders-db-access, namespace: shop }
+spec:
+  podSelector: { matchLabels: { app: postgres } }    # applies to the database pods
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app: orders-api } } }]
+      ports: [{ port: 5432 }]
+```
+
+Common approach: a **default-deny** policy per namespace, then explicitly allow required flows (including DNS egress to CoreDNS).
+
+## Service mesh, briefly
+
+A **service mesh** (Istio, Linkerd, Cilium mesh) adds a proxy alongside each pod (or in the node/kernel) that transparently provides **mTLS** between services, retries, timeouts, traffic splitting for canaries, and rich telemetry — without changing application code. Powerful, but adds operational complexity; adopt when you need those features across many services.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Hard-coding pod IPs.
+- A LoadBalancer Service for every app (cost, no HTTP routing).
+- Selector labels not matching pod labels — a Service with zero endpoints.
+- No readiness probe, so traffic hits pods before they're ready.
+- No NetworkPolicies: every pod can reach the database.
+- Long-lived gRPC connections pinned to one pod through a ClusterIP (use headless + client-side balancing or a mesh).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does networking work in Kubernetes?">
+
+Each pod gets its own IP on a flat cluster network provided by a CNI plugin, but pod IPs change whenever pods are replaced, so clients use Services. A Service selects pods by label and gets a stable virtual IP and a DNS name from CoreDNS, like `orders-api.shop.svc.cluster.local`; kube-proxy or eBPF forwards connections to the pods currently passing readiness checks. ClusterIP services are internal; LoadBalancer services provision a cloud load balancer; headless services return pod IPs directly for StatefulSets. For HTTP from outside, an Ingress or Gateway API resource routes by host and path through an ingress controller behind one load balancer, with TLS often automated by cert-manager. Network policies, ideally default-deny per namespace, restrict which pods may talk to which, and a service mesh can add mTLS, retries and traffic splitting.
+
+<Fragment slot="deeper">
+
+- **ClusterIP vs NodePort vs LoadBalancer?** Internal only; port on every node; cloud load balancer.
+- **Ingress vs LoadBalancer Service?** L7 routing for many services behind one LB vs one L4 LB per service.
+- **What does a headless Service do?** DNS returns pod IPs directly — no virtual IP.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["CNI", "Container Network Interface plugin implementing pod networking."],
+  ["Service", "Stable virtual IP and DNS name load-balancing across selected pods."],
+  ["Endpoints", "The ready pod IPs currently behind a Service."],
+  ["Ingress / Gateway API", "HTTP routing rules from outside the cluster to Services."],
+  ["CoreDNS", "The cluster DNS server resolving Service names."],
+  ["NetworkPolicy", "Rules restricting which pods can communicate."],
+]} />

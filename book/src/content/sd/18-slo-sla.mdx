@@ -1,0 +1,128 @@
+---
+title: SLIs, SLOs, SLAs and error budgets
+part: Performance & reliability
+order: 18
+level: core
+summary: How teams define "reliable enough" with numbers — and use the gap between perfect and good enough as a budget for shipping changes.
+---
+
+"Make it reliable" isn't a goal you can measure. Site Reliability Engineering (SRE) replaces it with three precise terms. An **SLI** (service level indicator) is a measurement — for example, the percentage of requests that succeed within 300 ms. An **SLO** (service level objective) is the target for that measurement — 99.9% over 30 days. An **SLA** (service level agreement) is a contract with customers that says what happens — usually refunds — if a promised level isn't met. The difference between 100% and the SLO is the **error budget**: the amount of unreliability you're allowed, and can spend on deploying changes.
+
+<Analogy>
+  A train company. The SLI is "the percentage of trains arriving within 5 minutes of schedule". The SLO is the internal goal: 98% this month. The SLA is the public promise: "if fewer than 95% are on time, season-ticket holders get a discount". The error budget is the 2% of late trains the operator can "afford" — if they're already at 2% by mid-month, they postpone track maintenance until next month.
+</Analogy>
+
+## Why it matters
+
+Senior and SRE-flavoured interviews ask how you'd define reliability for a service, what you'd alert on, and how you'd balance shipping speed against stability. Error budgets give a principled answer.
+
+## The three terms
+
+<Diagram
+  caption="An SLI measures, an SLO sets the internal target, an SLA is the external promise with consequences. SLA targets are looser than SLOs to leave a safety margin."
+  chart={`flowchart LR
+    SLI["SLI<br/>what we measure<br/>% requests OK in under 300 ms"] --> SLO["SLO<br/>internal target<br/>≥ 99.9% over 30 days"]
+    SLO --> SLA["SLA<br/>customer contract<br/>≥ 99.5%, else service credits"]
+    SLO --> EB["Error budget<br/>0.1% = ~43 min/month<br/>(or 1 in 1,000 requests)"]`}
+  steps={[
+    { nodes: ["SLI"], text: "**SLI**: a ratio of good events to total events, measured from the user's point of view." },
+    { nodes: ["SLI", "SLO"], text: "**SLO**: the target for that ratio over a window. Owned by the team." },
+    { nodes: ["SLO", "SLA"], text: "**SLA**: a business contract. Deliberately looser than the SLO, so you notice and fix problems before they cost money." },
+    { nodes: ["SLO", "EB"], text: "**Error budget**: 100% minus the SLO — how much failure is acceptable in the window." },
+  ]}
+/>
+
+## Choosing good SLIs
+
+Measure what **users** experience, as close to them as possible (at the load balancer or client, not CPU usage).
+
+| Service type | Typical SLIs |
+|---|---|
+| Request/response API | **availability**: % of requests not returning 5xx · **latency**: % of requests under X ms |
+| Data pipeline | **freshness**: % of time data is less than N minutes old · **correctness** |
+| Storage | **durability**: % of written objects readable later |
+| Queue consumer | % of messages processed within N seconds |
+
+Write SLIs as **good events ÷ valid events**:
+
+```text
+availability SLI = successful requests (non-5xx) ÷ all requests
+latency SLI      = requests served in < 300 ms ÷ all requests
+```
+
+Use percentiles for latency (p95, p99) rather than averages, which hide the slow tail.
+
+## Error budgets
+
+With a 99.9% SLO over 30 days:
+
+- by time: 0.1% × 30 days ≈ **43 minutes** of full outage, or
+- by requests: **1 failed request per 1,000**.
+
+The budget becomes a **policy** shared by product and engineering:
+
+<Diagram
+  caption="An error-budget policy turns reliability into an objective decision rule about release speed."
+  chart={`flowchart TB
+    M["Measure SLI vs SLO<br/>over a rolling window"] --> Q{"Error budget<br/>remaining?"}
+    Q -- "plenty" --> F["Ship features,<br/>experiment, take risks"]
+    Q -- "running low" --> C["Slow down: smaller releases,<br/>more testing, canaries"]
+    Q -- "exhausted" --> S["Freeze risky launches;<br/>prioritise reliability work"]`}
+/>
+
+This settles the eternal argument between "ship faster" and "be more careful": if users are happy (budget left), ship; if not, fix reliability first. It also discourages aiming for 100%: perfect reliability is impossibly expensive, and users can't tell 99.99% from 100% when their own Wi-Fi is less reliable than that.
+
+## Alerting on SLOs
+
+Instead of alerting on every CPU spike, alert when the error budget is being **burned** too fast. The **burn rate** is how fast you're consuming the budget relative to plan (burn rate 1 = exactly on budget for the window).
+
+| Alert | Condition (30-day SLO) | Meaning |
+|---|---|---|
+| Page now | burn rate > 14 over 1 h (and over 5 min) | ~2% of the monthly budget gone in an hour |
+| Page | burn rate > 6 over 6 h | sustained serious problem |
+| Ticket | burn rate > 1 over 3 days | slow leak; fix during work hours |
+
+Multi-window alerts (long and short windows) catch real problems quickly while avoiding pages for brief blips.
+
+## SLOs in system design
+
+Use SLOs to drive architecture decisions:
+
+- An API with a 99.95% SLO depending on four services in series needs each of them comfortably above that, or the dependency must be made optional (see *Availability*).
+- A 300 ms p99 latency SLO dictates timeout budgets for each downstream call.
+- A freshness SLO of "5 minutes" for search tells you asynchronous indexing is acceptable.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Measuring server metrics (CPU, memory) instead of user-facing SLIs.
+- Setting SLOs to 100% or to whatever the system currently achieves, without asking what users need.
+- SLA equal to SLO — no safety margin.
+- Using averages for latency.
+- Having SLOs nobody acts on (no error-budget policy).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you define and measure reliability for a service?">
+
+I'd pick a few user-facing SLIs, expressed as good events over total events — for an API, the fraction of requests that don't fail and the fraction served under a latency threshold like 300 ms — measured at the load balancer. Then I'd set SLOs for them, such as 99.9% over a rolling 30 days, based on what users actually need rather than what's technically possible. One minus the SLO is the error budget, about 43 minutes a month at 99.9%. We alert on how fast the budget is burning, using multi-window burn-rate alerts instead of raw CPU thresholds, and agree on a policy: while budget remains we ship freely; when it's exhausted we pause risky launches and invest in reliability. Any external SLA is set looser than the SLO to leave margin.
+
+<Fragment slot="deeper">
+
+- **SLI vs SLO vs SLA?** Measurement vs internal target vs contractual promise with penalties.
+- **Why not aim for 100%?** Exponential cost, no room for change, and users can't perceive it.
+- **What is burn rate?** How fast the error budget is consumed relative to the allowed pace.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["SLI", "Service level indicator: a measured ratio of good events to total events."],
+  ["SLO", "Service level objective: a target value for an SLI over a time window."],
+  ["SLA", "Service level agreement: a contract with consequences if not met."],
+  ["Error budget", "The allowed amount of unreliability: 100% minus the SLO."],
+  ["Burn rate", "How quickly the error budget is being consumed relative to plan."],
+]} />

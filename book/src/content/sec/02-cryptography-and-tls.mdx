@@ -1,0 +1,143 @@
+---
+title: Cryptography essentials and TLS
+part: Foundations
+order: 2
+level: core
+summary: Symmetric and asymmetric encryption, hashing, signatures and certificates — and how TLS combines them to secure every HTTPS connection.
+---
+
+You don't need to implement cryptography, but you need to know which tool does what. **Hashing** fingerprints data. **Symmetric encryption** uses one shared key to encrypt and decrypt — fast, used for bulk data. **Asymmetric (public-key) cryptography** uses a key pair: what one key locks, only the other unlocks — used for exchanging keys and making **digital signatures**. **Certificates** bind a public key to an identity, vouched for by a **certificate authority**. **TLS** combines all of these to make HTTPS connections confidential, tamper-proof and authenticated.
+
+<Analogy>
+  Symmetric encryption is a lockbox with one key that both friends have copies of — fast, but how do you get the key to your friend safely? Asymmetric crypto is a padlock you hand out freely (public key): anyone can snap it shut on a box, but only you have the key that opens it (private key). TLS uses the padlock trick once, to safely share a lockbox key, then uses the fast lockbox for the rest of the conversation.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask how HTTPS works, the difference between hashing, encryption and signing, how certificates are validated, and what mTLS is. These ideas also explain JWTs, webhook signatures and encrypted storage.
+
+## The toolbox
+
+| Tool | Keys | Reversible? | Used for | Examples |
+|---|---|---|---|---|
+| Hash | none | no | integrity checks, fingerprints, content addressing | SHA-256, SHA-3, BLAKE3 |
+| Password hash (KDF) | salt | no | storing passwords | argon2id, scrypt, bcrypt |
+| MAC / HMAC | shared secret | no | integrity + authenticity between two parties | HMAC-SHA256 |
+| Symmetric encryption | shared secret | yes | bulk data encryption | AES-256-GCM, ChaCha20-Poly1305 |
+| Asymmetric encryption / key exchange | public/private pair | yes | establishing shared keys | ECDHE (X25519), RSA |
+| Digital signature | private signs, public verifies | n/a | proving authorship, integrity | Ed25519, ECDSA, RSA-PSS |
+
+**Authenticated encryption** (AES-GCM, ChaCha20-Poly1305) both hides data and detects tampering — always prefer it over older modes.
+
+## Signatures
+
+<Diagram
+  caption="Signing proves who produced a message and that it wasn't changed. Anyone with the public key can verify; only the private key can sign."
+  chart={`flowchart LR
+    M["message"] --> H["hash"]
+    H --> S["sign with<br/>private key"]
+    S --> SIG["signature"]
+    M --> V["verifier: hash message,<br/>check signature with public key"]
+    SIG --> V
+    V --> OK["✓ authentic and unmodified"]`}
+  flow
+/>
+
+Signatures power JWTs (RS256/ES256), code signing, package provenance, and TLS certificates themselves.
+
+## Certificates and the chain of trust
+
+A **certificate** says "this public key belongs to `api.example.com`", signed by a **certificate authority (CA)**. Browsers and operating systems ship with trusted **root CAs**; servers present a chain: their certificate → intermediate CA → root.
+
+<Diagram
+  caption="Certificate chain validation."
+  chart={`flowchart TB
+    ROOT["Root CA<br/>(pre-installed in OS / browser trust store)"] -- "signs" --> INT["Intermediate CA"]
+    INT -- "signs" --> LEAF["api.example.com certificate<br/>public key, validity dates, SANs"]
+    CL["client"] --> CHK["checks: chain to a trusted root,<br/>hostname matches SAN,<br/>not expired, not revoked"]
+    LEAF --> CHK`}
+/>
+
+Certificates are cheap and automated today (Let's Encrypt, AWS Certificate Manager). The most common real-world failure is simply an **expired** certificate — automate renewal and alert well before expiry.
+
+## How TLS 1.3 works
+
+<Diagram
+  sequence
+  caption="A simplified TLS 1.3 handshake: one round trip agrees on keys and authenticates the server; then all data is encrypted symmetrically."
+  chart={`sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: ClientHello: supported ciphers + key share (ephemeral public key)
+    S-->>C: ServerHello: chosen cipher + key share
+    S-->>C: certificate + signature over the handshake + Finished
+    C->>C: verify certificate chain, hostname, signature
+    C->>S: Finished
+    C->>S: application data (AES-GCM, shared key)`}
+  notes={[
+    "The client proposes cipher suites and sends an ephemeral Diffie-Hellman public key.",
+    "The server picks a cipher and sends its own key share. Both sides can now compute the same secret — without ever sending it.",
+    "The server proves its identity: its certificate plus a signature over the handshake made with its private key.",
+    "The client validates the chain to a trusted root, checks the hostname and verifies the signature.",
+    "Handshake complete — typically in one round trip.",
+    "All further data uses fast symmetric encryption with the derived keys.",
+  ]}
+/>
+
+Key properties:
+
+- **Confidentiality** and **integrity** via authenticated symmetric encryption.
+- **Server authentication** via the certificate.
+- **Forward secrecy**: ephemeral key exchange means stealing the server's private key later doesn't decrypt recorded past traffic.
+- TLS 1.3 removed old, weak options; disable TLS 1.0/1.1. Use HSTS so browsers always use HTTPS.
+
+### Mutual TLS (mTLS)
+
+In mTLS, the **client** also presents a certificate, so both sides authenticate. It's common for service-to-service traffic (often automated by a service mesh like Istio or Linkerd, which issues short-lived certificates to every workload) and for high-security partner APIs.
+
+### Where TLS terminates
+
+Usually at the load balancer or CDN. Traffic behind it should also be encrypted (re-encrypt to the service, or mTLS in the mesh) — "internal" networks aren't automatically safe.
+
+## Encryption at rest and key management
+
+- Databases, disks and object storage support encryption at rest (often on by default in the cloud).
+- **Envelope encryption**: data is encrypted with a data key; the data key is encrypted with a master key held in a **KMS** (AWS KMS, GCP KMS, Vault). Rotating the master key doesn't require re-encrypting all data, and the master key never leaves the KMS.
+- For especially sensitive fields (national IDs, card data), add **application-level encryption** so DBAs and backups don't see plaintext.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using hashing when you need encryption (or vice versa).
+- Fast hashes (SHA-256) for passwords.
+- ECB mode or unauthenticated encryption; reusing IVs/nonces with the same key.
+- Disabling certificate verification in clients "to make it work".
+- Hard-coded keys in source code; no rotation.
+- Letting certificates expire.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does HTTPS keep a connection secure?">
+
+HTTPS is HTTP over TLS. In the TLS 1.3 handshake, client and server exchange ephemeral Diffie-Hellman key shares, which lets both compute the same secret without sending it, and the server proves its identity with a certificate — a public key bound to its hostname and signed by a certificate authority the client trusts — plus a signature over the handshake. The client validates the chain to a trusted root, the hostname and the expiry. After that one round trip, everything is encrypted with a fast symmetric authenticated cipher like AES-GCM, which gives confidentiality and tamper detection, and because the keys are ephemeral there's forward secrecy. Mutual TLS adds a client certificate, which is common between services.
+
+<Fragment slot="deeper">
+
+- **Hashing vs encryption vs signing?** One-way fingerprint vs reversible with a key vs proof of origin verifiable with a public key.
+- **What is forward secrecy?** Compromise of long-term keys doesn't expose past sessions.
+- **What is envelope encryption?** Data keys encrypted by a master key held in a KMS.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Symmetric encryption", "One shared key encrypts and decrypts."],
+  ["Asymmetric cryptography", "Key pairs: public key shared, private key secret."],
+  ["Digital signature", "Proof of origin and integrity made with a private key."],
+  ["Certificate authority", "Trusted issuer that signs certificates binding keys to identities."],
+  ["Forward secrecy", "Past sessions stay secure even if long-term keys leak later."],
+  ["mTLS", "TLS where both client and server present certificates."],
+]} />

@@ -1,0 +1,237 @@
+---
+title: The event loop in the browser
+part: Asynchrony
+order: 17
+level: core
+summary: JavaScript can only do one thing at a time, yet pages stay responsive while waiting for timers and the network. The event loop is how.
+demo: js-event-loop
+---
+
+JavaScript runs on **one thread**. At any moment it is executing exactly one piece of code. Yet a web page can wait for a server response, count down a timer and react to your clicks — all "at the same time". The trick is that JavaScript doesn't do the waiting. It hands waiting jobs to the browser, keeps going, and picks up the results later. The mechanism that decides *when* those results get picked up is the **event loop**.
+
+<Analogy>
+  Picture a chef working alone in a small kitchen (the JavaScript engine). The chef can only cook one dish at a time. Ovens and timers (the browser) handle the slow parts — the chef puts a cake in the oven and carries on chopping. When the oven beeps, the cake doesn't jump onto the counter by itself: a ticket goes onto a rail of orders, and the chef takes the next ticket only when their hands are free. The event loop is the chef's habit of checking that rail every time they finish a dish.
+</Analogy>
+
+## Why it matters
+
+Almost every "what does this print?" interview question about `setTimeout`, promises or `async/await` is really a question about the event loop. It also explains real bugs: a page that freezes during a heavy loop, a timer that fires "late", or a UI that doesn't update until a function finishes.
+
+## The pieces
+
+There are four parts to keep in your head. Only the first one belongs to the JavaScript language itself. The rest are supplied by the **host** — the browser here, or Node.js on a server.
+
+<Diagram
+  caption="The engine runs code. The browser does the waiting and queues the results. The event loop moves them back onto the stack."
+  flow
+  chart={`flowchart LR
+    subgraph Engine["JavaScript engine (V8, SpiderMonkey…)"]
+      direction TB
+      S["Call stack<br/>code running now"]
+      H["Heap<br/>objects in memory"]
+    end
+    subgraph Browser["Browser (the host)"]
+      direction TB
+      W["Web APIs<br/>timers · fetch · DOM events"]
+      MQ["Microtask queue<br/>promise callbacks"]
+      TQ["Task queue<br/>timers · events"]
+    end
+    S -- "setTimeout / fetch" --> W
+    W -- "done → queue callback" --> TQ
+    S -- ".then()" --> MQ
+    L(("Event<br/>loop"))
+    MQ --> L
+    TQ --> L
+    L -- "only when stack is empty" --> S`}
+/>
+
+1. **The call stack** is where your code actually runs. Calling a function pushes a frame on top; returning pops it off. If something is on the stack, the engine is busy.
+2. **Web APIs** are things the browser can do *outside* JavaScript: timers, network requests, listening for clicks. JavaScript asks for them and immediately moves on.
+3. **Queues** hold callbacks that are ready to run. There are two important ones:
+   - the **task queue** (sometimes called the *macrotask* queue) — for timers, user events, network responses;
+   - the **microtask queue** — for promise callbacks (`.then`, `.catch`, `await`) and `queueMicrotask`.
+4. **The event loop** is a simple rule that runs forever: *when the call stack is empty, take the next thing from a queue and run it.*
+
+<Callout type="note">
+  The event loop is not part of the JavaScript language specification. ECMAScript only describes promise "jobs". Timers, the DOM and the loop itself come from the HTML standard (in browsers) or from libuv (in Node). That is why the rules differ slightly between the two — see the Node.js volume.
+</Callout>
+
+## One turn of the loop
+
+The order of operations is the part interviewers care about. In each turn the browser does roughly this:
+
+<Diagram
+  caption="One turn of the browser event loop. The microtask queue is emptied completely every time a task finishes."
+  chart={`flowchart TB
+    A["Take ONE task<br/>from the task queue"] --> B["Run it until<br/>the stack is empty"]
+    B --> C{"Any microtasks?"}
+    C -- yes --> D["Run the next microtask"]
+    D --> C
+    C -- no --> E["requestAnimationFrame<br/>callbacks"]
+    E --> F["Style, layout, paint<br/>(if needed)"]
+    F --> A`}
+  steps={[
+    { nodes: ['A'], text: 'The loop picks **one** task — for example a timer callback, or the initial script itself.' },
+    { nodes: ['A', 'B'], text: 'The task runs to completion. Nothing can interrupt it; JavaScript code is never paused halfway by another callback.' },
+    { nodes: ['B', 'C', 'D'], text: 'Now the microtask queue is drained. If a microtask queues *another* microtask, that one runs too, in the same drain.' },
+    { nodes: ['C', 'E'], text: 'Once no microtasks remain, `requestAnimationFrame` callbacks run — the right moment for visual updates.' },
+    { nodes: ['E', 'F'], text: 'The browser may now recalculate styles and paint. This is why a long-running task freezes the screen: painting has to wait.' },
+    { nodes: ['F', 'A'], text: 'Back to the top: one more task. Then microtasks again. Forever.' },
+  ]}
+/>
+
+The key rules, in plain words:
+
+- **Synchronous code always finishes first.** Nothing queued can run while your current function is still on the stack.
+- **All microtasks run before the next task.** Promise callbacks jump ahead of timers, every time.
+- **Only one task per turn.** After each task the loop goes back to check microtasks and maybe render.
+
+## A worked example
+
+Here is the classic question. Read it and guess the output before looking.
+
+```js
+console.log('A: script start');
+
+setTimeout(() => {
+  console.log('D: timeout');
+}, 0);
+
+Promise.resolve().then(() => {
+  console.log('C: promise');
+});
+
+console.log('B: script end');
+```
+
+<Output lines={['A: script start', 'B: script end', 'C: promise', 'D: timeout']} />
+
+Walk through it with the rules:
+
+1. `A` prints immediately — ordinary synchronous code.
+2. `setTimeout(..., 0)` hands the callback to the browser's timer. Even with 0 ms, the callback can only be put on the **task queue**.
+3. `.then()` on an already-resolved promise puts its callback on the **microtask queue**.
+4. `B` prints — still synchronous.
+5. The script ends and the stack empties. Microtasks first: `C` prints.
+6. Now one task: the timer callback. `D` prints last.
+
+<Diagram
+  sequence
+  caption="The same program as a timeline. Watch where each callback waits before it runs."
+  chart={`sequenceDiagram
+    participant S as Call stack
+    participant W as Web APIs
+    participant M as Microtasks
+    participant T as Task queue
+    S->>S: log("A")
+    S->>W: setTimeout(cb, 0)
+    W->>T: timer expires → queue cb
+    S->>M: .then(cb) → queue
+    S->>S: log("B")
+    Note over S: script ends, stack empty
+    M->>S: run promise cb → log("C")
+    T->>S: run timer cb → log("D")`}
+  notes={[
+    '`A` prints right away — the stack is running the script.',
+    '`setTimeout` registers a timer with the browser and returns immediately. JavaScript does not wait.',
+    'The 0 ms timer expires almost at once, so its callback joins the **task queue**.',
+    '`.then` on a resolved promise queues its callback on the **microtask queue**.',
+    '`B` prints. Both callbacks are still waiting.',
+    'With the stack empty, the loop drains microtasks first — `C`.',
+    'Only then is one task taken — the timer — and `D` prints.',
+  ]}
+/>
+
+<DemoLink id="js-event-loop" />
+
+## Where does each callback go?
+
+| You call | Queue | When it runs |
+|---|---|---|
+| `setTimeout`, `setInterval` | task | a later turn, after at least the delay |
+| DOM events (`click`, `input`) | task | when the event fires and the stack is free |
+| `fetch(...)` resolving | microtask (its `.then`) | as soon as the stack is empty |
+| `.then`, `.catch`, `.finally` | microtask | right after the current task |
+| code after `await` | microtask | right after the current task |
+| `queueMicrotask(fn)` | microtask | right after the current task |
+| `requestAnimationFrame(fn)` | its own list | just before the next paint |
+| `MessageChannel` message | task | next turn, with no timer clamp |
+
+## Why a long task freezes the page
+
+Because the loop only moves on when the stack is empty, a single slow function holds up **everything**: clicks, timers, promise callbacks and painting.
+
+```js
+button.addEventListener('click', () => {
+  const end = Date.now() + 3000;
+  while (Date.now() < end) {}   // busy for 3 seconds
+  status.textContent = 'Done';  // the screen only updates after this handler returns
+});
+```
+
+During those three seconds the page cannot scroll, animate or respond. Browsers call any task over **50 ms** a *long task*, and it directly hurts the responsiveness metric INP (Interaction to Next Paint).
+
+The fix is to split the work into chunks and **yield** back to the loop between chunks, so the browser can paint and handle input:
+
+```js
+async function processInChunks(items, handle) {
+  for (let i = 0; i < items.length; i++) {
+    handle(items[i]);
+    if (i % 200 === 0) {
+      // give the browser a turn: paint, handle clicks, run timers
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+}
+```
+
+<Diagram
+  caption="Chunking turns one long task into many short ones, leaving gaps where the browser can paint and respond."
+  chart={`flowchart LR
+    subgraph Before["One long task"]
+      direction LR
+      X["████████████ 3000 ms ████████████"]
+    end
+    subgraph After["Chunked"]
+      direction LR
+      C1["chunk"] --> P1(("paint")) --> C2["chunk"] --> P2(("click")) --> C3["chunk"] --> P3(("paint"))
+    end
+    Before ~~~ After`}
+/>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- **"`setTimeout(fn, 0)` runs immediately."** It never does. It runs in a later turn, after the current code and all microtasks. Browsers also clamp nested timers to at least about 4 ms.
+- **"The delay is exact."** A timer's delay is a *minimum*. If the stack is busy, the callback waits longer.
+- **"Microtasks are always harmless."** A promise chain that keeps queueing new microtasks never lets the loop reach the task queue or paint — the page freezes just like a `while(true)` loop.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does the JavaScript event loop work?">
+
+JavaScript runs on a single call stack, so it does one thing at a time. Anything that involves waiting — timers, network, events — is handed to the host environment, such as the browser. When that work finishes, its callback is placed in a queue. The event loop's job is simple: whenever the call stack is empty, it takes the next callback and runs it.
+
+There are two main queues. After each task, the loop empties the entire **microtask** queue — promise callbacks and `await` continuations — and only then takes the next **task**, like a timer or click handler. That's why a resolved promise's `.then` always runs before a `setTimeout` of zero.
+
+<Fragment slot="deeper">
+
+- **Is the event loop part of JavaScript?** No — ECMAScript defines only the job queue for promises. Browsers define the loop in the HTML spec; Node uses libuv.
+- **Where does `requestAnimationFrame` fit?** After the microtask drain and before paint, so it runs once per frame — ideal for animations.
+- **How do you keep the UI responsive during heavy work?** Break it into chunks and yield (`setTimeout`, `scheduler.yield()`), or move it to a Web Worker.
+- **Can microtasks starve the page?** Yes. Because the queue drains completely, a self-requeueing promise chain blocks timers and rendering forever.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ['Call stack', 'The list of functions currently running. Last in, first out. When it is empty, the engine is idle.'],
+  ['Web APIs', 'Features provided by the browser (timers, fetch, DOM events) that run outside the JavaScript thread.'],
+  ['Task (macrotask)', 'A unit of work such as a timer callback or event handler. The loop runs one per turn.'],
+  ['Microtask', 'A high-priority callback — promise reactions, `await` continuations, `queueMicrotask`. The whole queue drains after every task.'],
+  ['Event loop', 'The rule that moves callbacks from the queues onto the call stack whenever the stack is empty.'],
+  ['Long task', 'Any task that occupies the main thread for more than 50 ms, blocking input and painting.'],
+]} />

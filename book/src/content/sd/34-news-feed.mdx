@@ -1,0 +1,164 @@
+---
+title: "Case study: a news feed"
+part: Case studies
+order: 34
+level: advanced
+summary: Fan-out on write versus fan-out on read, the celebrity problem, ranking, pagination and caching for a social timeline.
+---
+
+A news feed shows each user a stream of posts from the people they follow — Twitter/X's home timeline, Instagram, LinkedIn. Reading the feed is by far the most common action, so it must be fast. The central design question is **when** to assemble each user's feed: when posts are **written** (push them into followers' feeds — *fan-out on write*) or when the feed is **read** (pull recent posts from everyone you follow — *fan-out on read*). Real systems use a **hybrid**, because celebrities with millions of followers break the write-time approach.
+
+<Analogy>
+  Two ways to get the news. Fan-out on write is a newspaper delivered to every subscriber's doorstep every morning — reading is instant, but the paper must print and deliver millions of copies, even for people who won't read it. Fan-out on read is going to each news-stand you care about and picking up the latest edition yourself — no wasted copies, but reading takes a long walk.
+</Analogy>
+
+## 1. Requirements
+
+**Functional**
+
+- Users post (text, images); follow other users.
+- Home feed: recent posts from followed accounts, newest first or ranked; infinite scroll.
+- Out of scope: comments/likes details, ads, search (mention).
+
+**Non-functional**
+
+- Feed loads fast: p99 under ~200 ms.
+- Read-heavy: e.g. 100 feed reads per post.
+- Eventual consistency is fine: a new post may take seconds to appear in followers' feeds.
+- Scale: 200 million DAU.
+
+## 2. Estimates
+
+- Posts: 200M × 0.5/day = 10⁸/day ≈ **1,200/s**.
+- Feed reads: 200M × 20/day = 4 × 10⁹/day ≈ **46,000/s** (peak ~150k/s).
+- Average follows: 200; but some accounts have **50 million** followers.
+- Fan-out on write cost: 1,200 posts/s × 200 followers ≈ **240,000 feed inserts/s** on average — heavy but feasible; a single celebrity post = 50 million inserts.
+
+## 3. Data model
+
+```text
+users(id, …)
+follows(follower_id, followee_id, created_at)       -- partition by follower and by followee (two tables)
+posts(id, author_id, created_at, body, media_urls)  -- partition by author_id
+feeds(user_id, post_id, created_at)                 -- precomputed timeline per user (Redis list / wide-column)
+```
+
+## 4. Fan-out on write vs on read
+
+<Diagram
+  caption="Push: work at post time, cheap reads. Pull: no work at post time, expensive reads."
+  chart={`flowchart TB
+    subgraph PUSH["Fan-out on write (push)"]
+      direction LR
+      P1["Alice posts"] --> F1["fan-out workers"]
+      F1 --> FA["Bob's feed"]
+      F1 --> FB["Carol's feed"]
+      F1 --> FC["… every follower's feed"]
+      R1["Bob opens app"] --> FA
+    end
+    subgraph PULL["Fan-out on read (pull)"]
+      direction LR
+      R2["Bob opens app"] --> M["merge latest posts from<br/>all 200 accounts he follows"]
+      M --> PA["Alice's posts"]
+      M --> PB["Dave's posts"]
+      M --> PC["… 198 more"]
+    end`}
+  steps={[
+    { nodes: ["P1", "F1", "FA", "FB", "FC"], text: "**Push**: when Alice posts, workers insert the post ID into every follower's precomputed feed." },
+    { nodes: ["R1", "FA"], text: "Reading is then a single fast lookup of Bob's feed list." },
+    { nodes: ["R2", "M", "PA", "PB", "PC"], text: "**Pull**: nothing happens at post time. When Bob opens the app, the system fetches recent posts from all 200 accounts he follows and merges them — expensive on every read." },
+  ]}
+/>
+
+| | Fan-out on write | Fan-out on read |
+|---|---|---|
+| Post cost | O(followers) | O(1) |
+| Read cost | O(1) — read precomputed list | O(followees) — merge many lists |
+| Feed freshness | slight delay (async fan-out) | always current |
+| Wasted work | feeds for inactive users | none |
+| Breaks on | celebrities (millions of inserts) | users following thousands |
+
+## 5. The hybrid
+
+<Diagram
+  caption="Hybrid: push posts from normal accounts into followers' feeds; pull celebrity posts at read time and merge."
+  chart={`flowchart LR
+    POST["new post"] --> CHK{"author has more than<br/>~100k followers?"}
+    CHK -- "no" --> FO["fan-out workers push post ID<br/>into active followers' feeds"]
+    CHK -- "yes" --> CEL["store only in author's<br/>post list (no fan-out)"]
+    READ["Bob reads feed"] --> PRE["precomputed feed<br/>(Redis)"]
+    READ --> CELP["recent posts from the few<br/>celebrities Bob follows"]
+    PRE --> MERGE["merge + rank"]
+    CELP --> MERGE
+    MERGE --> HYD["hydrate post IDs → content<br/>(post cache)"]`}
+  steps={[
+    { nodes: ["POST", "CHK"], text: "On each post, check the author's follower count." },
+    { nodes: ["CHK", "FO"], text: "Normal authors: asynchronous workers push the post ID into each **active** follower's feed (skip users inactive for weeks; rebuild their feed on return)." },
+    { nodes: ["CHK", "CEL"], text: "Celebrities: no fan-out. Their posts stay in their own post list." },
+    { nodes: ["READ", "PRE", "CELP", "MERGE"], text: "At read time, take Bob's precomputed feed and merge in recent posts from the handful of celebrities he follows." },
+    { nodes: ["MERGE", "HYD"], text: "The feed holds only IDs; post content, author info and counts are fetched in one batched lookup from caches ('hydration')." },
+  ]}
+/>
+
+Feed storage: a **Redis list or sorted set per user** holding the latest ~500–1,000 post IDs (older items fall off and are fetched from the database if a user scrolls very far). Storing IDs, not content, keeps it small and means edits/deletes appear everywhere.
+
+## 6. Ranking
+
+Chronological feeds are simplest. Ranked feeds score candidates (recency, author affinity, engagement, content type) — typically:
+
+1. **Candidate generation**: the hybrid feed plus maybe recommended posts (a few hundred).
+2. **Ranking**: a model scores each candidate.
+3. **Re-ranking / filtering**: diversity (not five posts from one author in a row), remove seen or blocked content.
+
+Ranking happens at read time on a small candidate set, so it stays fast.
+
+## 7. Pagination
+
+Use **cursor pagination** keyed on (score or timestamp, post ID): "give me 20 items after this cursor". Offsets break when new posts arrive at the top while the user scrolls.
+
+## 8. Media and caching
+
+- Images/videos uploaded directly to object storage via pre-signed URLs; served through a CDN in several resolutions.
+- Caches: post objects by ID, user profiles, follower counts — the hydration step reads mostly from cache.
+- Like/comment counts updated asynchronously with batched counters (avoid a hot row per viral post).
+
+## 9. Failure and consistency
+
+- Fan-out is a queue-driven background job: if workers fall behind, posts appear late, not lost. Monitor fan-out lag.
+- Deletes and privacy changes must propagate: delete the post object (hydration then drops it), and asynchronously remove IDs from feeds.
+- Unfollowing: filter at read time immediately; clean the feed lazily.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Pure fan-out on write without handling celebrities.
+- Storing full post content in every follower's feed.
+- Fan-out for users who haven't logged in for months.
+- OFFSET pagination on a constantly changing feed.
+- Synchronous fan-out inside the "create post" request.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Design a social media news feed.">
+
+Feed reads outnumber posts by orders of magnitude, so I'd precompute feeds. When someone posts, the post is stored once, and asynchronous fan-out workers push its ID into each active follower's feed — a Redis list per user holding the latest few hundred IDs. Reading the feed is then a single lookup plus a batched hydration of post content from caches. Pure push breaks for celebrities with millions of followers, so I'd use a hybrid: accounts above a follower threshold aren't fanned out; at read time I merge their recent posts into the precomputed feed. For ranked feeds, that merged set becomes the candidates for a ranking model. Pagination uses cursors, media is served from object storage through a CDN, counts are updated asynchronously, and fan-out lag is the key health metric.
+
+<Fragment slot="deeper">
+
+- **Fan-out on write vs read?** Cost at post time and cheap reads vs no post-time cost and expensive reads.
+- **Why store IDs in feeds?** Small, and edits/deletes take effect everywhere through hydration.
+- **How do you avoid wasted fan-out?** Skip inactive users and rebuild their feeds on return.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Fan-out on write", "Distributing a new post to followers' feeds when it's created."],
+  ["Fan-out on read", "Assembling a feed from followed accounts when it's requested."],
+  ["Celebrity problem", "Accounts with huge follower counts making push fan-out too expensive."],
+  ["Hydration", "Turning stored IDs into full objects via batched cache lookups."],
+  ["Candidate generation", "Selecting a manageable set of items to rank."],
+]} />

@@ -1,0 +1,168 @@
+---
+title: GraphQL in production
+part: GraphQL
+order: 6
+level: advanced
+summary: N+1 and DataLoader, caching and persisted queries, depth and cost limits, field-level authorisation, and federating many services into one graph.
+---
+
+GraphQL's flexibility — clients can ask for any combination of fields — is also its main operational challenge. A naive server runs one database query per item in a list (**N+1**), can't rely on simple HTTP caching, and will happily execute a deeply nested query that takes the whole service down. Production GraphQL adds **batching**, **caching strategies**, **query limits**, careful **authorisation**, and for large organisations, **federation** across services.
+
+<Analogy>
+  A build-your-own-plate counter works beautifully until a customer orders "one of everything, and for each of those, one of everything again". The counter needs batching (fetch all the rice at once, not spoonful by spoonful), limits on plate size, staff who check you're allowed each item, and — in a food court — a way to combine several kitchens into one menu.
+</Analogy>
+
+## Why it matters
+
+Any interviewer who hears "GraphQL" will ask about N+1, caching and malicious queries. These are exactly where real GraphQL deployments fail.
+
+## N+1 and DataLoader
+
+```graphql
+query { orders(first: 50) { edges { node { id customer { name } } } } }
+```
+
+With naive resolvers: 1 query for 50 orders, then 50 queries for customers — **N+1**. **DataLoader** collects every `load(id)` call made during one tick of the event loop and issues **one** batched query, then caches results for the rest of the request.
+
+<Diagram
+  caption="DataLoader batches the 50 customer lookups made during one tick into a single query, and de-duplicates repeated IDs."
+  chart={`flowchart LR
+    R["50 Order.customer resolvers<br/>each call loader.load(customerId)"] --> DL["DataLoader<br/>collects keys during this tick<br/>dedups: 50 calls → 12 unique ids"]
+    DL --> DB[("SELECT * FROM customers<br/>WHERE id = ANY($1)")]
+    DB --> DL
+    DL --> R2["each resolver gets its customer"]`}
+  steps={[
+    { nodes: ["R"], text: "Each order's `customer` resolver asks the loader for one customer ID." },
+    { nodes: ["R", "DL"], text: "DataLoader doesn't query yet. It waits until the current tick ends, collecting all requested IDs and removing duplicates." },
+    { nodes: ["DL", "DB"], text: "Then it runs one batched query for all unique IDs." },
+    { nodes: ["DB", "DL", "R2"], text: "Results are matched back to each caller in order. 51 queries became 2." },
+  ]}
+/>
+
+```js
+const DataLoader = require('dataloader');
+
+function createLoaders(db) {          // create per request — never share across users
+  return {
+    customer: new DataLoader(async (ids) => {
+      const rows = await db.query('SELECT * FROM customers WHERE id = ANY($1)', [ids]);
+      const byId = new Map(rows.rows.map((r) => [r.id, r]));
+      return ids.map((id) => byId.get(id) ?? null);   // same order as ids
+    }),
+  };
+}
+```
+
+Loaders are created **per request** so cached data never leaks between users. Batch functions must return results in the same order as the keys.
+
+## Caching
+
+Because GraphQL typically uses one `POST` endpoint, URL-based HTTP caching doesn't work by default. Options:
+
+| Layer | Technique |
+|---|---|
+| Client | normalised caches (Apollo Client, urql, Relay) keyed by `__typename` + `id` |
+| CDN / HTTP | **persisted queries** sent as `GET /graphql?id=<hash>&variables=…` → cacheable; `Cache-Control` from field-level `@cacheControl` hints |
+| Server | response caching for public queries; DataLoader per request; Redis for expensive resolvers |
+
+**Persisted queries** (or "trusted documents"): clients register their queries at build time and send only a hash. Benefits: smaller requests, CDN caching via GET, and — importantly — the server can **reject any query not in the allow-list**.
+
+## Protecting the server
+
+<Diagram
+  caption="A malicious or accidental query can explode. Defences apply before and during execution."
+  chart={`flowchart LR
+    Q["incoming query"] --> PQ{"persisted / allow-listed?"}
+    PQ -- "no (public API)" --> DEP["depth limit<br/>(e.g. max 8)"]
+    PQ -- yes --> EX["execute"]
+    DEP --> COST["cost analysis<br/>(lists × fields ≤ budget)"]
+    COST --> RL["rate limit by cost,<br/>not request count"]
+    RL --> EX
+    EX --> TO["timeouts + pagination caps"]`}
+  steps={[
+    { nodes: ["Q", "PQ", "EX"], text: "For first-party apps, accept only persisted queries — arbitrary queries never run." },
+    { nodes: ["PQ", "DEP"], text: "For public APIs, reject queries nested deeper than a limit (`friends { friends { friends … } } }`)." },
+    { nodes: ["DEP", "COST"], text: "Estimate cost: a list of 100 with nested lists of 100 = 10,000 objects. Reject over budget." },
+    { nodes: ["COST", "RL"], text: "Rate-limit by **query cost** per client (GitHub's API does this), since one request can be cheap or enormous." },
+    { nodes: ["RL", "EX", "TO"], text: "During execution: enforce max page sizes and overall timeouts." },
+  ]}
+/>
+
+Also consider disabling introspection in production for private APIs (it's not a security boundary, but reduces casual probing), limiting aliases and batching that multiply work, and masking internal errors.
+
+## Authorisation
+
+Authenticate once (context gets the user), but **authorise per field/object**: any resolver can be reached through many query paths.
+
+```js
+Order: {
+  customer: (order, _, ctx) => {
+    if (!ctx.user.canView(order)) throw new ForbiddenError();   // or return null
+    return ctx.loaders.customer.load(order.customerId);
+  },
+},
+```
+
+Better: enforce authorisation in the **domain/service layer** that resolvers call (`orders.findById(id, user)`), so REST, GraphQL and jobs all share the same rules. Schema directives (`@auth(requires: ADMIN)`) help with role checks.
+
+## Monitoring
+
+Since everything is `POST /graphql` returning 200, standard HTTP metrics are useless. Track per **operation name** and per **field**: latency, error rate, resolver timings (tracing), and which clients use deprecated fields before removing them.
+
+## Federation: one graph, many services
+
+<Diagram
+  caption="Federation: each team owns a subgraph; a router composes them into one supergraph and plans queries across services."
+  chart={`flowchart LR
+    C["clients"] --> RT["GraphQL router / gateway<br/>(Apollo Router, Hive, Cosmo)"]
+    RT --> U["users subgraph<br/>type User"]
+    RT --> O["orders subgraph<br/>type Order, extends User.orders"]
+    RT --> P["products subgraph<br/>type Product"]
+    U --> UDB[("users DB")]
+    O --> ODB[("orders DB")]
+    P --> PDB[("products DB")]`}
+/>
+
+Each service defines its part of the schema and how to resolve entities by key; the router builds a query plan, calls subgraphs (in parallel where possible) and merges results. Alternatives: a single **BFF** GraphQL server that calls REST/gRPC services, or schema stitching. Federation suits many teams; a BFF suits fewer.
+
+## When GraphQL isn't the best fit
+
+- Simple CRUD or public APIs where HTTP caching and simplicity matter more → REST.
+- Service-to-service, high-throughput calls → gRPC.
+- File uploads and binary streaming → plain HTTP endpoints alongside.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- No DataLoader, so every list causes N+1 queries.
+- Sharing DataLoader instances across requests (data leaking between users).
+- Accepting arbitrary queries with no depth/cost limits.
+- Authorising only at the top-level query, not on nested fields.
+- Monitoring HTTP status codes instead of operations and errors.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What problems do you face running GraphQL in production, and how do you solve them?">
+
+The first is N+1: nested resolvers fetch related data per item, so I use DataLoader, created per request, to batch and de-duplicate lookups within a tick into one query. Second, caching: with one POST endpoint, HTTP caching doesn't work out of the box, so I use persisted queries sent as GETs with cache hints for public data, normalised client caches, and server-side caching for expensive resolvers. Third, abuse: clients can write very expensive queries, so first-party apps only send allow-listed persisted queries, and public APIs enforce depth limits, cost analysis, cost-based rate limiting, page-size caps and timeouts. Fourth, authorisation must be enforced per object, ideally in the shared domain layer, because any field can be reached through many paths. I monitor per operation and field rather than HTTP status, and with many teams I'd federate subgraphs behind a router.
+
+<Fragment slot="deeper">
+
+- **How does DataLoader work?** Collects `load()` calls during one event-loop tick, batches them, caches per request.
+- **What are persisted queries?** Pre-registered queries referenced by hash: smaller, cacheable, and an allow-list.
+- **Federation vs BFF?** Team-owned subgraphs composed by a router vs one GraphQL layer calling backend services.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["N+1 problem", "One query for a list plus one per item, caused by naive nested resolvers."],
+  ["DataLoader", "Per-request batching and caching utility for resolver data fetching."],
+  ["Persisted query", "A query registered ahead of time and referenced by hash."],
+  ["Query cost analysis", "Estimating a query's work before execution and rejecting expensive ones."],
+  ["Federation", "Composing multiple GraphQL subgraphs into one supergraph."],
+  ["BFF", "Backend-for-frontend: an API layer tailored to one client type."],
+]} />

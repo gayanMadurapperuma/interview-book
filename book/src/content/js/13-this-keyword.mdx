@@ -1,0 +1,193 @@
+---
+title: The this keyword
+part: Scope & functions
+order: 13
+level: core
+summary: this is not decided where a function is written but where it is called. Four rules, in priority order, cover every case.
+demo: js-this-binding
+---
+
+`this` is a special value that a function receives when it is **called**. Unlike ordinary variables, which follow lexical scope, `this` depends on **how the function is called**. The same function can see a different `this` on every call. Arrow functions are the exception: they have no `this` of their own and use the one from the code around them.
+
+<Analogy>
+  `this` is like the word "me" in a sentence. The sentence "pass me the salt" means something different depending on who says it. A regular function is a sentence that gets its "me" from whoever speaks it at the moment. An arrow function is a quoted sentence: its "me" always refers to the person who originally wrote the note.
+</Analogy>
+
+## Why it matters
+
+Lost `this` is one of the most common JavaScript bugs: a method passed as a callback suddenly cannot read its own object. Interviewers ask you to predict `this` in several call styles and to explain how `bind`, `call` and arrow functions fix it.
+
+## The four rules, in priority order
+
+<Diagram
+  caption="How the engine decides this for a normal function call. Arrow functions skip this entirely and use the surrounding this."
+  chart={`flowchart TB
+    Q{"How is the function called?"} --> N["with new<br/>new User()"]
+    Q --> E["with call / apply / bind<br/>fn.call(obj)"]
+    Q --> I["as a method<br/>obj.fn()"]
+    Q --> P["plainly<br/>fn()"]
+    N --> T1["this = the brand-new object"]
+    E --> T2["this = the object you passed"]
+    I --> T3["this = the object left of the dot"]
+    P --> T4["this = undefined (strict)<br/>globalThis (sloppy)"]`}
+  steps={[
+    { nodes: ["Q", "N", "T1"], text: "**1. `new` binding** — highest priority. `new User()` creates a fresh object and runs `User` with `this` set to it." },
+    { nodes: ["Q", "E", "T2"], text: "**2. Explicit binding** — `call`, `apply` and `bind` let you choose `this` yourself." },
+    { nodes: ["Q", "I", "T3"], text: "**3. Implicit binding** — called as `obj.fn()`, `this` is the object left of the dot." },
+    { nodes: ["Q", "P", "T4"], text: "**4. Default binding** — a plain call gets `undefined` in strict code (modules, classes), or the global object in old sloppy scripts." },
+  ]}
+/>
+
+### 1. Method call: the object before the dot
+
+```js
+const user = {
+  name: 'Ada',
+  hello() { return 'hi ' + this.name; },
+};
+user.hello();   // 'hi Ada' — this = user
+```
+
+Only the **last** object before the call matters: `a.b.c.fn()` sets `this` to `a.b.c`.
+
+### 2. Plain call: no object
+
+```js
+const hello = user.hello;   // copy the function out
+hello();                    // TypeError in strict mode: this is undefined
+```
+
+The function did not change. Only the **call site** changed — there is no object before the dot any more. This is exactly what happens when you pass a method as a callback:
+
+```js
+setTimeout(user.hello, 100);              // lost this
+button.addEventListener('click', user.hello);  // this = the button element!
+[1, 2].map(user.hello);                   // this = undefined
+```
+
+### 3. Explicit: `call`, `apply`, `bind`
+
+```js
+function introduce(greeting) { return `${greeting}, I am ${this.name}`; }
+
+introduce.call({ name: 'Ada' }, 'Hello');     // call: args listed
+introduce.apply({ name: 'Ada' }, ['Hello']);  // apply: args in an array
+const bound = introduce.bind({ name: 'Ada' }); // bind: returns a new function
+bound('Hi');                                  // 'Hi, I am Ada' — forever
+```
+
+`bind` creates a new function whose `this` is fixed permanently. Calling `bound` as a method of another object, or binding it again, does not change it (only `new` can override it).
+
+### 4. `new`
+
+```js
+function User(name) {
+  this.name = name;      // this = the new object
+}
+const u = new User('Ada');
+```
+
+`new` creates an empty object, links it to `User.prototype`, runs the function with `this` set to it, and returns it.
+
+## Arrow functions: no `this` of their own
+
+An arrow function does not get a `this` from its call site. It uses `this` from the scope where it was **written**, like any other variable from an outer scope.
+
+```js
+class Timer {
+  seconds = 0;
+  start() {
+    setInterval(() => {
+      this.seconds++;   // arrow: this = the Timer instance from start()
+    }, 1000);
+  }
+}
+```
+
+With a normal function in that `setInterval`, `this` would be `undefined` (or the timer object in Node). Before arrow functions, people wrote `const self = this;` or `.bind(this)` to work around it.
+
+<Diagram
+  caption="An arrow function looks up this lexically — it walks outward to the enclosing regular function and uses its this."
+  chart={`flowchart LR
+    subgraph start["start() — called as timer.start(), this = timer"]
+      A["() => this.seconds++<br/>no own this"]
+    end
+    A -- "this?" --> start`}
+/>
+
+But the same property makes arrows **wrong as object methods**:
+
+```js
+const counter = {
+  count: 0,
+  inc: () => this.count++,  // this is NOT counter — it is the outer (module) this
+};
+```
+
+<DemoLink id="js-this-binding" />
+
+## Fixing lost `this` in callbacks
+
+```js
+class Search {
+  constructor() { this.query = ''; }
+  onInput(e) { this.query = e.target.value; }
+}
+const s = new Search();
+
+input.addEventListener('input', s.onInput);               // broken: this = input
+input.addEventListener('input', (e) => s.onInput(e));     // fix 1: wrap in an arrow
+input.addEventListener('input', s.onInput.bind(s));       // fix 2: bind
+
+class Search2 {
+  query = '';
+  onInput = (e) => { this.query = e.target.value; };      // fix 3: arrow class field
+}
+```
+
+Option 3 creates a separate function per instance (slightly more memory), but it is common in React class components and event-heavy code.
+
+## `this` in other places
+
+| Location | `this` |
+|---|---|
+| Top level of an ES module | `undefined` |
+| Top level of a classic browser script | `window` |
+| Top level of a CommonJS Node file | `module.exports` |
+| DOM event handler (`function` listener) | the element the listener is attached to |
+| Class `static` method | the class itself |
+| Inside a class field arrow function | the instance |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Passing `obj.method` as a callback and expecting `this` to be `obj`.
+- Using an arrow function as an object or prototype method.
+- Expecting `bind` to work twice — the first `bind` wins.
+- Confusing `this` with scope: `this` is set by the call, variables by where code is written.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How is the value of this determined?">
+
+For regular functions, `this` is set at call time by four rules in priority order: with `new`, it is the newly created object; with `call`, `apply` or `bind`, it is the object you pass; when called as a method, `obj.fn()`, it is the object before the dot; and for a plain call it is `undefined` in strict mode or the global object in sloppy mode. Arrow functions ignore all of that — they have no own `this` and use the `this` of the scope they were written in. The classic bug is passing a method as a callback, which turns it into a plain call; you fix it with an arrow wrapper, `bind`, or an arrow class field.
+
+<Fragment slot="deeper">
+
+- **`call` vs `apply` vs `bind`?** `call` and `apply` invoke immediately (`apply` takes an array of arguments); `bind` returns a new function with `this` fixed.
+- **Can you re-bind a bound function?** No; only `new` overrides a bound `this`.
+- **What is `this` in a DOM handler?** The element, for `function` handlers; the outer `this` for arrow handlers.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Call site", "The place and manner in which a function is called; it decides `this` for regular functions."],
+  ["Implicit binding", "`this` set to the object before the dot in `obj.fn()`."],
+  ["Explicit binding", "Choosing `this` with `call`, `apply` or `bind`."],
+  ["Default binding", "A plain call: `undefined` in strict mode."],
+  ["Lexical `this`", "Arrow functions' behaviour of using the surrounding scope's `this`."],
+]} />

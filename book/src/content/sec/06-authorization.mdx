@@ -1,0 +1,165 @@
+---
+title: "Authorisation: RBAC, ABAC and ownership checks"
+part: Identity
+order: 6
+level: core
+summary: Deciding what an authenticated user may do — role-based, attribute-based and relationship-based models, and where the checks belong so none are forgotten.
+---
+
+**Authorisation** answers "is this user allowed to do *this* to *that*?". Authentication tells you **who** someone is; authorisation decides **what** they can access. It's where the most common API vulnerability lives: **broken object-level authorisation** — checking that the user is logged in, but not that the record they're asking for is theirs. Good authorisation uses a clear model (roles, attributes or relationships), checks every access in one consistent place, and **denies by default**.
+
+<Analogy>
+  An office building. Your badge proves who you are (authentication). Whether it opens a door depends on rules: your role (managers can enter the meeting rooms), attributes (contractors only during working hours), or relationships (you can enter your own team's room). A badge that opens every door just because it's a valid badge is the bug most systems actually have.
+</Analogy>
+
+## Why it matters
+
+Broken access control is number one on the OWASP Top 10. Interviewers ask how you'd implement permissions for a multi-tenant SaaS, how to prevent users seeing each other's data, and RBAC vs ABAC.
+
+## The classic bug: IDOR / BOLA
+
+```js
+// vulnerable: any logged-in user can read any invoice by changing the id
+app.get('/invoices/:id', requireLogin, async (req, res) => {
+  res.json(await db.invoices.findById(req.params.id));
+});
+
+// fixed: the query itself is scoped to what the user may see
+app.get('/invoices/:id', requireLogin, async (req, res) => {
+  const invoice = await db.invoices.findOne({ id: req.params.id, tenantId: req.user.tenantId });
+  if (!invoice || !can(req.user, 'read', invoice)) return res.status(404).end();
+  res.json(invoice);
+});
+```
+
+<Diagram
+  caption="Authentication alone isn't enough. Every request needs a check on the specific object."
+  chart={`flowchart LR
+    R["GET /invoices/9913"] --> AN{"authenticated?"}
+    AN -- no --> E401["401"]
+    AN -- yes --> T{"invoice in the user's tenant?"}
+    T -- no --> E404["404 (don't reveal it exists)"]
+    T -- yes --> P{"policy allows 'read'<br/>for this user + invoice?"}
+    P -- no --> E403["403 / 404"]
+    P -- yes --> OK["200"]`}
+  steps={[
+    { nodes: ["R", "AN"], text: "First: who is this? Unauthenticated → 401." },
+    { nodes: ["AN", "T"], text: "Then scope by tenant/ownership. In multi-tenant systems, every query filters by tenant." },
+    { nodes: ["T", "E404"], text: "Records from another tenant are 'not found' — revealing existence can leak information." },
+    { nodes: ["T", "P"], text: "Finally the fine-grained policy: role, attributes, relationships." },
+    { nodes: ["P", "OK"], text: "Only now is the data returned." },
+  ]}
+/>
+
+## Models
+
+### RBAC — role-based access control
+
+Users have **roles**; roles have **permissions**.
+
+```text
+roles:       admin → [invoice:read, invoice:write, user:manage]
+             accountant → [invoice:read, invoice:write]
+             viewer → [invoice:read]
+user Ada:    accountant (in tenant 12)
+```
+
+Simple, auditable, easy to explain. Limits: "role explosion" when you need exceptions (`accountant-but-only-EU-invoices`), and roles alone can't express ownership.
+
+### ABAC — attribute-based access control
+
+Decisions use **attributes** of the user, the resource, the action and the context:
+
+```text
+allow if user.department == resource.department
+     and action == "approve"
+     and resource.amount < user.approvalLimit
+     and time within business hours
+```
+
+Very expressive; harder to audit ("who can see this?" requires evaluating policies).
+
+### ReBAC — relationship-based access control
+
+Permissions derive from **relationships** in a graph: "Ada is an *editor* of folder X; documents inherit permissions from their folder". Popularised by Google's **Zanzibar** (Google Drive sharing); implemented by OpenFGA, SpiceDB, Permify. Ideal for sharing and hierarchies.
+
+<Diagram
+  caption="Relationship-based access: permissions flow through a graph of relationships."
+  chart={`flowchart LR
+    ADA(("Ada")) -- "member" --> TEAM["team: finance"]
+    TEAM -- "editor" --> FOLD["folder: Q4 reports"]
+    FOLD -- "parent" --> DOC["doc: forecast.xlsx"]
+    BOB(("Bob")) -- "viewer" --> DOC
+    DOC -.-> Q["check: can Ada edit forecast.xlsx?<br/>Ada → finance → editor of folder → parent of doc ✓"]`}
+/>
+
+| Model | Best for | Watch out for |
+|---|---|---|
+| RBAC | most business apps, admin consoles | role explosion |
+| ABAC | rules on data attributes, compliance, context (time, location) | auditability, complexity |
+| ReBAC | sharing, collaboration, hierarchies, multi-tenant orgs | operating another system |
+
+Many real systems combine them: RBAC for broad capabilities, ownership/relationship checks for specific records, attribute rules for special cases.
+
+## Where checks live
+
+- **Centralise** policy logic in one module or service (`can(user, action, resource)`) rather than scattering `if (user.role === 'admin')` across handlers.
+- **Enforce in the service/domain layer**, so REST, GraphQL, background jobs and admin tools all share the same rules.
+- **Scope queries** by tenant/owner at the data-access layer (or with database **row-level security**), so a forgotten check still can't return other tenants' rows.
+- **Deny by default**: new endpoints are inaccessible until a rule allows them.
+- Policy engines (OPA/Rego, Cedar, Casbin) express rules as code that can be tested and reviewed.
+
+```sql
+-- PostgreSQL row-level security: the database enforces tenant isolation
+ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON invoices
+  USING (tenant_id = current_setting('app.tenant_id')::bigint);
+```
+
+## Other authorisation pitfalls
+
+- **Mass assignment**: accepting `{ "role": "admin" }` in a profile update. Allow-list writable fields.
+- **Function-level**: hiding the admin button in the UI but leaving `/admin/*` endpoints unprotected.
+- **Trusting client data**: user ID or tenant ID taken from the request body instead of the authenticated session.
+- **Stale permissions** in long-lived tokens after a role is removed.
+- **Confused deputy**: a service with broad privileges acting on behalf of a user without checking the user's permissions.
+
+## Auditing
+
+Log authorisation decisions for sensitive actions (who, what, which resource, allowed/denied), support "who has access to X?" queries, and review admin privileges regularly.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Checking authentication but not object ownership (IDOR/BOLA).
+- Role checks scattered across controllers, inconsistently.
+- Tenant ID from the request instead of the session.
+- Relying on UI hiding for protection.
+- Returning 403 for other tenants' objects (reveals they exist) where 404 is safer.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you implement authorisation in a multi-tenant SaaS API?">
+
+Authentication gives me the user and their tenant from the session or token — never from the request body. Every data access is scoped by tenant in the data layer, ideally backed by database row-level security, so a forgotten check still can't leak another tenant's data, and objects from other tenants return 404. On top of that, a central policy function decides each action: RBAC for broad capabilities like admin or accountant, plus ownership or relationship checks for specific records — and if sharing and hierarchies get complex, a relationship-based system like OpenFGA, Zanzibar-style. Checks run in the service layer so REST, GraphQL and jobs share them; everything is deny-by-default; writable fields are allow-listed to prevent mass assignment; and sensitive decisions are audited.
+
+<Fragment slot="deeper">
+
+- **What is IDOR/BOLA?** Accessing another user's object by changing an ID because ownership isn't checked.
+- **RBAC vs ABAC vs ReBAC?** Roles; attributes and context; relationships in a graph.
+- **What is row-level security?** Database-enforced filtering of rows per user/tenant.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Authorisation", "Deciding whether an authenticated identity may perform an action on a resource."],
+  ["IDOR / BOLA", "Insecure direct object reference / broken object-level authorisation."],
+  ["RBAC", "Role-based access control."],
+  ["ABAC", "Attribute-based access control."],
+  ["ReBAC", "Relationship-based access control (Zanzibar-style)."],
+  ["Row-level security", "Database policies restricting which rows a session can see."],
+]} />

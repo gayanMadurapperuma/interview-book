@@ -1,0 +1,146 @@
+---
+title: npm, semver, lockfiles and the supply chain
+part: Production
+order: 16
+level: core
+summary: How dependency versions are chosen, why the lockfile matters, and how to keep a thousand packages you didn't write from becoming your biggest risk.
+---
+
+A typical Node project lists twenty dependencies in `package.json` and installs over a thousand, because each dependency has its own. **npm** decides which versions to install using **semantic versioning** (semver) ranges, records the exact result in a **lockfile**, and arranges everything in `node_modules`. All of that code runs with your application's permissions — which makes dependencies a major security concern, known as **supply-chain** risk.
+
+<Analogy>
+  `package.json` is a shopping list that says "milk, any brand, at least 1 litre". The lockfile is the receipt listing the exact brand, size and batch you actually bought. To cook the same meal again next week — or in production — you shop with the receipt, not the list.
+</Analogy>
+
+## Why it matters
+
+"It works on my machine" bugs, broken builds after a minor update, and malicious packages all come from misunderstanding these basics. Interviewers ask what `^1.2.3` means, why to commit lockfiles, `npm install` vs `npm ci`, and how you'd protect a project from compromised dependencies.
+
+## Semantic versioning
+
+A version is **MAJOR.MINOR.PATCH**:
+
+| Part | Bump when… | Example |
+|---|---|---|
+| MAJOR | you make a breaking change | `2.0.0` |
+| MINOR | you add features, backwards-compatibly | `1.4.0` |
+| PATCH | you fix bugs, backwards-compatibly | `1.3.7` |
+
+Ranges in `package.json`:
+
+| Range | Allows | Note |
+|---|---|---|
+| `1.2.3` | exactly 1.2.3 | pinned |
+| `~1.2.3` | `>=1.2.3 <1.3.0` | patches only |
+| `^1.2.3` | `>=1.2.3 <2.0.0` | minor + patch — npm's default |
+| `^0.2.3` | `>=0.2.3 <0.3.0` | below 1.0, minor bumps count as breaking |
+| `*`, `latest` | anything | never do this |
+
+<Diagram
+  caption="A caret range accepts any compatible update within the same major version — according to the author's promise, which isn't always kept."
+  chart={`flowchart LR
+    R["^1.2.3"] --> A["1.2.3 ✓"]
+    R --> B["1.2.9 ✓"]
+    R --> C["1.9.0 ✓"]
+    R --> D["2.0.0 ✗ breaking"]
+    R --> E["1.2.2 ✗ too old"]`}
+/>
+
+Semver is a **promise** by the package author, not a guarantee. A "minor" release can still break you — which is why lockfiles exist.
+
+## Lockfiles
+
+`package-lock.json` records the **exact** version, download URL and integrity hash of **every** package in the tree. Commit it. With it, every developer, CI run and production build installs identical code.
+
+<Diagram
+  caption="install resolves ranges and may update the lockfile. ci installs exactly what the lockfile says, and fails if it disagrees with package.json."
+  chart={`flowchart TB
+    PJ["package.json<br/>ranges: ^4.18.0"] --> I["npm install<br/>(development)"]
+    LF["package-lock.json<br/>exact: 4.21.2 + hash"] --> I
+    I -- "adds or updates" --> LF
+    LF --> CI["npm ci<br/>(CI and production)"]
+    CI --> NM["node_modules<br/>deleted and rebuilt exactly"]`}
+  steps={[
+    { nodes: ["PJ", "LF", "I"], text: "`npm install` reads the ranges and the lockfile, adding or updating packages as needed." },
+    { nodes: ["I", "LF"], text: "When it changes anything, it rewrites the lockfile. Review these diffs in pull requests." },
+    { nodes: ["LF", "CI", "NM"], text: "`npm ci` ignores ranges: it deletes `node_modules` and installs exactly the lockfile's versions, verifying hashes. It fails if `package.json` and the lockfile disagree." },
+  ]}
+/>
+
+Rules of thumb: use `npm ci` in CI and Docker builds; update dependencies deliberately (`npm outdated`, Renovate or Dependabot pull requests) rather than accidentally.
+
+## Dependency types
+
+| Field | Installed in production? | For |
+|---|---|---|
+| `dependencies` | yes | code your app needs at runtime |
+| `devDependencies` | no (`npm ci --omit=dev`) | tests, linters, build tools, types |
+| `peerDependencies` | provided by the host app | plugins that must share the host's copy (e.g. a React component library) |
+| `optionalDependencies` | if installable | platform-specific extras |
+
+Use `"overrides"` in `package.json` to force a specific version of a transitive dependency — for example, to patch a vulnerability before the intermediate package updates.
+
+## The supply chain
+
+<Diagram
+  caption="Ways attackers get code into your app through dependencies."
+  chart={`flowchart TB
+    APP["Your app"] --> D1["direct dependency"]
+    D1 --> T1["transitive dependency"]
+    T1 --> T2["…1,000 more"]
+    X1["Typosquatting<br/>'expresss', 'cross-env.js'"] -. "you install by mistake" .-> APP
+    X2["Account takeover<br/>malicious patch release"] -. "arrives via ^ range" .-> T1
+    X3["install scripts<br/>postinstall runs on npm install"] -. "runs on dev + CI machines" .-> T2
+    X4["Dependency confusion<br/>public package named like your private one"] -. "wins resolution" .-> D1`}
+/>
+
+Real incidents include hijacked maintainer accounts publishing malware in patch releases (`event-stream`, `ua-parser-js`) and sabotage by maintainers themselves (`colors`, `node-ipc`). Defences, from basic to advanced:
+
+- **Commit the lockfile and use `npm ci`**, so a new malicious version can't slip in silently.
+- **`npm audit`** (and Dependabot/Snyk) in CI to flag known vulnerabilities; fix with updates or `overrides`.
+- **Be choosy**: prefer well-maintained packages; don't add a dependency for ten lines of code.
+- **Limit install scripts**: `npm ci --ignore-scripts` where possible; review packages that need them.
+- **Scoped private packages** (`@yourco/…`) with a configured registry, to prevent dependency confusion.
+- **Provenance**: verify signatures with `npm audit signatures`; publish your own packages with `--provenance`.
+- **Least privilege at runtime**: containers as non-root, minimal secrets; Node's permission model (`--permission`) can restrict file and network access.
+- **Delay adoption**: tools that wait a few days before accepting brand-new releases avoid most short-lived malicious versions.
+
+## Other package managers
+
+**pnpm** stores each package version once on disk and links it into projects, saving space and preventing code from importing packages it didn't declare. **Yarn** (Berry) offers Plug'n'Play. All use lockfiles and semver the same way.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Not committing the lockfile, or deleting it to "fix" install problems.
+- `npm install` in CI or Docker instead of `npm ci`.
+- Putting build tools in `dependencies`, bloating production images.
+- Ignoring `npm audit` because "it's always noisy" — triage it instead.
+- Running `npm install some-random-package` from a blog post without checking it.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What's the difference between ^ and ~, and why do we need a lockfile?">
+
+Under semver, a version is major.minor.patch. A caret range like `^1.2.3` accepts any 1.x version from 1.2.3 upward — new features and fixes, but no new major — while a tilde range `~1.2.3` accepts only patch updates within 1.2. Those ranges mean `npm install` could pick different versions on different days, and semver is only a promise, so the lockfile records the exact version and integrity hash of every package in the tree. I commit it and use `npm ci` in CI and Docker, which installs exactly the lockfile and fails if it's out of sync. That's also the first defence against supply-chain attacks, along with `npm audit`, careful package choice, restricting install scripts, and scoped private registries.
+
+<Fragment slot="deeper">
+
+- **`npm install` vs `npm ci`?** `install` resolves ranges and may update the lockfile; `ci` installs exactly the lockfile from scratch.
+- **What is dependency confusion?** A public package with your private package's name winning resolution.
+- **What are peer dependencies?** Dependencies the host app must provide, so a plugin shares the host's single copy.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Semver", "MAJOR.MINOR.PATCH versioning signalling breaking changes, features and fixes."],
+  ["Caret / tilde range", "`^` allows minor and patch updates; `~` allows patch updates only."],
+  ["Lockfile", "Exact record of every installed package version and integrity hash."],
+  ["`npm ci`", "Clean, exact install from the lockfile, for CI and production builds."],
+  ["Transitive dependency", "A dependency of a dependency."],
+  ["Supply-chain attack", "Compromising software by injecting malicious code into its dependencies."],
+]} />

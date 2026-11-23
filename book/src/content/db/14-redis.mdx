@@ -1,0 +1,189 @@
+---
+title: "Redis in practice: caching, locks and rate limits"
+part: Data platform
+order: 14
+level: core
+summary: An in-memory data store with rich data structures. The patterns teams use it for — and the failure modes each one brings.
+---
+
+**Redis** is an in-memory data store: data lives in RAM, so reads and writes take well under a millisecond. Unlike a plain key–value cache, it offers **data structures** — strings, hashes, lists, sets, sorted sets, streams — with atomic operations on each. That makes it the Swiss Army knife of backend infrastructure: caching, sessions, rate limiting, leaderboards, distributed locks, queues and pub/sub.
+
+<Analogy>
+  Redis is the whiteboard next to your desk, while the database is the filing cabinet down the hall. Glancing at the whiteboard is instant, so you jot down the things you check constantly. But the whiteboard is small, can be wiped, and anything on it must also be in the cabinet if it really matters.
+</Analogy>
+
+## Why it matters
+
+Caching is in nearly every system design answer, and interviewers follow up: how do you invalidate it? What's a cache stampede? How would you build a rate limiter or a distributed lock? Redis is the standard tool behind those answers.
+
+## Data structures and what they're for
+
+| Structure | Commands | Typical use |
+|---|---|---|
+| String | `GET`, `SET … EX`, `INCR` | cache entries, counters, feature flags |
+| Hash | `HSET`, `HGETALL` | objects with fields (a session, a user profile) |
+| List | `LPUSH`, `RPOP`, `BLPOP` | simple queues, recent-items lists |
+| Set | `SADD`, `SISMEMBER`, `SINTER` | unique visitors, tags, "who liked this" |
+| Sorted set | `ZADD`, `ZRANGE`, `ZREVRANK` | leaderboards, time-ordered feeds, sliding-window rate limits |
+| Stream | `XADD`, `XREADGROUP` | durable-ish event logs with consumer groups |
+| HyperLogLog | `PFADD`, `PFCOUNT` | approximate unique counts in 12 KB |
+
+Each command is **atomic**: Redis executes commands one at a time (on a single thread per instance), so `INCR` never loses an update even with thousands of concurrent clients.
+
+## Pattern 1: cache-aside
+
+The most common caching pattern: check the cache; on a miss, load from the database and store the result with a **TTL** (time to live).
+
+<Diagram
+  caption="Cache-aside. The application owns the logic; the cache only stores what it is given."
+  chart={`flowchart TB
+    R["request for product 42"] --> G{"GET product:42<br/>in Redis?"}
+    G -- "hit" --> RET["return cached value<br/>~0.3 ms"]
+    G -- "miss" --> DB[("load from database<br/>~10 ms")]
+    DB --> SET["SET product:42 EX 300"]
+    SET --> RET2["return value"]
+    W["product updated"] --> DEL["DEL product:42<br/>(invalidate)"]`}
+  steps={[
+    { nodes: ["R", "G"], text: "Look in the cache first." },
+    { nodes: ["G", "RET"], text: "**Hit**: return immediately — no database work." },
+    { nodes: ["G", "DB", "SET", "RET2"], text: "**Miss**: read from the database, store it in Redis with a TTL, return it." },
+    { nodes: ["W", "DEL"], text: "When the data changes, **delete** the cache key so the next read reloads fresh data." },
+  ]}
+/>
+
+```js
+async function getProduct(id) {
+  const key = `product:${id}`;
+  const cached = await redis.get(key);
+  if (cached) return JSON.parse(cached);
+
+  const product = await db.products.findById(id);
+  if (product) await redis.set(key, JSON.stringify(product), { EX: 300 });   // 5 minutes
+  return product;
+}
+
+async function updateProduct(id, changes) {
+  await db.products.update(id, changes);
+  await redis.del(`product:${id}`);        // invalidate after the write commits
+}
+```
+
+Delete rather than update the cache on writes: two concurrent writers updating the cache can leave it with the older value. The TTL is a safety net that bounds how long stale data can survive.
+
+## Cache problems
+
+<Diagram
+  caption="Three classic cache failure modes."
+  chart={`flowchart LR
+    ST["Stampede<br/>a hot key expires;<br/>1,000 requests all miss<br/>and hit the DB at once"] --> F1["fix: single-flight lock,<br/>early refresh, jittered TTL"]
+    PE["Penetration<br/>requests for keys that don't exist<br/>always miss"] --> F2["fix: cache the 'not found'<br/>briefly, validate IDs"]
+    AV["Avalanche<br/>many keys expire together,<br/>or Redis goes down"] --> F3["fix: random TTL spread,<br/>fallback + DB protection"]`}
+/>
+
+```js
+// stampede protection: only one request rebuilds the value
+async function getWithLock(key, ttl, load) {
+  const cached = await redis.get(key);
+  if (cached) return JSON.parse(cached);
+
+  const lock = await redis.set(`lock:${key}`, '1', { NX: true, PX: 5000 });
+  if (!lock) {
+    await new Promise((r) => setTimeout(r, 50));       // someone else is loading; retry shortly
+    return getWithLock(key, ttl, load);
+  }
+  try {
+    const value = await load();
+    const jitter = Math.floor(Math.random() * ttl * 0.1);
+    await redis.set(key, JSON.stringify(value), { EX: ttl + jitter });
+    return value;
+  } finally {
+    await redis.del(`lock:${key}`);
+  }
+}
+```
+
+## Pattern 2: rate limiting
+
+A **fixed window** counter is simplest: `INCR` a key per user per minute.
+
+```js
+async function allow(userId, limit = 100) {
+  const key = `rl:${userId}:${Math.floor(Date.now() / 60000)}`;
+  const count = await redis.incr(key);
+  if (count === 1) await redis.expire(key, 60);
+  return count <= limit;
+}
+```
+
+It allows bursts at window edges (100 at 0:59 plus 100 at 1:00). A **sliding window** with a sorted set (timestamps as scores; remove entries older than the window; count) or a **token bucket** (in a Lua script for atomicity) is smoother. The System Design volume compares the algorithms.
+
+## Pattern 3: distributed locks
+
+To ensure only one worker runs a job at a time across many servers:
+
+```js
+const token = crypto.randomUUID();
+const ok = await redis.set('lock:daily-report', token, { NX: true, PX: 30_000 });   // only if absent, auto-expire
+if (ok) {
+  try { await runDailyReport(); }
+  finally {
+    // release only if we still own it (atomic check-and-delete)
+    await redis.eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+      { keys: ['lock:daily-report'], arguments: [token] },
+    );
+  }
+}
+```
+
+The expiry prevents a crashed holder from locking forever — but it also means a slow holder (long GC pause) can lose the lock while still working. For **correctness-critical** locking, also use **fencing tokens** (an increasing number checked by the resource) or rely on the database (row locks, `SKIP LOCKED`, advisory locks).
+
+## Pattern 4: sessions, leaderboards, queues
+
+```js
+await redis.hSet(`session:${sid}`, { userId, role }); await redis.expire(`session:${sid}`, 3600);
+await redis.zIncrBy('leaderboard:2026-11', 10, `user:${id}`);
+const top10 = await redis.zRangeWithScores('leaderboard:2026-11', 0, 9, { REV: true });
+```
+
+For job queues, libraries like **BullMQ** build reliable queues on Redis (retries, delays, priorities).
+
+## Durability and availability
+
+Redis keeps data in memory. Persistence options: **RDB** snapshots (periodic, can lose minutes) and **AOF** (append-only log, fsync every second by default). For availability, use replicas with automatic failover (Sentinel, or managed services like ElastiCache); for scale beyond one machine, **Redis Cluster** shards keys across 16,384 hash slots. Rule of thumb: treat Redis as a **cache or coordination layer**, not your only copy of important data. Set `maxmemory` and an eviction policy (`allkeys-lru` for caches).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- No TTL on cache keys — the cache grows until eviction or OOM.
+- Updating the cache instead of deleting it on writes.
+- `KEYS *` in production (blocks the server); use `SCAN`.
+- Huge values or huge collections in one key ("big keys") that block the single thread.
+- Treating a simple `SET NX` lock as perfectly safe for critical sections.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you use Redis as a cache, and how do you keep it consistent?">
+
+I'd use cache-aside: read from Redis first; on a miss, load from the database, store the serialised result with a TTL, and return it. On writes I update the database and then delete the cache key rather than updating it, so the next read reloads fresh data, while the TTL bounds staleness if an invalidation is missed. For hot keys I protect against stampedes with a short lock so only one request rebuilds the value, and I add jitter to TTLs so keys don't expire together. I cache negative results briefly to stop repeated misses. The application must keep working, more slowly, if Redis is down, so the database needs protection like rate limits. Beyond caching, Redis's atomic operations make it good for rate limiting, leaderboards with sorted sets, sessions and queues.
+
+<Fragment slot="deeper">
+
+- **What is a cache stampede?** Many requests missing the same expired hot key simultaneously and overloading the DB.
+- **Why delete rather than update on writes?** Concurrent updates can race and leave stale values.
+- **Is a Redis lock safe?** Good for efficiency; for correctness add fencing tokens or use the database.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Cache-aside", "Application checks the cache, loads from the DB on a miss and populates the cache."],
+  ["TTL", "Time to live: automatic expiry of a key."],
+  ["Cache stampede", "Many concurrent misses on one hot key overwhelming the backing store."],
+  ["Sorted set", "Redis structure of unique members ordered by score."],
+  ["Distributed lock", "A lock coordinating processes across machines."],
+  ["Fencing token", "An increasing number that lets a resource reject operations from stale lock holders."],
+]} />

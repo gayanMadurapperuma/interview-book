@@ -1,0 +1,9 @@
+---
+interface Props { terms: [string, string][] }
+const { terms } = Astro.props;
+---
+<dl class="keyterms">
+  {terms.map(([t, d]) => (
+    <div><dt>{t}</dt><dd set:html={d.replace(/`([^`]+)`/g, '<code>$1</code>')} /></div>
+  ))}
+</dl>

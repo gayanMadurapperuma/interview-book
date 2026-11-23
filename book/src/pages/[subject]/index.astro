@@ -1,0 +1,93 @@
+---
+import Base from '../../layouts/Base.astro';
+import { SUBJECTS, subjectByKey, withBase, type SubjectKey } from '../../lib/subjects';
+import { chaptersFor, groupByPart, slugOf } from '../../lib/chapters';
+import { scenarioMeta } from '../../demos/catalog';
+
+export function getStaticPaths() {
+  return SUBJECTS.map((s) => ({ params: { subject: s.key } }));
+}
+const key = Astro.params.subject as SubjectKey;
+const s = subjectByKey[key];
+const list = await chaptersFor(key);
+const groups = groupByPart(key, list);
+let n = 0;
+---
+<Base title={`${s.name} — Volume ${s.volume}`} description={s.blurb} subject={key} active={key}>
+  <main id="content" class="vol-wrap">
+    <header class="vol-head">
+      <p class="caps">Volume {s.volume}</p>
+      <h1>{s.name}</h1>
+      <p class="vol-lede">{s.blurb}</p>
+      <p class="vol-stats">{list.length} chapters · {groups.length} parts</p>
+    </header>
+
+    {groups.map((g, gi) => (
+      <section class="vp">
+        <h2><span class="vp-n">Part {gi + 1}</span>{g.part}</h2>
+        <ol>
+          {g.chapters.map((c) => {
+            n += 1;
+            const demo = c.data.demo ? scenarioMeta(c.data.demo) : undefined;
+            return (
+              <li>
+                <a href={withBase(`/${key}/${slugOf(c)}/`)} data-read-key={c.id}>
+                  <span class="cn">{n}</span>
+                  <span class="ct">
+                    <span class="ctt">{c.data.title}</span>
+                    <span class="cs">{c.data.summary}</span>
+                  </span>
+                  <span class="cm">
+                    {demo && <span class="tag">demo</span>}
+                    <span class="lvl">{c.data.level}</span>
+                    <span class="read-dot" aria-hidden="true"></span>
+                  </span>
+                </a>
+              </li>
+            );
+          })}
+        </ol>
+      </section>
+    ))}
+  </main>
+</Base>
+
+<script>
+  try {
+    const read: Record<string, number> = JSON.parse(localStorage.getItem('book:read') || '{}');
+    document.querySelectorAll<HTMLElement>('[data-read-key]').forEach((a) => { if (read[a.dataset.readKey!]) a.classList.add('is-read'); });
+  } catch {}
+</script>
+
+<style>
+  .vol-wrap { max-width: 900px; margin: 0 auto; padding: 72px 32px 48px; }
+  .vol-head { margin-bottom: 48px; }
+  .vol-head .caps { color: var(--subj); margin: 0 0 12px; }
+  .vol-head h1 { font-family: var(--font-read); font-size: clamp(2.6rem, 6vw, 4rem); font-weight: 600; letter-spacing: -0.03em; color: var(--ink); margin: 0 0 16px; line-height: 1; }
+  .vol-lede { font-family: var(--font-read); font-size: 1.25rem; line-height: 1.55; color: var(--text); margin: 0 0 14px; max-width: 34em; }
+  .vol-stats { font-size: 13px; color: var(--muted); margin: 0; }
+  .vp { margin-top: 40px; }
+  .vp h2 { display: flex; align-items: baseline; gap: 14px; font-family: var(--font-read); font-size: 22px; font-weight: 600; color: var(--ink); margin: 0 0 8px; padding-bottom: 10px; border-bottom: 1.5px solid var(--ink); }
+  .vp-n { font-family: var(--font-ui); font-size: 11.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--subj); }
+  .vp ol { list-style: none; margin: 0; padding: 0; }
+  .vp li a {
+    display: grid; grid-template-columns: 40px 1fr auto; gap: 16px; align-items: baseline;
+    padding: 16px 4px; border-bottom: 1px solid var(--rule); text-decoration: none; color: var(--text);
+    transition: background-color 0.15s;
+  }
+  .vp li a:hover { background: var(--bg-raised); }
+  .vp li a:hover .ctt { color: var(--subj); }
+  .cn { font-family: var(--font-read); font-style: italic; font-size: 17px; color: var(--faint); text-align: right; }
+  .ct { display: flex; flex-direction: column; gap: 3px; }
+  .ctt { font-family: var(--font-read); font-size: 18px; font-weight: 600; color: var(--ink); line-height: 1.35; transition: color 0.15s; }
+  .cs { font-family: var(--font-read); font-size: 15px; color: var(--muted); line-height: 1.5; }
+  .cm { display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--faint); }
+  .tag { font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; font-size: 10px; color: var(--subj); border: 1px solid currentColor; border-radius: 3px; padding: 1px 5px; }
+  .read-dot { width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--rule-strong); }
+  a.is-read .read-dot { background: var(--subj); border-color: var(--subj); }
+  @media (max-width: 640px) {
+    .vol-wrap { padding: 44px 20px 32px; }
+    .vp li a { grid-template-columns: 28px 1fr; }
+    .cm { grid-column: 2; }
+  }
+</style>

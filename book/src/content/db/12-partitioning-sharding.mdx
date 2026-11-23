@@ -1,0 +1,148 @@
+---
+title: Partitioning, sharding and consistent hashing
+part: Scale
+order: 12
+level: advanced
+summary: When one machine can't hold the data or handle the writes, you split the data. How you choose the split decides whether it scales — or creates new bottlenecks.
+---
+
+**Partitioning** means splitting a big table into smaller pieces. When those pieces live on **different servers**, it's called **sharding**. Replication copies the same data everywhere, which helps reads; sharding gives each server a **different subset** of the data, which is how you scale **writes** and **storage** beyond one machine. The central decision is the **partition key** (shard key): the column that decides which piece a row belongs to.
+
+<Analogy>
+  A library that has outgrown its building. Partitioning is splitting the collection across floors — A–F on floor one, G–M on floor two. Sharding is moving each section into a separate building. Choosing to split by first letter seems fine until you realise half the books are by authors called "Smith" — one building is overflowing while the others sit empty.
+</Analogy>
+
+## Why it matters
+
+Sharding comes up in nearly every large-scale system design interview ("how would you store 10 billion messages?"). Interviewers want to see that you choose a good shard key, understand hot spots, know how rebalancing works, and appreciate what you give up: cross-shard joins and transactions.
+
+## Partitioning within one database
+
+Before sharding across machines, PostgreSQL's **declarative partitioning** splits a table on one server — great for time-series data:
+
+```sql
+CREATE TABLE events (
+  id BIGINT, tenant_id BIGINT, created_at TIMESTAMPTZ NOT NULL, payload JSONB
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE events_2026_11 PARTITION OF events
+  FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+```
+
+Benefits: queries filtering on `created_at` touch only relevant partitions (**partition pruning**), and dropping a month of old data is an instant `DROP TABLE` instead of a huge `DELETE`.
+
+## Strategies
+
+<Diagram
+  caption="Three ways to map a key to a shard."
+  chart={`flowchart TB
+    K["partition key"] --> RG["Range<br/>A–F → shard 1, G–M → shard 2<br/>dates by month"]
+    K --> HS["Hash<br/>hash(key) mod N"]
+    K --> DIR["Directory / lookup<br/>tenant 42 → shard 3<br/>(stored mapping)"]`}
+/>
+
+| Strategy | Pros | Cons |
+|---|---|---|
+| **Range** | range queries stay on one shard; easy to understand | hot spots (all new writes go to the latest range) |
+| **Hash** | spreads load evenly | range queries hit every shard; naive `mod N` reshuffles everything when N changes |
+| **Directory** | full control; move a big tenant to its own shard | the lookup service is extra infrastructure and a dependency |
+
+## Choosing a shard key
+
+A good shard key:
+
+1. **Spreads writes and data evenly** (high cardinality, no dominant value).
+2. **Matches your main access pattern**, so most queries hit a single shard.
+3. **Doesn't change** for a row (moving rows between shards is expensive).
+
+<Diagram
+  caption="A chat system's messages: sharding by conversation keeps each conversation's history together; sharding by time makes the newest shard a hot spot."
+  chart={`flowchart LR
+    subgraph Good["shard by conversation_id ✓"]
+      direction TB
+      g1["shard 1: conv 1, 4, 7…"]
+      g2["shard 2: conv 2, 5, 8…"]
+      g3["shard 3: conv 3, 6, 9…"]
+    end
+    subgraph Bad["shard by created_at month ✗"]
+      direction TB
+      b1["shard Sep: idle"]
+      b2["shard Oct: idle"]
+      b3["shard Nov: ALL writes 🔥"]
+    end`}
+  steps={[
+    { nodes: ["g1", "g2", "g3"], text: "Hashing `conversation_id` spreads conversations evenly, and loading one conversation's messages touches one shard." },
+    { nodes: ["b1", "b2", "b3"], text: "Sharding by month sends **every** new message to the current shard — a hot spot — while older shards sit idle." },
+  ]}
+/>
+
+Examples: multi-tenant SaaS → `tenant_id`; social app → `user_id`; chat → `conversation_id`; IoT → `device_id` (perhaps combined with time).
+
+### Hot keys
+
+Even with hashing, one key can be enormous: a celebrity's followers, one giant tenant. Options: give that key its own shard (directory approach), add a random suffix to spread its writes (`key#0..key#9`, merged on read), or cache its reads aggressively.
+
+## Consistent hashing
+
+With `hash(key) mod N`, changing N from 4 to 5 moves about 80% of keys — a massive reshuffle. **Consistent hashing** arranges both nodes and keys on a ring; each key belongs to the next node clockwise. Adding a node only moves the keys between it and its predecessor — roughly 1/N of the data.
+
+<Diagram
+  caption="A hash ring. Adding node D only takes over keys from part of C's range; everything else stays put."
+  chart={`flowchart LR
+    subgraph Ring["hash ring (0 → 2^32, wraps around)"]
+      direction LR
+      A(("node A")) --> k1["keys 1, 2"] --> B(("node B")) --> k2["keys 3, 4"] --> C(("node C")) --> k3["keys 5, 6, 7"] --> A
+    end
+    D(("new node D")) -. "inserted between C and A:<br/>takes keys 6, 7 only" .-> k3`}
+/>
+
+In practice each physical node gets many **virtual nodes** on the ring, so load spreads evenly and a failed node's keys are shared among many others. DynamoDB, Cassandra and many caches use variants of this. (Some systems use a fixed large number of partitions — say 1,024 — assigned to nodes, and move whole partitions when rebalancing; same idea, simpler bookkeeping.)
+
+## What sharding costs you
+
+- **Cross-shard queries**: "top 10 products across all tenants" must scatter to every shard and gather results — slower and more complex.
+- **Cross-shard joins**: usually impossible in the database; do them in application code or denormalise.
+- **Cross-shard transactions**: need two-phase commit or sagas (System Design volume), or are avoided by design.
+- **Unique constraints and IDs** across shards: use globally unique IDs (UUIDv7, Snowflake-style IDs) instead of per-shard sequences.
+- **Rebalancing**: moving data while serving traffic is hard; plan for it from the start.
+- **Operations**: N times the backups, migrations and monitoring.
+
+## Before you shard
+
+Sharding is a big step. Try, roughly in order: query and index optimisation → a bigger machine (vertical scaling goes far) → read replicas and caching → partitioning large tables → archiving cold data → only then sharding — or a database that shards for you (Citus, Vitess, CockroachDB, Spanner, DynamoDB).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Sharding by a timestamp or auto-increment ID (all writes to one shard).
+- A shard key that doesn't match the main query, so every request fans out to all shards.
+- `hash mod N` without a plan for changing N.
+- Sharding prematurely when a single well-tuned database would do.
+- Forgetting global uniqueness for IDs.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you shard a database, and how do you choose a shard key?">
+
+Sharding splits data across servers so each holds a subset, scaling writes and storage beyond one machine. The shard key decides placement, so it should have high cardinality to spread data evenly, match the dominant access pattern so most queries hit one shard, and never change — for multi-tenant SaaS that's usually tenant ID, for a chat system the conversation ID. I'd avoid time or sequential keys, which create a hot shard. Placement is by range, by hash or through a directory; I'd hash with consistent hashing or a fixed set of virtual partitions so that adding nodes only moves a fraction of data. The costs are cross-shard queries, joins and transactions, so I'd exhaust indexing, vertical scaling, replicas, caching and partitioning first — or use a database that shards natively.
+
+<Fragment slot="deeper">
+
+- **Partitioning vs sharding?** Splitting a table vs splitting it across servers.
+- **Why consistent hashing?** Adding or removing a node moves only about 1/N of keys.
+- **How do you handle a hot key?** Isolate it, salt it across sub-keys, or cache it.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Partitioning", "Splitting a table into pieces, e.g. by date range."],
+  ["Sharding", "Distributing partitions across multiple database servers."],
+  ["Shard key", "The column that determines which shard a row lives on."],
+  ["Hot spot", "A shard or key receiving a disproportionate share of traffic."],
+  ["Consistent hashing", "Mapping keys and nodes onto a ring so membership changes move few keys."],
+  ["Scatter–gather", "Querying all shards and merging results."],
+]} />

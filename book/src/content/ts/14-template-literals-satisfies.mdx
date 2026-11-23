@@ -1,0 +1,161 @@
+---
+title: Template literal types and satisfies
+part: Type-level programming
+order: 14
+level: advanced
+summary: String patterns as types — event names, routes, CSS units — and the satisfies operator that checks a value against a type without losing its precise inferred type.
+---
+
+**Template literal types** use the same backtick syntax as JavaScript template strings, but at the type level: `` `user.${'created' | 'deleted'}` `` produces the union `'user.created' | 'user.deleted'`. They let you type string formats precisely — event names, routes, IDs, CSS values. The **`satisfies`** operator, added in TypeScript 4.9, checks that a value conforms to a type **without widening** it to that type, so you keep the most precise inferred type while still getting validation.
+
+<Analogy>
+  Template literal types are a stencil: you can only paint shapes that fit the cut-out pattern, like "order-" followed by digits. `satisfies` is a building inspector who checks your house meets the code but doesn't make you replace your custom windows with standard ones — the inspection passes and your specific details are kept.
+</Analogy>
+
+## Why it matters
+
+These are favourite "modern TypeScript" questions. `satisfies` in particular solves a very common annoyance with configuration objects, and template literal types power typed routers, event emitters and design systems.
+
+## Template literal types
+
+```ts
+type Entity = 'user' | 'order';
+type Action = 'created' | 'updated' | 'deleted';
+type EventName = `${Entity}.${Action}`;     // 6 combinations: 'user.created' | … | 'order.deleted'
+
+type Px = `${number}px`;
+const width: Px = '12px';      // ✓
+const bad: Px = '12em';        // ✘
+
+type OrderId = `ord_${string}`;
+function getOrder(id: OrderId) {}
+getOrder('ord_123');   // ✓
+getOrder('123');       // ✘
+```
+
+Intrinsic string helpers: `Uppercase`, `Lowercase`, `Capitalize`, `Uncapitalize`.
+
+```ts
+type Handler<E extends string> = `on${Capitalize<E>}`;
+type H = Handler<'click' | 'focus'>;   // 'onClick' | 'onFocus'
+```
+
+<Diagram
+  caption="Template literal types combine unions as a cross product."
+  chart={`flowchart LR
+    E["Entity: 'user' | 'order'"] --> X["template: Entity . Action"]
+    A["Action: 'created' | 'updated' | 'deleted'"] --> X
+    X --> R["user.created · user.updated · user.deleted ·<br/>order.created · order.updated · order.deleted"]`}
+/>
+
+### Parsing strings with `infer`
+
+```ts
+type Params<Path extends string> =
+  Path extends `${string}:${infer P}/${infer Rest}` ? { [K in P | keyof Params<`/${Rest}`>]: string }
+  : Path extends `${string}:${infer P}` ? { [K in P]: string }
+  : {};
+
+function route<P extends string>(path: P, handler: (params: Params<P>) => void) {}
+
+route('/users/:userId/orders/:orderId', (params) => {
+  params.userId;      // ✓ string
+  params.orderId;     // ✓ string
+  params.foo;         // ✘ doesn't exist
+});
+```
+
+This is how libraries like Hono, tRPC and type-safe routers give typed route parameters from plain strings.
+
+## The `satisfies` operator
+
+The problem it solves:
+
+```ts
+type Theme = Record<'primary' | 'secondary', string | { light: string; dark: string }>;
+
+// 1. annotation: checked, but the type is widened to Theme
+const t1: Theme = { primary: '#2e5e73', secondary: { light: '#eee', dark: '#222' } };
+t1.secondary.light;      // ✘ error: secondary might be a string
+
+// 2. no annotation: precise, but unchecked (typos in keys aren't caught)
+const t2 = { primray: '#2e5e73', secondary: { light: '#eee', dark: '#222' } };
+
+// 3. satisfies: checked AND precise
+const t3 = {
+  primary: '#2e5e73',
+  secondary: { light: '#eee', dark: '#222' },
+} satisfies Theme;
+t3.secondary.light;      // ✓ TypeScript knows secondary is the object form
+```
+
+<Diagram
+  caption="Annotation vs satisfies: both validate the value, but only satisfies keeps the specific inferred type."
+  chart={`flowchart TB
+    V["object literal"] --> ANN[": Theme (annotation)"]
+    V --> SAT["satisfies Theme"]
+    ANN --> A1["✓ checked against Theme"]
+    ANN --> A2["type becomes Theme<br/>(details lost)"]
+    SAT --> S1["✓ checked against Theme<br/>(excess/missing keys caught)"]
+    SAT --> S2["type stays the precise literal type"]`}
+  steps={[
+    { nodes: ["V", "ANN", "A1", "A2"], text: "An annotation checks the value but then treats it as the annotated type — every property is the broad union." },
+    { nodes: ["V", "SAT", "S1"], text: "`satisfies` performs the same check, including typos and missing keys…" },
+    { nodes: ["SAT", "S2"], text: "…but the variable keeps its inferred type, so you can use the specific shape of each property." },
+  ]}
+/>
+
+Common uses:
+
+```ts
+const routes = {
+  home: '/',
+  order: '/orders/:id',
+} as const satisfies Record<string, `/${string}`>;     // literal types kept + validated
+
+const config = {
+  port: 3000,
+  db: { url: process.env.DATABASE_URL ?? '', pool: 10 },
+} satisfies AppConfig;
+```
+
+`as const satisfies T` is a popular combination: keep literal, readonly types **and** validate against a shape.
+
+## `satisfies` vs `as`
+
+- `as T` **overrides** the compiler and can hide errors.
+- `satisfies T` **checks** and never changes the type to something less precise.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using an annotation where you then need the precise type (reach for `satisfies`).
+- Using `as` to "make it fit" — it disables checking.
+- Template literal unions that explode combinatorially (thousands of members slow the compiler).
+- Expecting template literal types to validate runtime strings — they only check literals the compiler can see.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What does satisfies do, and how is it different from a type annotation or as?">
+
+`satisfies` checks that a value conforms to a type — catching misspelled keys, missing keys and wrong value types — without changing the value's inferred type. With an annotation, the variable becomes the annotated type, so if a property is declared as a union you lose the knowledge of which member you actually wrote; with `as`, you're overriding the compiler and can hide mistakes. So for configuration objects, route tables or theme tokens I write `const x = { … } satisfies Shape`, often combined with `as const`, which keeps literal readonly types while still validating. Template literal types complement this: they type string patterns like `ord_${string}` or `${Entity}.${Action}`, and with `infer` they can parse strings, for example extracting route parameters from `/users/:id`.
+
+<Fragment slot="deeper">
+
+- **What are template literal types?** String-pattern types built with backticks, combining unions as a cross product.
+- **How do typed routers get params from strings?** Template literal types with `infer` parse the path.
+- **What is `as const satisfies`?** Keep literal readonly types and validate against a shape.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Template literal type", "Type-level string template producing string literal types."],
+  ["Intrinsic string types", "`Uppercase`, `Lowercase`, `Capitalize`, `Uncapitalize`."],
+  ["`satisfies`", "Validates a value against a type without widening its inferred type."],
+  ["Widening", "Losing precise literal/inferred types in favour of a broader type."],
+  ["`as const`", "Keeps literal types and makes values readonly."],
+]} />

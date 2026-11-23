@@ -1,0 +1,153 @@
+---
+title: HTTP caching and conditional requests
+part: HTTP
+order: 2
+level: core
+summary: Cache-Control, ETags and 304 responses — the free, built-in caching layer that browsers, CDNs and proxies already implement for you.
+---
+
+HTTP has caching built into the protocol. A server describes, in **headers**, whether a response may be stored, by whom, and for how long. Browsers, CDNs and proxies obey those headers automatically. When a cached copy might be stale, the client can ask "has it changed?" with a **conditional request**, and the server can answer **304 Not Modified** with no body — saving bandwidth and work. Used well, this removes a large share of load before it reaches your servers.
+
+<Analogy>
+  A library loan. "You can keep this book for two weeks" is `max-age`. When the two weeks are up, instead of borrowing a fresh copy, you ask the librarian, "is this still the latest edition?" (`If-None-Match`). If yes, you keep the one you have (304); if not, you get the new edition (200).
+</Analogy>
+
+## Why it matters
+
+API and system design interviews expect you to use HTTP caching for read-heavy endpoints and static assets, and to know the difference between `no-cache` and `no-store` — a classic trick question. Misconfigured caching causes stale data, or worse, one user's private data cached and shown to another.
+
+## Cache-Control
+
+```http
+Cache-Control: public, max-age=31536000, immutable        # versioned static files
+Cache-Control: public, max-age=60, stale-while-revalidate=300   # semi-dynamic pages
+Cache-Control: private, max-age=0, must-revalidate        # user-specific, always check
+Cache-Control: no-store                                   # sensitive: never store
+```
+
+| Directive | Meaning |
+|---|---|
+| `max-age=N` | fresh for N seconds |
+| `s-maxage=N` | freshness for **shared** caches (CDNs/proxies), overrides `max-age` there |
+| `public` | any cache may store it |
+| `private` | only the user's browser may store it (personal data) |
+| `no-cache` | may store, but **must revalidate** before every use |
+| `no-store` | must not store at all |
+| `must-revalidate` | once stale, don't serve without revalidating |
+| `stale-while-revalidate=N` | serve stale for up to N s while refreshing in the background |
+| `stale-if-error=N` | serve stale if the origin is failing |
+| `immutable` | will never change; don't even revalidate |
+
+`no-cache` ≠ "don't cache"; it means "check with me first". `no-store` is "don't cache".
+
+## Validators and conditional requests
+
+<Diagram
+  sequence
+  caption="Revalidation with an ETag. When nothing changed, the server sends 304 with no body."
+  chart={`sequenceDiagram
+    participant B as Browser cache
+    participant S as Server
+    B->>S: GET /api/products/42
+    S-->>B: 200 + body + ETag "v7" + Cache-Control max-age=60
+    B->>B: serve from cache for 60 s
+    B->>S: GET /api/products/42 + If-None-Match "v7"
+    S-->>B: 304 Not Modified (no body)
+    B->>S: later: If-None-Match "v7"
+    S-->>B: 200 + new body + ETag "v8"`}
+  notes={[
+    "First request: nothing cached.",
+    "The server returns the representation with a validator — an ETag that changes whenever the content changes — and a freshness lifetime.",
+    "For 60 seconds the browser doesn't even ask.",
+    "After that, it asks conditionally: 'send it only if it isn't still v7'.",
+    "Unchanged: a tiny 304 response, and the cached body is reused.",
+    "Later the product changed…",
+    "…so the server sends the new body and a new ETag.",
+  ]}
+/>
+
+- **`ETag`** — an opaque version identifier (a hash of the body, or a row version). Client sends `If-None-Match`.
+- **`Last-Modified`** — a timestamp. Client sends `If-Modified-Since`. Coarser (1-second resolution).
+- ETags also enable **optimistic concurrency** on writes: `PUT` with `If-Match: "v7"` → `412 Precondition Failed` if someone else changed it first.
+
+```js
+app.get('/api/products/:id', async (req, res) => {
+  const product = await products.get(req.params.id);
+  const etag = `"${product.version}"`;
+  res.set({ ETag: etag, 'Cache-Control': 'public, max-age=60, stale-while-revalidate=300' });
+  if (req.get('If-None-Match') === etag) return res.status(304).end();
+  res.json(product);
+});
+```
+
+## Where caches sit
+
+<Diagram
+  caption="A response may be cached in several places on its way to the user. private stops at the browser; public and s-maxage apply to shared caches too."
+  chart={`flowchart LR
+    O["origin server"] --> R["reverse proxy cache"]
+    R --> CDN["CDN edge"]
+    CDN --> BR["browser cache"]
+    BR --> U["user"]`}
+/>
+
+### `Vary`
+
+If a response differs by a request header, say so — or a shared cache may serve the wrong variant:
+
+```http
+Vary: Accept-Encoding        # gzip vs br vs plain
+Vary: Accept-Language        # translations
+```
+
+Never cache personalised responses publicly; `Vary: Cookie` or `Authorization` usually makes them effectively uncacheable at shared caches — use `private` instead.
+
+## Strategies by content type
+
+| Content | Headers |
+|---|---|
+| Hashed static assets (`app.3f9a2c.js`) | `public, max-age=31536000, immutable` |
+| HTML pages | `no-cache` (always revalidate) or short `s-maxage` at the CDN |
+| Public API reads (catalogue) | `public, max-age=30–300, stale-while-revalidate` + ETag |
+| Per-user API data | `private, no-cache` + ETag, or `no-store` |
+| Auth, payments, secrets | `no-store` |
+
+## Compression
+
+Clients send `Accept-Encoding: gzip, br, zstd`; servers compress text responses and reply `Content-Encoding: br`. JSON typically shrinks 70–90%. Don't compress already-compressed media (JPEG, MP4). Usually handled by the CDN or reverse proxy.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Confusing `no-cache` (revalidate) with `no-store` (don't store).
+- `public` caching of user-specific responses.
+- Long `max-age` on unversioned URLs — users stuck with old files.
+- Forgetting `Vary` for content negotiation.
+- Never returning 304s, so every revalidation transfers the full body.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you use HTTP caching for an API?">
+
+For public, read-heavy endpoints I'd return `Cache-Control: public` with a short `max-age` or `s-maxage` for the CDN, plus `stale-while-revalidate` so caches can serve slightly stale data while refreshing, and an ETag derived from a version or content hash. When it expires, clients and CDNs revalidate with `If-None-Match` and get a bodyless 304 if nothing changed. User-specific responses are `private` — never cached by shared caches — and sensitive ones `no-store`; note `no-cache` means revalidate, not don't store. Static assets get content-hashed filenames with a one-year `immutable` lifetime. ETags with `If-Match` also give optimistic concurrency on updates, returning 412 when the resource changed.
+
+<Fragment slot="deeper">
+
+- **`no-cache` vs `no-store`?** Store but revalidate each time vs never store.
+- **What does `Vary` do?** Tells caches which request headers select different variants.
+- **ETag vs Last-Modified?** Opaque version vs timestamp; ETags are more precise.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["`Cache-Control`", "Header controlling who may cache a response and for how long."],
+  ["ETag", "An opaque version identifier for a representation."],
+  ["Conditional request", "A request with `If-None-Match`/`If-Match` that depends on the current version."],
+  ["304 Not Modified", "The cached copy is still valid; no body sent."],
+  ["Shared cache", "A cache serving many users, such as a CDN or proxy."],
+  ["`stale-while-revalidate`", "Serve stale content while refreshing in the background."],
+]} />

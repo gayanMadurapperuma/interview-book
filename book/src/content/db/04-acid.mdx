@@ -1,0 +1,171 @@
+---
+title: ACID and what a transaction guarantees
+part: Transactions
+order: 4
+level: core
+summary: A transaction groups several changes into one all-or-nothing unit. ACID names the four promises it makes — and each one is narrower than people assume.
+---
+
+A **transaction** is a group of database operations that succeed or fail **together**. Transfer money between two accounts: subtract from one, add to the other. Either both happen or neither does — never just one. **ACID** is the acronym for the four guarantees a transactional database gives: **Atomicity**, **Consistency**, **Isolation** and **Durability**.
+
+<Analogy>
+  A transaction is like a bank teller's tray. The teller puts every slip for your request in the tray, checks it all adds up, and only then processes the tray in one go. If anything is wrong — a signature missing, a balance too low — the whole tray goes back and nothing is processed. Once processed, it's in the ledger for good, even if the power goes off a second later.
+</Analogy>
+
+## Why it matters
+
+"Explain ACID" is a staple interview question. More importantly, misunderstanding what each letter *actually* guarantees leads to real bugs: lost updates, double bookings, and believing a transaction protects you from something it doesn't.
+
+## A transaction in SQL
+
+```sql
+BEGIN;
+UPDATE accounts SET balance_cents = balance_cents - 5000 WHERE id = 1;
+UPDATE accounts SET balance_cents = balance_cents + 5000 WHERE id = 2;
+INSERT INTO transfers (from_id, to_id, amount_cents) VALUES (1, 2, 5000);
+COMMIT;     -- or ROLLBACK; to undo everything
+```
+
+And from Node, making sure every path ends the transaction and releases the connection:
+
+```js
+const client = await pool.connect();
+try {
+  await client.query('BEGIN');
+  await client.query('UPDATE accounts SET balance_cents = balance_cents - $1 WHERE id = $2', [5000, 1]);
+  await client.query('UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id = $2', [5000, 2]);
+  await client.query('COMMIT');
+} catch (err) {
+  await client.query('ROLLBACK');
+  throw err;
+} finally {
+  client.release();           // always return the connection to the pool
+}
+```
+
+All statements in a transaction must use the **same connection** — `pool.query()` may pick a different connection each time, which would silently run them outside the transaction.
+
+## The four letters
+
+<Diagram
+  caption="What each ACID property promises, in one line."
+  chart={`flowchart TB
+    ACID["Transaction"] --> A["Atomicity<br/>all or nothing"]
+    ACID --> C["Consistency<br/>constraints hold before and after"]
+    ACID --> I["Isolation<br/>concurrent transactions don't see<br/>each other's half-done work"]
+    ACID --> D["Durability<br/>once committed, survives crashes"]`}
+/>
+
+### Atomicity — all or nothing
+
+If any statement fails, or the server crashes mid-way, or you `ROLLBACK`, **every** change in the transaction is undone. "Atomic" here means indivisible, not "concurrent-safe".
+
+### Consistency — rules hold
+
+The database moves from one valid state to another: every constraint (`NOT NULL`, foreign keys, `CHECK`, `UNIQUE`) is satisfied at commit. If a statement would violate one, the transaction fails. Note: the database can only enforce rules **you declared**. "The total of all balances never changes" is your application's job unless you encode it.
+
+### Isolation — no interference
+
+Concurrent transactions behave **as if** they ran one at a time — to a degree set by the **isolation level**. At the strongest level (serializable) that's literally true; at the default levels of most databases it's weaker, and certain anomalies are allowed. This letter is where most real-world surprises come from (next chapter).
+
+### Durability — committed means saved
+
+Once `COMMIT` returns, the data survives a crash. Databases achieve this with a **write-ahead log (WAL)**: changes are appended to a log and flushed to disk before the commit is acknowledged; the main data files can be updated later.
+
+<Diagram
+  sequence
+  caption="Durability through a write-ahead log: the commit is acknowledged only after the log record is safely on disk."
+  chart={`sequenceDiagram
+    participant App
+    participant DB as Database
+    participant WAL as WAL (on disk)
+    participant Data as Data files
+    App->>DB: COMMIT
+    DB->>WAL: append change records + fsync
+    WAL-->>DB: flushed to disk
+    DB-->>App: COMMIT OK
+    DB->>Data: write pages later (checkpoint)`}
+  notes={[
+    "The application asks to commit.",
+    "The database appends the transaction's changes to the write-ahead log and forces them to disk.",
+    "Only once the log is safely on disk…",
+    "…is success reported. A crash after this point loses nothing: on restart, the log is replayed.",
+    "Updating the actual table files happens lazily, in the background.",
+  ]}
+/>
+
+Durability is only as good as the hardware and settings: disks that lie about flushing, `synchronous_commit = off`, or a single server without replicas can still lose data. Replication (later chapter) protects against losing the whole machine.
+
+## What transactions don't do
+
+- **They don't prevent all concurrency bugs** at the default isolation level. Two transactions can both read a balance of 100, both subtract 80, and both commit — a *lost update* — unless you lock or use stronger isolation.
+- **They don't span systems.** A database transaction can't include sending an email, charging a card through an API, or publishing to Kafka. If you call an API inside a transaction and then roll back, the API call isn't undone. (See *Distributed transactions* in the System Design volume, and the *Outbox* chapter.)
+- **They aren't free.** Long transactions hold locks and keep old row versions alive, slowing everyone down. Keep them short: no network calls or user waits inside.
+
+## Protecting a read-modify-write
+
+```sql
+-- risky: two concurrent requests can both see enough stock
+SELECT stock FROM products WHERE id = 7;           -- app checks stock >= 1
+UPDATE products SET stock = stock - 1 WHERE id = 7;
+
+-- safe option 1: do the check and the write in one atomic statement
+UPDATE products SET stock = stock - 1
+WHERE id = 7 AND stock >= 1
+RETURNING stock;                                    -- 0 rows → out of stock
+
+-- safe option 2: lock the row for the rest of the transaction
+BEGIN;
+SELECT stock FROM products WHERE id = 7 FOR UPDATE;
+UPDATE products SET stock = stock - 1 WHERE id = 7;
+COMMIT;
+```
+
+## Savepoints
+
+Inside a long transaction you can roll back part of the work:
+
+```sql
+BEGIN;
+INSERT INTO orders (...) VALUES (...);
+SAVEPOINT before_coupon;
+UPDATE coupons SET used = true WHERE code = 'SPRING';  -- fails
+ROLLBACK TO SAVEPOINT before_coupon;                  -- keep the order, skip the coupon
+COMMIT;
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using `pool.query` for each statement of a "transaction" — they run on different connections.
+- Forgetting `ROLLBACK`/`release()` on error, leaking connections stuck in an open transaction.
+- Making HTTP calls inside a transaction.
+- Read-then-write logic without locks or a conditional update.
+- Assuming "ACID" means "no concurrency anomalies at all".
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What does ACID mean?">
+
+ACID describes what a database transaction guarantees. Atomicity: all of its changes commit together or none do, even across crashes. Consistency: the database goes from one valid state to another, so every declared constraint holds at commit. Isolation: concurrent transactions don't see each other's uncommitted work, and behave as if run one at a time to the degree the isolation level specifies — most databases default to read committed, which still allows anomalies like lost updates. Durability: once commit returns, the data survives a crash, typically via a write-ahead log flushed to disk before acknowledging. Transactions don't extend to external systems like APIs or message brokers, which need patterns like the outbox.
+
+<Fragment slot="deeper">
+
+- **What is a write-ahead log?** An append-only log of changes, flushed before commit; replayed after a crash.
+- **How do you prevent a lost update?** A conditional atomic `UPDATE`, `SELECT … FOR UPDATE`, optimistic version checks, or serializable isolation.
+- **Why keep transactions short?** Locks and old row versions are held for their duration, hurting concurrency.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Transaction", "A group of operations committed or rolled back as one unit."],
+  ["Atomicity", "All of a transaction's changes happen, or none do."],
+  ["Consistency", "Declared constraints hold before and after each transaction."],
+  ["Isolation", "Concurrent transactions don't interfere beyond what the isolation level allows."],
+  ["Durability", "Committed data survives crashes."],
+  ["Write-ahead log (WAL)", "Log of changes written to disk before commit is acknowledged."],
+]} />

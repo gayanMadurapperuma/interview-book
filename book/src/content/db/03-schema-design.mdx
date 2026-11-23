@@ -1,0 +1,161 @@
+---
+title: "Schema design: normalisation and when to denormalise"
+part: Fundamentals
+order: 3
+level: core
+summary: Store each fact once so it can't contradict itself — then, carefully and deliberately, copy some facts back where reads need them to be fast.
+---
+
+**Schema design** is deciding which tables exist, what columns they have, and how they relate. **Normalisation** is a set of rules for removing duplication, so that each fact lives in exactly one place and can't become inconsistent. **Denormalisation** is deliberately reintroducing some duplication to make important reads faster — accepting the cost of keeping the copies in sync.
+
+<Analogy>
+  Imagine a team contact list. If every project spreadsheet contains each person's phone number, then when someone changes their number you must update twenty spreadsheets — and you will miss one. Normalising means keeping phone numbers in one contacts sheet and having projects refer to people by ID. Denormalising is printing a phone list on the office wall because looking it up is too slow — fine, as long as you remember to reprint it.
+</Analogy>
+
+## Why it matters
+
+Bad schemas cause data bugs that no code review catches: totals that don't match, orphaned records, a customer with two different addresses. Interviewers ask about normal forms, how you'd model a domain, and when denormalising is justified.
+
+## Anomalies: what normalisation prevents
+
+Consider one wide table:
+
+| order_id | customer_email | customer_name | product | product_price | qty |
+|---|---|---|---|---|---|
+| 1 | ada@x.com | Ada | Keyboard | 4999 | 1 |
+| 2 | ada@x.com | Ada | Mouse | 1999 | 2 |
+| 3 | grace@x.com | Grace | Keyboard | 4999 | 1 |
+
+- **Update anomaly**: Ada changes her name; we must update every row, and missing one leaves her with two names.
+- **Insert anomaly**: we can't record a new product until someone orders it.
+- **Delete anomaly**: deleting Grace's only order deletes everything we knew about Grace.
+
+## The normal forms, in plain words
+
+<Diagram
+  caption="Each normal form removes a kind of duplication. In practice, aiming for third normal form is the usual default."
+  chart={`flowchart LR
+    U["Unnormalised<br/>repeating groups,<br/>lists in cells"] --> N1["1NF<br/>atomic values,<br/>one value per cell"]
+    N1 --> N2["2NF<br/>every column depends on<br/>the whole key"]
+    N2 --> N3["3NF<br/>columns depend only on<br/>the key — nothing else"]`}
+  steps={[
+    { nodes: ["U"], text: "Unnormalised: a `products` cell holding `'Keyboard, Mouse'`, or columns `phone1`, `phone2`, `phone3`." },
+    { nodes: ["U", "N1"], text: "**1NF**: one value per cell, no repeating groups. Lists become rows in a separate table." },
+    { nodes: ["N1", "N2"], text: "**2NF**: with a composite key like `(order_id, product_id)`, a column such as `product_name` depends on only half the key — move it to `products`." },
+    { nodes: ["N2", "N3"], text: "**3NF**: no column depends on another non-key column. `customer_name` depends on `customer_email`, not on the order — move it to `customers`." },
+  ]}
+/>
+
+A memorable summary of 3NF: every non-key column depends on **the key, the whole key, and nothing but the key**.
+
+Normalised version of the table above:
+
+```sql
+customers  (id, email, name)
+products   (id, name, price_cents)
+orders     (id, customer_id → customers, created_at)
+order_items(order_id → orders, product_id → products, quantity, unit_price_cents)
+```
+
+Notice `unit_price_cents` on `order_items`: that's **not** a duplicate. The price **at the time of purchase** is a different fact from the product's current price. Distinguishing "historical fact" from "current value" is a key modelling skill.
+
+## Modelling choices you'll face
+
+### Keys: natural versus surrogate
+
+- **Natural key**: something meaningful (email, ISBN). Problem: it can change, and it may not be truly unique.
+- **Surrogate key**: a meaningless generated ID (`BIGSERIAL`, UUID). The usual choice, with `UNIQUE` constraints on natural identifiers.
+- **UUIDs**: easy to generate anywhere and don't reveal counts, but random v4 UUIDs scatter inserts across a B-tree index. Time-ordered **UUIDv7** (or ULID) keeps the benefits with index-friendly ordering.
+
+### Enumerations
+
+Use a `CHECK` constraint, a native enum type, or a small lookup table (when values need extra attributes or change often).
+
+### Soft deletes
+
+Adding `deleted_at` keeps history but means every query must remember `WHERE deleted_at IS NULL`, and unique constraints get trickier (use a partial unique index). Consider an archive table or audit log instead.
+
+### Polymorphic associations
+
+"A comment can belong to a post **or** a photo." Avoid a `commentable_type` + `commentable_id` pair (no foreign key can enforce it). Prefer separate nullable foreign keys with a check that exactly one is set, or separate join tables.
+
+## When to denormalise
+
+Normalised schemas need joins at read time. That's usually fine — databases are very good at joins with the right indexes. Denormalise when a **specific, measured** read is too slow or too frequent:
+
+<Diagram
+  caption="Denormalisation trades write complexity for read speed. Each copy needs a mechanism to stay correct."
+  chart={`flowchart TB
+    SRC["Source of truth<br/>(normalised tables)"] --> T1["Counter column<br/>posts.comment_count"]
+    SRC --> T2["Materialised view<br/>daily_revenue"]
+    SRC --> T3["Copied attribute<br/>order.shipping_address snapshot"]
+    SRC --> T4["Read model / cache<br/>search index, Redis"]
+    T1 -. "updated in same transaction<br/>or by trigger" .-> SRC
+    T2 -. "REFRESH on a schedule" .-> SRC
+    T4 -. "updated async via events / CDC" .-> SRC`}
+/>
+
+| Technique | Example | Keeping it correct |
+|---|---|---|
+| Counter / summary column | `posts.comment_count` | update in the same transaction as the insert |
+| Materialised view | daily revenue per region | `REFRESH MATERIALIZED VIEW` on a schedule |
+| Snapshot of data at a point in time | shipping address on an order | intentionally never updated |
+| Separate read model | search index, analytics table | events or change data capture |
+
+Ask: how stale may the copy be? What happens if it's wrong? How is it rebuilt from the source of truth?
+
+## Constraints are your friends
+
+Put invariants in the database, not only in application code. Code has bugs, multiple services write to the same tables, and someone will run a manual SQL fix at 2 a.m.
+
+```sql
+ALTER TABLE accounts ADD CONSTRAINT balance_non_negative CHECK (balance_cents >= 0);
+CREATE UNIQUE INDEX one_active_subscription ON subscriptions (user_id) WHERE status = 'active';
+```
+
+## Evolving a schema
+
+Schemas change. In production, change them in **backwards-compatible steps** so old and new application versions can run side by side during a deploy (**expand–contract**):
+
+1. **Expand**: add the new column (nullable) or table.
+2. Deploy code that writes both old and new; **backfill** existing rows in batches.
+3. Deploy code that reads the new column.
+4. **Contract**: drop the old column once nothing uses it.
+
+Avoid long-locking operations on big tables (adding a column with a volatile default, adding an index without `CONCURRENTLY` in PostgreSQL).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Comma-separated lists in a column instead of a related table.
+- Copying the current product price onto orders by reference instead of snapshotting it.
+- Denormalising "just in case" without a measured read problem.
+- Relying only on application code for uniqueness or integrity.
+- Renaming or dropping columns in one step during a rolling deploy.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is normalisation, and when would you denormalise?">
+
+Normalisation organises a schema so each fact is stored in exactly one place, which removes update, insert and delete anomalies. First normal form means atomic values and no repeating groups; second means non-key columns depend on the whole key; third means they depend only on the key, not on other non-key columns. I design to third normal form by default and enforce invariants with keys, foreign keys and constraints. I denormalise only for specific, measured read paths — a counter column, a materialised view, a search index — and for each copy I decide how it's kept in sync, how stale it may be and how to rebuild it. Snapshotting historical facts, like the price at purchase time, isn't denormalisation; it's a different fact.
+
+<Fragment slot="deeper">
+
+- **Surrogate vs natural keys?** Surrogates are stable; natural identifiers get a unique constraint.
+- **UUIDv4 vs UUIDv7?** v7 is time-ordered, which keeps B-tree inserts local and fast.
+- **How do you change a schema without downtime?** Expand–contract: additive change, dual-write, backfill, switch reads, then remove.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Normalisation", "Structuring tables so each fact is stored once."],
+  ["Third normal form (3NF)", "Every non-key column depends on the key, the whole key, and nothing but the key."],
+  ["Anomaly", "An inconsistency caused by duplicated data (update, insert, delete)."],
+  ["Denormalisation", "Deliberately duplicating data to speed up reads."],
+  ["Surrogate key", "A generated identifier with no business meaning."],
+  ["Expand–contract", "Evolving a schema in backwards-compatible steps."],
+]} />

@@ -1,0 +1,182 @@
+---
+title: Interfaces, polymorphism and SOLID in practice
+part: Classes & OOP
+order: 9
+level: core
+summary: Programming against contracts instead of concrete classes, and the five SOLID principles explained with TypeScript code you'd actually write.
+---
+
+**Polymorphism** means code can work with many different implementations through one common **interface** — a payment processor that doesn't care whether it's talking to Stripe or PayPal. The **SOLID** principles are five guidelines for object-oriented design that keep code easy to change: each piece does one job, can be extended without editing, can be substituted safely, depends only on what it needs, and depends on abstractions rather than concrete details.
+
+<Analogy>
+  Electrical sockets. Your laptop charger doesn't care which power station made the electricity — it depends on the standard socket (an interface). Any station that delivers power through that standard works (polymorphism). If every appliance were hard-wired to one specific power station, changing supplier would mean rewiring the house.
+</Analogy>
+
+## Why it matters
+
+SOLID questions are standard in mid/senior interviews, especially for backend roles using NestJS or other DI frameworks. Interviewers want concrete examples, not definitions recited from memory.
+
+## Programming to an interface
+
+```ts
+interface PaymentGateway {
+  charge(input: { amount: number; currency: string; token: string; idempotencyKey: string }): Promise<{ id: string }>;
+  refund(chargeId: string, amount?: number): Promise<void>;
+}
+
+class StripeGateway implements PaymentGateway { /* calls Stripe */ }
+class FakeGateway implements PaymentGateway {    // for tests
+  charges: unknown[] = [];
+  async charge(input: any) { this.charges.push(input); return { id: `ch_${this.charges.length}` }; }
+  async refund() {}
+}
+
+class CheckoutService {
+  constructor(private readonly payments: PaymentGateway) {}   // depends on the contract
+  async pay(order: Order, token: string) {
+    return this.payments.charge({ amount: order.total, currency: 'GBP', token, idempotencyKey: order.id });
+  }
+}
+```
+
+<Diagram
+  caption="High-level code depends on an interface; concrete implementations plug in. Tests plug in a fake."
+  chart={`flowchart TB
+    CS["CheckoutService<br/>(business logic)"] --> PG["«interface» PaymentGateway"]
+    ST["StripeGateway"] -. "implements" .-> PG
+    PP["PayPalGateway"] -. "implements" .-> PG
+    FK["FakeGateway (tests)"] -. "implements" .-> PG`}
+/>
+
+## SOLID, one by one
+
+### S — Single responsibility
+
+A module should have **one reason to change**.
+
+```ts
+// ✗ one class: validation, pricing, persistence, emails, PDF invoices
+class OrderManager { /* 800 lines */ }
+
+// ✓ separate responsibilities, coordinated by a thin service
+class OrderPricing { total(items: Item[], coupon?: Coupon): Money { /* … */ } }
+class OrdersRepository { save(order: Order): Promise<void> { /* … */ } }
+class OrderNotifications { sendConfirmation(order: Order): Promise<void> { /* … */ } }
+```
+
+### O — Open/closed
+
+Open for **extension**, closed for **modification**: add behaviour by adding code, not by editing a growing `switch`.
+
+```ts
+// ✗ every new discount type edits this function
+function discount(type: string, total: number) {
+  if (type === 'percent') { /* … */ } else if (type === 'bogo') { /* … */ } // …
+}
+
+// ✓ new rules are new classes registered in a list
+interface DiscountRule { applies(cart: Cart): boolean; amount(cart: Cart): number }
+const rules: DiscountRule[] = [new PercentOff(10), new BuyOneGetOne('SKU-1')];
+const total = rules.filter((r) => r.applies(cart)).reduce((t, r) => t - r.amount(cart), cart.total);
+```
+
+(A discriminated union with an exhaustive switch is an equally valid, more functional alternative when the set of cases is closed and owned by you.)
+
+### L — Liskov substitution
+
+Subtypes must be usable wherever the base type is expected **without surprises**: same contract, no stronger preconditions, no weaker guarantees.
+
+```ts
+interface Storage { save(key: string, data: Buffer): Promise<void> }
+
+class ReadOnlyStorage implements Storage {
+  async save() { throw new Error('read-only'); }   // ✗ violates the contract callers rely on
+}
+```
+
+If something can't honour the contract, it shouldn't claim the interface — split the interface instead (next principle).
+
+### I — Interface segregation
+
+Clients shouldn't depend on methods they don't use. Prefer small, focused interfaces.
+
+```ts
+// ✗ one fat interface
+interface UserStore { find(id: string): Promise<User>; create(u: User): Promise<void>; delete(id: string): Promise<void>; export(): Promise<Buffer> }
+
+// ✓ role interfaces
+interface UserReader { find(id: string): Promise<User | undefined> }
+interface UserWriter { create(u: NewUser): Promise<User>; delete(id: string): Promise<void> }
+class ProfilePage { constructor(private users: UserReader) {} }   // needs only reading
+```
+
+### D — Dependency inversion
+
+High-level policy shouldn't depend on low-level details; **both** depend on abstractions. Details are **injected**.
+
+<Diagram
+  caption="Dependency inversion: the arrow of source-code dependency points from details to the abstraction owned by the business layer."
+  chart={`flowchart LR
+    subgraph Before["Without inversion"]
+      direction TB
+      B1["OrderService"] --> B2["PostgresOrdersRepo"] --> B3[("pg driver")]
+    end
+    subgraph After["With inversion"]
+      direction TB
+      A1["OrderService"] --> A2["«interface» OrdersRepo<br/>(owned by domain)"]
+      A3["PostgresOrdersRepo"] -. "implements" .-> A2
+      A3 --> A4[("pg driver")]
+    end
+    Before ~~~ After`}
+  steps={[
+    { nodes: ["B1", "B2", "B3"], text: "Without inversion, business logic imports the database class directly — it can't be tested without Postgres, and changing storage means editing business code." },
+    { nodes: ["A1", "A2"], text: "With inversion, the business layer defines the interface it needs." },
+    { nodes: ["A3", "A2", "A4"], text: "The infrastructure class implements it. At startup, a composition root (or a DI container like NestJS) wires the real implementation in." },
+  ]}
+/>
+
+```ts
+// composition root — the one place that knows concrete classes
+const repo = new PostgresOrdersRepo(pool);
+const payments = new StripeGateway(process.env.STRIPE_KEY!);
+const checkout = new CheckoutService(payments);
+```
+
+## Keep it proportionate
+
+SOLID is a tool for managing change, not a goal. Interfaces with one implementation that will never change, or ten tiny classes for a 30-line script, add cost without benefit. Introduce abstractions where there's real variation, an external dependency to isolate, or a testing need.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Reciting definitions without examples.
+- Interfaces for everything "just in case".
+- Subclasses that throw "not supported" for inherited methods (Liskov violation).
+- Business logic importing database drivers or SDKs directly.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Explain the SOLID principles with examples.">
+
+Single responsibility: a class has one reason to change — pricing, persistence and notifications live in separate pieces rather than one giant order manager. Open/closed: add behaviour by adding code — new discount rules implement a `DiscountRule` interface instead of extending a switch. Liskov substitution: any implementation must honour the interface's contract — a storage class that throws on `save` shouldn't implement `Storage`. Interface segregation: small role interfaces like `UserReader` and `UserWriter`, so a profile page depends only on reading. Dependency inversion: business code depends on interfaces it owns, like `PaymentGateway` or `OrdersRepo`, and concrete Stripe or Postgres implementations are injected from a composition root or a DI container like NestJS — which also makes testing with fakes trivial. I apply them where there's real variation or a boundary to protect, not everywhere.
+
+<Fragment slot="deeper">
+
+- **What is polymorphism?** Using different implementations through one interface.
+- **Dependency injection vs dependency inversion?** DI is the mechanism (passing collaborators in); inversion is the design principle.
+- **When is SOLID overkill?** Small scripts and stable code without real variation.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Polymorphism", "One interface, many implementations used interchangeably."],
+  ["Single responsibility", "A module has one reason to change."],
+  ["Open/closed", "Extend behaviour without modifying existing code."],
+  ["Liskov substitution", "Subtypes must be substitutable without breaking expectations."],
+  ["Interface segregation", "Prefer small, client-specific interfaces."],
+  ["Dependency inversion", "High- and low-level code both depend on abstractions; details are injected."],
+]} />

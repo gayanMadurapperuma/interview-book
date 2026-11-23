@@ -1,0 +1,140 @@
+---
+title: SQL and NoSQL — the mental model
+part: Fundamentals
+order: 2
+level: foundation
+summary: Relational databases model data around entities and let you query it any way later. NoSQL stores model data around how you will read it. Neither is newer or better — they make different trade-offs.
+---
+
+"SQL vs NoSQL" sounds like one choice, but **NoSQL** covers several very different kinds of database: **document** stores (MongoDB, DynamoDB in document mode), **key–value** stores (Redis, DynamoDB), **wide-column** stores (Cassandra) and **graph** databases (Neo4j). What they share is a different philosophy from relational databases: instead of designing tables around *entities* and joining them at query time, you usually design storage around *the queries you need*, often duplicating data to make reads cheap.
+
+<Analogy>
+  A relational database is a library with a card catalogue: every book is shelved once, and you can find anything by author, subject or title by looking it up and walking to the shelf (joins). A NoSQL document store is a set of pre-assembled gift boxes: each box already contains everything for one occasion, so handing one over is instant — but if a product changes, you have to update every box that contains it.
+</Analogy>
+
+## Why it matters
+
+"Would you use SQL or NoSQL for this?" appears in nearly every system design interview. A good answer is never "NoSQL because it scales" — it's about access patterns, consistency needs, relationships and operational trade-offs.
+
+## Four NoSQL families
+
+<Diagram
+  caption="The main families, with the shape of data each one stores."
+  chart={`flowchart TB
+    N["NoSQL"] --> D["Document<br/>JSON-like documents<br/>MongoDB, Couchbase, Firestore"]
+    N --> K["Key–value<br/>opaque value by key<br/>Redis, DynamoDB, Memcached"]
+    N --> W["Wide-column<br/>rows of sparse columns,<br/>partitioned by key<br/>Cassandra, ScyllaDB, Bigtable"]
+    N --> G["Graph<br/>nodes and edges<br/>Neo4j, Neptune"]`}
+/>
+
+| Family | Good at | Weak at |
+|---|---|---|
+| Document | data that's naturally a nested object (a product with variants, a CMS page), flexible fields | many-to-many relationships, ad-hoc cross-document queries |
+| Key–value | ultra-fast lookups by key: sessions, caches, feature flags | anything other than "get by key" |
+| Wide-column | huge write volumes, time-series, multi-region writes | ad-hoc queries; you design a table per query |
+| Graph | relationships many hops deep: social graphs, recommendations, fraud rings | bulk aggregation over everything |
+
+## Modelling: normalise versus embed
+
+The same blog data, two ways.
+
+<Diagram
+  caption="Relational: each fact stored once, combined with joins at read time. Document: data embedded the way the page reads it."
+  chart={`flowchart LR
+    subgraph REL["Relational (normalised)"]
+      direction TB
+      P["posts<br/>id, author_id, title"]
+      A["authors<br/>id, name"]
+      CM["comments<br/>id, post_id, text"]
+      P --> A
+      CM --> P
+    end
+    subgraph DOC["Document (embedded)"]
+      direction TB
+      D1["post document<br/>title, author: { name },<br/>comments: [ … ]"]
+    end`}
+/>
+
+```json
+{
+  "_id": "post_42",
+  "title": "Why indexes matter",
+  "author": { "id": "u_7", "name": "Ada" },
+  "comments": [
+    { "by": "Grace", "text": "Great post" }
+  ]
+}
+```
+
+The document version reads the whole page in **one** lookup. But if Ada changes her name, every post that embeds it must be updated, and an unbounded `comments` array can grow past document size limits (16 MB in MongoDB). Rule of thumb: **embed** data that is owned by the parent and read with it; **reference** data that is shared, large or unbounded.
+
+## Schema: on write versus on read
+
+- Relational databases are **schema-on-write**: the table definition rejects data that doesn't fit.
+- Document stores are often called "schemaless", but really they're **schema-on-read**: the database accepts anything, and your code must handle every shape that was ever written. The schema still exists — in your application, versioned or not. Many teams add validation (MongoDB JSON Schema validation, Mongoose models) to get some guarantees back.
+
+## Querying and transactions
+
+| | Relational | Typical NoSQL |
+|---|---|---|
+| Ad-hoc queries | SQL: any filter, join, aggregation | limited to designed access paths (or slow scans) |
+| Joins | core feature | few or none — denormalise instead |
+| Transactions | multi-row, multi-table ACID | often single-item; multi-item support exists but with limits |
+| Consistency | strong by default | often tunable; eventual for replicas |
+| Scaling writes | vertical first, then sharding (harder) | horizontal partitioning built in |
+
+Modern lines are blurry: PostgreSQL has excellent JSON support (`jsonb` with indexes); MongoDB supports multi-document transactions; DynamoDB has transactions; distributed SQL databases (CockroachDB, Spanner, Aurora DSQL) scale SQL horizontally.
+
+## How to choose
+
+<Diagram
+  caption="A practical starting point. Default to a relational database unless a specific need points elsewhere."
+  chart={`flowchart TB
+    S["New service"] --> Q1{"Rich relationships,<br/>ad-hoc queries, reporting,<br/>multi-entity transactions?"}
+    Q1 -- yes --> PG["Relational (PostgreSQL)<br/>add jsonb for flexible fields"]
+    Q1 -- no --> Q2{"Access is always<br/>by key, massive scale,<br/>predictable patterns?"}
+    Q2 -- yes --> KV["Key–value / document<br/>(DynamoDB)"]
+    Q2 -- no --> Q3{"Huge write throughput,<br/>time-series, multi-region?"}
+    Q3 -- yes --> WC["Wide-column<br/>(Cassandra)"]
+    Q3 -- no --> Q4{"Deep relationship<br/>traversal?"}
+    Q4 -- yes --> GR["Graph DB"]
+    Q4 -- no --> PG`}
+/>
+
+Many systems use **several** stores — **polyglot persistence**: PostgreSQL as the source of truth, Redis for caching and rate limits, Elasticsearch/OpenSearch for full-text search, a data warehouse for analytics. Each extra store adds operational cost and a consistency problem (keeping them in sync — see *CDC and the outbox pattern*).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Choosing NoSQL "for scale" when the data fits comfortably on one PostgreSQL server (most do).
+- Modelling a document store like a relational one, then doing joins in application code.
+- Unbounded arrays inside documents.
+- Assuming "schemaless" means no schema work — it moves the work into code.
+- Picking DynamoDB without knowing your access patterns in advance.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="When would you choose a NoSQL database over a relational one?">
+
+I default to a relational database like PostgreSQL: it gives me constraints, joins, ad-hoc queries and multi-row ACID transactions, and it scales a long way vertically and with read replicas. I'd choose NoSQL when the access patterns are known, simple and key-based at very large scale — DynamoDB for user sessions or a shopping cart, Cassandra for heavy time-series writes across regions — or when the data is naturally a self-contained document read as a whole. The trade-off is that you model around queries, denormalise and duplicate data, accept fewer cross-item transactions and often eventual consistency, and ad-hoc analytics becomes hard. In practice many systems are polyglot: a relational source of truth plus Redis, a search index and a warehouse.
+
+<Fragment slot="deeper">
+
+- **Embed vs reference?** Embed owned, bounded data read together; reference shared, large or unbounded data.
+- **What is schema-on-read?** The database doesn't enforce structure; the application interprets whatever was stored.
+- **Can SQL scale horizontally?** Yes: read replicas, sharding, or distributed SQL systems.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Document store", "Database storing JSON-like documents, often nested."],
+  ["Key–value store", "Database retrieving opaque values by key."],
+  ["Wide-column store", "Partitioned rows with flexible columns, optimised for writes at scale."],
+  ["Denormalisation", "Duplicating data so reads don't need joins."],
+  ["Schema-on-read", "Structure is interpreted by the application when data is read."],
+  ["Polyglot persistence", "Using different databases for different needs in one system."],
+]} />

@@ -1,0 +1,166 @@
+---
+title: Consensus, quorums and leader election
+part: Distributed fundamentals
+order: 8
+level: advanced
+summary: How a group of machines agrees on one answer — who the leader is, what the next log entry is — even when some of them fail.
+---
+
+Many problems in distributed systems boil down to **agreement**: which node is the leader? Was this transaction committed? Who holds the lock? **Consensus** algorithms (Raft, Paxos) let a group of nodes agree on a value so that once agreed, it never changes — as long as a **majority** of nodes is working. **Quorums** are the general idea underneath: require enough nodes to participate that any two groups must overlap.
+
+<Analogy>
+  A committee of five deciding by majority vote. Any decision needs three votes. Since any two groups of three people share at least one member, two contradictory decisions can't both pass — someone would have to vote for both. And the committee keeps working even if two members are on holiday, but not three.
+</Analogy>
+
+## Why it matters
+
+Consensus sits under the tools you depend on: etcd (Kubernetes' brain), ZooKeeper, Consul, Kafka's KRaft controller, CockroachDB and Spanner replication. Interviewers ask why clusters have 3 or 5 nodes, what a quorum is, how leader election avoids two leaders, and how R + W > N works.
+
+## Majority quorums
+
+With **N** nodes, a majority is ⌊N/2⌋ + 1. Any two majorities overlap in at least one node, so information from one majority decision is always visible to the next.
+
+| Nodes | Majority | Failures tolerated |
+|---|---|---|
+| 3 | 2 | 1 |
+| 4 | 3 | 1 (no gain over 3!) |
+| 5 | 3 | 2 |
+| 7 | 4 | 3 |
+
+That's why consensus clusters use **odd** numbers — usually 3 or 5. More nodes tolerate more failures but make every write wait for more acknowledgements.
+
+## Raft in brief
+
+Raft is designed to be understandable. Nodes are **followers**, **candidates** or a single **leader**. Time is divided into **terms**.
+
+<Diagram
+  caption="Raft roles. A follower that hears nothing from a leader becomes a candidate and asks for votes; a majority makes it leader for that term."
+  chart={`stateDiagram-v2
+    [*] --> Follower
+    Follower --> Candidate: election timeout (no heartbeat)
+    Candidate --> Leader: votes from a majority
+    Candidate --> Follower: sees a leader with term ≥ own
+    Candidate --> Candidate: split vote, new term
+    Leader --> Follower: sees a higher term`}
+/>
+
+### Leader election
+
+- The leader sends regular **heartbeats**.
+- A follower that misses heartbeats for a randomised **election timeout** (e.g. 150–300 ms) increments the term, votes for itself and asks others to vote.
+- Each node votes for at most one candidate per term, and only for a candidate whose log is at least as up to date as its own.
+- A candidate with a **majority** of votes becomes leader. Randomised timeouts make split votes rare.
+
+### Log replication
+
+<Diagram
+  sequence
+  caption="Raft commits an entry once a majority has stored it. Here 3 of 5 nodes is enough, even if two followers are slow or down."
+  chart={`sequenceDiagram
+    participant Cl as Client
+    participant L as Leader
+    participant F1 as Follower 1
+    participant F2 as Follower 2
+    Cl->>L: SET x = 5
+    L->>F1: AppendEntries(term 3, index 42)
+    L->>F2: AppendEntries(term 3, index 42)
+    F1-->>L: stored
+    F2-->>L: stored
+    L->>L: majority (3/5) → committed
+    L-->>Cl: OK`}
+  notes={[
+    "Only the leader accepts writes.",
+    "It appends the command to its log and sends it to followers.",
+    "In parallel to every follower (two shown; others may be slow).",
+    "Follower 1 stores it.",
+    "Follower 2 stores it.",
+    "With the leader itself, 3 of 5 nodes have the entry: it's committed and can never be lost or changed.",
+    "The leader applies it and replies to the client.",
+  ]}
+/>
+
+Safety comes from the overlap: any future leader must win a majority vote, and at least one voter has every committed entry — and voters refuse candidates with less complete logs. So committed data survives leader changes.
+
+### Split brain is prevented by terms
+
+If an old leader was cut off by a partition, it can't gather a majority, so it can't commit anything. When it reconnects and sees a higher term, it steps down. A minority side of a partition simply becomes **unavailable** for writes — consensus systems are **CP**.
+
+## Quorums in leaderless systems
+
+Dynamo-style databases (Cassandra, DynamoDB internals, Riak) use quorums without a single leader. With **N** replicas per key, a write waits for **W** acknowledgements and a read queries **R** replicas.
+
+<Diagram
+  caption="N = 3, W = 2, R = 2. The write reached replicas A and B; the read asks B and C. They overlap at B, so the read sees the newest version."
+  chart={`flowchart LR
+    W["write v2<br/>(W = 2)"] --> A[("A: v2")]
+    W --> B[("B: v2")]
+    W -. "slow / missed" .-> C[("C: v1")]
+    R["read (R = 2)"] --> B
+    R --> C
+    B --> RES["newest = v2 ✓<br/>(and repair C)"]
+    C --> RES`}
+  steps={[
+    { nodes: ["W", "A", "B"], text: "The write succeeds once 2 of 3 replicas acknowledge it. C missed it." },
+    { nodes: ["R", "B", "C"], text: "A read contacts 2 replicas — here B and C." },
+    { nodes: ["B", "C", "RES"], text: "Because R + W = 4 > N = 3, at least one of them (B) has the newest version. The client takes the newest, and **read repair** updates C." },
+  ]}
+/>
+
+- **R + W > N** → reads overlap with the latest write (strong-ish consistency, with caveats around concurrent writes and failures).
+- **R + W ≤ N** → faster, but reads may miss the latest write (eventual).
+- Background **anti-entropy** (Merkle trees) and **hinted handoff** repair replicas that missed writes.
+
+## Using consensus in practice
+
+You rarely implement Raft. You use systems built on it:
+
+| Need | Tool |
+|---|---|
+| Leader election among your service instances | a lease/lock in etcd, ZooKeeper or Consul; or a DB advisory lock |
+| Strongly consistent configuration and service discovery | etcd, Consul |
+| Distributed lock for correctness | etcd/ZooKeeper locks with **fencing tokens** |
+| Strongly consistent replicated database | CockroachDB, Spanner, TiDB, YugabyteDB (Raft/Paxos per range) |
+
+<Diagram
+  caption="Fencing tokens: a lock service hands out increasing numbers; the storage rejects writes carrying an older token, so a paused ex-leader can't corrupt data."
+  chart={`flowchart LR
+    LS["lock service"] -- "token 33" --> W1["worker 1<br/>(then pauses for GC)"]
+    LS -- "lease expired → token 34" --> W2["worker 2"]
+    W2 -- "write, token 34 ✓" --> ST[("storage<br/>highest seen: 34")]
+    W1 -- "wakes up: write, token 33 ✗ rejected" --> ST`}
+/>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Even-sized clusters (4 nodes tolerate no more failures than 3).
+- Running consensus clusters across high-latency links for every write without accounting for the latency.
+- Leader election via "whoever has the earliest timestamp".
+- Distributed locks without expiry, or with expiry but without fencing.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do distributed systems agree on a leader or a value?">
+
+They use a consensus algorithm like Raft or Paxos built on majority quorums. In Raft, nodes elect a leader for a term: a follower that misses heartbeats becomes a candidate and needs votes from a majority, and nodes only vote for candidates whose logs are up to date. The leader replicates log entries, and an entry is committed once a majority has stored it. Because any two majorities overlap, a committed entry is always known to the next leader, and an isolated old leader can't commit anything — so there's no split brain, at the cost of the minority side being unavailable. That's why clusters have 3 or 5 nodes. Leaderless databases use read and write quorums with R + W > N for overlap. In practice I use etcd, ZooKeeper or a consensus-based database, and fencing tokens for locks.
+
+<Fragment slot="deeper">
+
+- **Why odd cluster sizes?** An even size adds a node without increasing fault tolerance.
+- **What does R + W > N give you?** Every read quorum intersects every write quorum.
+- **What is a fencing token?** A monotonically increasing lock number that storage uses to reject stale holders.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Consensus", "Nodes agreeing on a value that, once decided, never changes."],
+  ["Quorum", "The minimum number of nodes needed for an operation; majorities overlap."],
+  ["Raft", "A consensus algorithm with leader election and replicated logs."],
+  ["Term", "Raft's logical period with at most one leader."],
+  ["Read repair", "Fixing stale replicas discovered during reads."],
+  ["Fencing token", "Increasing number that lets storage reject operations from expired lock holders."],
+]} />

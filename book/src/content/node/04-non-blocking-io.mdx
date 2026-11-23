@@ -1,0 +1,182 @@
+---
+title: Non-blocking I/O and CPU-bound work
+part: Runtime
+order: 4
+level: core
+summary: Node is fast at waiting and slow at thinking. How to spot code that blocks the event loop, measure it, and move heavy work out of the way.
+demo: node-blocking-loop
+---
+
+**I/O-bound** work spends most of its time waiting for something outside the program — a database, a file, another service. **CPU-bound** work spends its time computing — parsing a huge JSON document, resizing an image, hashing, sorting a million items. Node handles I/O-bound work brilliantly because waiting costs nothing. CPU-bound work is the opposite: while your JavaScript computes, the one main thread can do nothing else, so **every** request waits.
+
+<Analogy>
+  A call-centre agent with one phone line. Putting a caller on hold while their file is fetched is fine — the agent picks up the next call. But if the agent starts doing a long tax calculation by hand mid-call, every other caller hears ringing until they're done.
+</Analogy>
+
+## Why it matters
+
+"Blocking the event loop" is the single most important performance concept in Node. Interviewers want you to recognise blocking code, explain its impact on all users, and know the remedies.
+
+## What blocking looks like
+
+```js
+app.get('/report', (req, res) => {
+  const rows = JSON.parse(fs.readFileSync('huge.json', 'utf8'));  // blocks: sync I/O + big parse
+  const totals = computeTotals(rows);                              // blocks: heavy loop
+  res.json(totals);
+});
+
+app.get('/health', (req, res) => res.send('ok'));   // waits behind /report!
+```
+
+While `/report` runs, `/health` can't respond. A load balancer may decide the instance is dead.
+
+<Diagram
+  sequence
+  caption="One slow synchronous handler delays every request that arrives during it, even trivial ones."
+  chart={`sequenceDiagram
+    participant A as Client A
+    participant B as Client B
+    participant N as Node (1 JS thread)
+    A->>N: GET /report
+    N->>N: 800 ms of synchronous work
+    B->>N: GET /health (arrives at 50 ms)
+    N-->>A: report (at 800 ms)
+    N-->>B: ok (at 801 ms instead of 51 ms)`}
+  notes={[
+    "Client A requests the report.",
+    "The handler runs synchronous parsing and computing. The thread is busy for 800 ms.",
+    "Client B's health check arrives 50 ms in. Its bytes are in the kernel, but no JavaScript can run to handle it.",
+    "A finally gets its response.",
+    "Only now does B's tiny handler run. A 1 ms request took 750 ms.",
+  ]}
+/>
+
+<DemoLink id="node-blocking-loop" />
+
+## Common sources of blocking
+
+| Culprit | Why it blocks | Fix |
+|---|---|---|
+| `fs.readFileSync`, `execSync`, `*Sync` APIs | synchronous I/O on the main thread | async versions (fine at startup) |
+| `JSON.parse` / `JSON.stringify` of very large data | pure CPU | stream-parse, paginate, or worker |
+| Big loops, sorting huge arrays, complex reports | pure CPU | worker threads, batch jobs, database aggregation |
+| Synchronous crypto (`createHash` on big buffers, `pbkdf2Sync`) | CPU | async/streaming APIs |
+| Catastrophic regular expressions (ReDoS) | exponential backtracking | safer regex, input limits, `re2` |
+| Image/PDF/video processing in JS | CPU | worker threads, native libs, separate service |
+
+## Measuring event-loop delay
+
+Event-loop **delay** (or lag) is how late a timer fires compared to when it should. Healthy services stay in single-digit milliseconds.
+
+```js
+const { monitorEventLoopDelay } = require('node:perf_hooks');
+
+const h = monitorEventLoopDelay({ resolution: 20 });
+h.enable();
+setInterval(() => {
+  console.log({
+    p50: (h.percentile(50) / 1e6).toFixed(1) + ' ms',
+    p99: (h.percentile(99) / 1e6).toFixed(1) + ' ms',
+    max: (h.max / 1e6).toFixed(1) + ' ms',
+  });
+  h.reset();
+}, 10_000).unref();
+```
+
+Export these numbers to your metrics system and alert on high p99. For finding *what* blocks, take a CPU profile (`node --cpu-prof`, or Chrome DevTools via `--inspect`) and look for wide synchronous frames.
+
+## Remedies
+
+<Diagram
+  caption="Options for CPU-heavy work, from lightest to heaviest."
+  chart={`flowchart TB
+    W["CPU-heavy work"] --> Y["1 · Yield in chunks<br/>split the loop, setImmediate between chunks"]
+    W --> T["2 · worker_threads<br/>run it on another thread in the same process"]
+    W --> C["3 · Child process / cluster<br/>separate processes"]
+    W --> Q["4 · Job queue + workers<br/>BullMQ, SQS: off the request path"]
+    W --> S["5 · Separate service<br/>another language or a managed service"]`}
+/>
+
+### 1. Yield in chunks
+
+Splitting work into pieces and yielding between them lets other callbacks run. It doesn't make the work faster, but it keeps the server responsive.
+
+```js
+async function sumInChunks(items, chunk = 10_000) {
+  let total = 0;
+  for (let i = 0; i < items.length; i += chunk) {
+    for (let j = i; j < Math.min(i + chunk, items.length); j++) total += items[j].amount;
+    await new Promise((resolve) => setImmediate(resolve));   // let I/O run
+  }
+  return total;
+}
+```
+
+### 2. Worker threads
+
+For real CPU work, run it on another thread with its own event loop. The main thread stays free.
+
+```js
+// main.js
+const { Worker } = require('node:worker_threads');
+
+function runReport(input) {
+  return new Promise((resolve, reject) => {
+    const w = new Worker('./report-worker.js', { workerData: input });
+    w.once('message', resolve);
+    w.once('error', reject);
+  });
+}
+
+// report-worker.js
+const { parentPort, workerData } = require('node:worker_threads');
+parentPort.postMessage(computeTotals(workerData));
+```
+
+In production, reuse a **pool** of workers (for example with the `piscina` library) rather than starting one per request.
+
+<DemoLink id="node-worker-offload" />
+
+### 3–5. Move it elsewhere
+
+Long-running jobs (generating a large export, sending 10,000 emails) don't belong in a request at all. Put a job on a queue, return `202 Accepted`, and let background workers process it. The client polls or gets notified when it's done.
+
+## I/O concurrency is not unlimited
+
+Non-blocking does not mean infinitely parallel. Every outbound request uses a socket and memory; every database query uses a pooled connection. Firing 10,000 `fetch` calls at once can exhaust file descriptors, overwhelm the downstream service, or fill the database pool. Limit concurrency (see *async and await* in Volume I).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `*Sync` APIs in request handlers (they're fine during startup).
+- Assuming `async` makes CPU work non-blocking. An `async` function that loops for a second still blocks for a second.
+- Parsing or stringifying enormous JSON payloads in the request path.
+- Unvalidated user input in complex regular expressions.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What does it mean to block the event loop, and how do you avoid it?">
+
+Node runs all JavaScript on one thread, so any synchronous work — a long loop, `JSON.parse` of a huge payload, a `*Sync` file call, a pathological regex — stops the event loop, and every other request, timer and health check waits until it finishes. I watch for it with `monitorEventLoopDelay` metrics and CPU profiles. To avoid it I use async APIs for I/O, and for CPU-heavy work I either chunk it and yield with `setImmediate`, move it to a pool of worker threads, or take it off the request path entirely with a job queue. Wrapping it in `async` does not help, because the computation itself still runs on the main thread.
+
+<Fragment slot="deeper">
+
+- **Is `async` code non-blocking?** Only the waiting is; synchronous computation inside it still blocks.
+- **How do you measure event-loop lag?** `perf_hooks.monitorEventLoopDelay`, and percentiles exported as metrics.
+- **Worker threads vs child processes?** Workers share a process and can transfer memory; child processes are fully isolated.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["I/O-bound", "Work dominated by waiting for external systems."],
+  ["CPU-bound", "Work dominated by computation."],
+  ["Blocking", "Occupying the JavaScript thread so nothing else can run."],
+  ["Event-loop delay", "How late timers fire; a key health metric for Node services."],
+  ["ReDoS", "Regular-expression denial of service: input that makes a regex take exponential time."],
+  ["Worker thread", "A separate JS thread with its own event loop and heap, in the same process."],
+]} />

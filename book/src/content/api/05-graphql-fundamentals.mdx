@@ -1,0 +1,199 @@
+---
+title: GraphQL fundamentals
+part: GraphQL
+order: 5
+level: core
+summary: A typed schema, one endpoint, and clients that ask for exactly the fields they need. How queries, mutations, subscriptions and resolvers fit together.
+---
+
+**GraphQL** is a query language and runtime for APIs. The server publishes a **schema** — a typed description of everything clients can ask for. Clients send a **query** describing exactly the shape of data they want, often spanning several related objects, and receive JSON in exactly that shape, usually from a single endpoint (`POST /graphql`). On the server, each field is filled in by a **resolver** function.
+
+<Analogy>
+  REST is a set-menu restaurant: each dish (endpoint) comes as the kitchen decided — sometimes too much, sometimes you need to order three dishes to get a meal. GraphQL is a build-your-own-plate counter: you list exactly what you want on one plate, and the kitchen's stations (resolvers) each add their part.
+</Analogy>
+
+## Why it matters
+
+Many frontends and BFFs (backend-for-frontend layers) use GraphQL. Interviewers ask how it differs from REST, how resolvers execute, how to design a schema, and what problems it introduces (N+1, caching, security) — the next chapter covers those.
+
+## The problems it solves
+
+<Diagram
+  caption="A mobile screen showing a user, their latest orders and each order's items. REST needs several round trips and returns unused fields; GraphQL fetches exactly the needed shape in one request."
+  chart={`flowchart TB
+    subgraph REST["REST"]
+      direction LR
+      r1["GET /users/7<br/>(30 fields, needs 2)"] --> r2["GET /users/7/orders"] --> r3["GET /orders/1/items<br/>GET /orders/2/items …"]
+    end
+    subgraph GQL["GraphQL"]
+      direction LR
+      g1["POST /graphql<br/>one query, exact fields"] --> g2["one JSON response<br/>shaped like the query"]
+    end
+    REST ~~~ GQL`}
+/>
+
+- **Over-fetching**: REST endpoints return fixed representations, often more than a client needs.
+- **Under-fetching**: one screen needs several endpoints (and round trips — painful on mobile networks).
+- **Many clients**: web, iOS, Android and partners each want different shapes; GraphQL lets each ask for its own without new endpoints.
+
+## Schema
+
+The schema is the contract, written in SDL (Schema Definition Language):
+
+```graphql
+type User {
+  id: ID!
+  name: String!
+  email: String!
+  orders(first: Int = 10, after: String): OrderConnection!
+}
+
+type Order {
+  id: ID!
+  status: OrderStatus!
+  total: Money!
+  items: [OrderItem!]!
+  createdAt: DateTime!
+}
+
+enum OrderStatus { PENDING PAID SHIPPED CANCELLED }
+
+type Query {
+  me: User
+  order(id: ID!): Order
+}
+
+type Mutation {
+  placeOrder(input: PlaceOrderInput!): PlaceOrderPayload!
+}
+
+type Subscription {
+  orderStatusChanged(orderId: ID!): Order!
+}
+```
+
+- `!` means non-null. `[OrderItem!]!` = a non-null list of non-null items.
+- Scalars: `ID`, `String`, `Int`, `Float`, `Boolean`, plus custom ones (`DateTime`, `Money`).
+- **Interfaces** and **unions** model polymorphism (`union SearchResult = Product | Article`).
+- **Input types** for mutation arguments.
+- The schema is **introspectable**: tools generate docs, typed clients and autocompletion from it.
+
+## Operations
+
+```graphql
+query OrderScreen($orderId: ID!) {
+  order(id: $orderId) {
+    id
+    status
+    total { amount currency }
+    items { quantity product { name imageUrl } }
+  }
+}
+```
+
+```json
+{ "data": { "order": { "id": "ord_1042", "status": "PAID",
+  "total": { "amount": 4999, "currency": "GBP" },
+  "items": [{ "quantity": 1, "product": { "name": "Keyboard", "imageUrl": "https://…" } }] } } }
+```
+
+| Operation | Purpose | Transport |
+|---|---|---|
+| `query` | read (fields may resolve in parallel) | HTTP POST (or GET for caching) |
+| `mutation` | write (top-level fields run in sequence) | HTTP POST |
+| `subscription` | stream of events | WebSocket (`graphql-ws`) or SSE |
+
+**Fragments** reuse field selections; **variables** keep queries static and safe (never interpolate values into query strings).
+
+## Resolvers and execution
+
+Each field has a **resolver**: a function `(parent, args, context, info) => value`. Execution walks the query tree, calling resolvers for each requested field; nested resolvers receive their parent's result.
+
+<Diagram
+  caption="Executing the query: resolvers run top-down; each nested field's resolver receives its parent object."
+  chart={`flowchart TB
+    Q["Query.order(id)"] --> O["Order object"]
+    O --> F1["Order.status<br/>(default: parent.status)"]
+    O --> F2["Order.total"]
+    O --> F3["Order.items<br/>(load items for this order)"]
+    F3 --> I["OrderItem objects"]
+    I --> F4["OrderItem.product<br/>(load product by id)"]`}
+  steps={[
+    { nodes: ["Q", "O"], text: "The root resolver `Query.order` loads the order by ID from the database or a service." },
+    { nodes: ["O", "F1", "F2"], text: "Simple fields use default resolvers that read the property from the parent object." },
+    { nodes: ["O", "F3", "I"], text: "`Order.items` has its own resolver that loads the items for this order." },
+    { nodes: ["I", "F4"], text: "For each item, `OrderItem.product` loads its product — once per item. This is where the **N+1 problem** comes from (next chapter)." },
+  ]}
+/>
+
+```js
+const resolvers = {
+  Query: {
+    order: (_, { id }, ctx) => ctx.orders.findById(id, ctx.user),   // auth via context
+  },
+  Order: {
+    items: (order, _, ctx) => ctx.items.byOrderId(order.id),
+  },
+  OrderItem: {
+    product: (item, _, ctx) => ctx.loaders.product.load(item.productId), // batched with DataLoader
+  },
+  Mutation: {
+    placeOrder: async (_, { input }, ctx) => {
+      const order = await ctx.orders.place(input, ctx.user);
+      return { order, errors: [] };
+    },
+  },
+};
+```
+
+The `context` object (built per request) carries the authenticated user, data loaders and service clients.
+
+## Errors
+
+GraphQL usually returns **HTTP 200** even when parts fail; errors appear in an `errors` array alongside partial `data`. Two common patterns:
+
+- **Top-level errors** for unexpected failures and authentication problems.
+- **Errors as data** for expected business outcomes: a mutation payload with typed results (`PlaceOrderPayload { order, userErrors { field message } }`, or a union `OrderResult = Order | OutOfStockError`), so clients handle them with types.
+
+## Schema design tips
+
+- Design around **client use cases** and domain concepts, not database tables.
+- Use **connections** (Relay-style `edges`/`node`/`pageInfo`) for paginated lists.
+- Mutations: one specific mutation per business action (`placeOrder`, `cancelOrder`), each with an **input** type and a **payload** type.
+- Evolve by **adding** fields and marking old ones `@deprecated(reason: "…")` — GraphQL APIs typically avoid versions.
+- Global object IDs plus a `node(id:)` query help client caches.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Mirroring database tables directly as types.
+- Generic `updateUser(data: JSON)` mutations instead of intention-revealing ones.
+- String-concatenating variables into queries.
+- Ignoring N+1, query cost and authorisation at the field level (next chapter).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is GraphQL and how is it different from REST?">
+
+GraphQL exposes a single typed schema, usually at one endpoint, and clients send queries listing exactly the fields and nested relationships they need, getting a response in that shape. That avoids REST's over-fetching and the multiple round trips to assemble a screen, and it lets web, mobile and partners each request their own shape without new endpoints. Queries read, mutations write and run sequentially, and subscriptions stream updates over WebSockets. On the server, each field has a resolver that receives its parent object, arguments and a per-request context with the user and data loaders. The schema is introspectable, so typed clients and docs are generated, and it evolves by adding fields and deprecating old ones rather than versioning. The trade-offs are harder HTTP caching, N+1 resolver queries and the need for query-cost limits.
+
+<Fragment slot="deeper">
+
+- **What is a resolver?** A function producing a field's value from its parent, arguments and context.
+- **Why do mutations run sequentially?** Top-level mutation fields are executed in order to make side effects predictable.
+- **How does GraphQL handle versioning?** Additive evolution with `@deprecated`.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Schema", "Typed description of all data and operations a GraphQL API offers."],
+  ["Query / mutation / subscription", "Read, write and streaming operations."],
+  ["Resolver", "Function that returns the value for one field."],
+  ["Fragment", "A reusable selection of fields."],
+  ["Introspection", "Querying the schema itself, enabling tools and codegen."],
+  ["Connection", "Standard cursor-paginated list type (edges, node, pageInfo)."],
+]} />

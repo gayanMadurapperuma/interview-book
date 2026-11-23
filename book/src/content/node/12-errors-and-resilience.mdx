@@ -1,0 +1,195 @@
+---
+title: Errors, timeouts and resilience in a Node service
+part: Building services
+order: 12
+level: core
+summary: How errors flow through a Node service, why unhandled rejections crash it, and the timeout–retry–circuit-breaker toolkit that keeps it up when its dependencies aren't.
+demo: node-unhandled-rejection
+---
+
+A production service has two error problems. The first is **internal**: making sure every error is caught somewhere sensible, logged with context, and turned into a proper response — and that truly unexpected errors restart the process cleanly. The second is **external**: the databases and APIs you depend on will be slow or down sometimes, and your service must stay responsive anyway. This chapter covers both.
+
+<Analogy>
+  Think of electrical safety in a house. Every appliance has its own fuse (local error handling), the consumer unit trips for anything unexpected (process-level handlers and restarts), and a circuit breaker cuts power to a faulty circuit so the rest of the house keeps working (resilience patterns for dependencies).
+</Analogy>
+
+## Why it matters
+
+Interviewers want to hear about centralised error handling, the difference between operational errors and bugs, what happens on an unhandled rejection, and how you'd stop a slow dependency from taking your whole service down.
+
+## Operational errors versus programmer errors
+
+| | Operational errors | Programmer errors (bugs) |
+|---|---|---|
+| Examples | network timeout, DB down, invalid user input, file not found | `TypeError: cannot read 'id' of undefined`, wrong argument types |
+| Expected? | yes — they will happen | no |
+| Response | handle: retry, fallback, 4xx/5xx response | fix the code; crash and restart is acceptable |
+
+Handle operational errors where they occur or centrally. For programmer errors, the safest thing is often to **let the process crash** and have a supervisor restart it — the process may be in an unknown state.
+
+## The forgotten `await`
+
+```js
+async function getUser(id) {
+  throw new Error('database is down');
+}
+
+app.get('/user/:id', (req, res) => {
+  getUser(req.params.id);       // no await, no .catch
+  res.send('ok');               // reports success for a failed operation
+});
+```
+
+The rejected promise has no handler. Node emits `unhandledRejection`, and since **Node 15 the default is to crash the process**. A `try/catch` around `getUser()` would not help either — nothing is thrown synchronously.
+
+<DemoLink id="node-unhandled-rejection" />
+
+## Centralised handling
+
+Route every error to one place. In Express 5 (and Fastify, NestJS), rejected promises from async handlers are forwarded automatically; in Express 4 you need a wrapper.
+
+```js
+// Express 4 helper
+const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+app.get('/orders/:id', asyncHandler(async (req, res) => {
+  const order = await orders.get(req.params.id);
+  if (!order) throw new NotFoundError('order');
+  res.json(order);
+}));
+
+// one error handler at the end
+app.use((err, req, res, next) => {
+  const status = err.status ?? 500;
+  req.log.error({ err, status }, 'request failed');
+  res.status(status).json({ code: err.code ?? 'INTERNAL', message: status < 500 ? err.message : 'Internal error' });
+});
+```
+
+<Diagram
+  caption="Errors from anywhere in a request flow to one handler, which logs with context and maps them to safe responses."
+  chart={`flowchart LR
+    R["route handler"] -- "throw / reject" --> M["error middleware"]
+    V["validation"] -- "ValidationError" --> M
+    S["service layer"] -- "NotFoundError" --> M
+    D["db / http client"] -- "wrapped with cause" --> M
+    M --> L["structured log<br/>request id, user, stack"]
+    M --> RESP["response<br/>4xx: message · 5xx: generic"]`}
+/>
+
+## Process-level safety nets
+
+```js
+process.on('unhandledRejection', (reason) => {
+  logger.fatal({ err: reason }, 'unhandled rejection');
+  shutdown(1);
+});
+process.on('uncaughtException', (err) => {
+  logger.fatal({ err }, 'uncaught exception');
+  shutdown(1);                  // log, try to close gracefully, then exit
+});
+```
+
+These are last resorts for logging — not a way to keep running. Pair them with a supervisor (Kubernetes, systemd, PM2) that restarts the process.
+
+## Resilience against slow or failing dependencies
+
+The most dangerous failure isn't a dependency that's **down** (fast errors), but one that's **slow**. Every request waiting on it holds a socket, memory and often a database connection; soon your service is out of resources and fails too — a **cascading failure**.
+
+<Diagram
+  caption="The resilience toolkit, from the call outward."
+  chart={`flowchart LR
+    REQ["incoming request"] --> BH["bulkhead<br/>limit concurrent calls"]
+    BH --> CB{"circuit breaker<br/>open?"}
+    CB -- "open: fail fast" --> FB["fallback<br/>cached / default / 503"]
+    CB -- "closed" --> TO["call with timeout"]
+    TO -- "failed, retryable" --> RT["retry with backoff + jitter"]
+    RT --> TO
+    TO -- "ok" --> OK["response"]`}
+  steps={[
+    { nodes: ["REQ", "BH"], text: "**Bulkhead**: cap how many calls to this dependency can be in flight, so it can't consume all resources." },
+    { nodes: ["BH", "CB", "FB"], text: "**Circuit breaker**: if recent calls mostly failed, stop calling for a while and fail fast with a **fallback**." },
+    { nodes: ["CB", "TO"], text: "**Timeout**: every call has a deadline and is actually cancelled when it passes." },
+    { nodes: ["TO", "RT"], text: "**Retry** transient failures — idempotent calls only — with exponential backoff and random jitter." },
+    { nodes: ["TO", "OK"], text: "Most of the time, the call simply succeeds." },
+  ]}
+/>
+
+### Timeouts
+
+```js
+const res = await fetch(`${INVENTORY}/stock/${sku}`, { signal: AbortSignal.timeout(800) });
+```
+
+Set timeouts from your own latency budget: if your endpoint must answer in 1 s, a dependency can't have 30 s.
+
+### Retries with backoff and jitter
+
+```js
+async function withRetry(fn, { retries = 3, base = 100 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const retryable = err.name === 'TimeoutError' || err.status === 503 || err.code === 'ECONNRESET';
+      if (!retryable || attempt >= retries) throw err;
+      const delay = Math.random() * base * 2 ** attempt;    // "full jitter"
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+```
+
+Only retry **idempotent** operations (safe to repeat), or use idempotency keys. Without jitter, thousands of clients retry in sync and hammer the recovering service (a *thundering herd*). Retries at several layers multiply — 3 retries at 3 layers is up to 64 calls.
+
+### Circuit breaker
+
+A breaker counts recent failures. When they exceed a threshold it **opens**: calls fail immediately for a cool-down period. Then it goes **half-open** and lets a trial request through; success closes it again.
+
+<Diagram
+  caption="Circuit breaker states."
+  chart={`stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open: failure rate over threshold
+    Open --> HalfOpen: after cool-down
+    HalfOpen --> Closed: trial call succeeds
+    HalfOpen --> Open: trial call fails`}
+/>
+
+Libraries such as `opossum` (Node) or `cockatiel` implement breakers, retries, timeouts and bulkheads together. The System Design volume discusses these patterns in depth.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- No timeout on outbound calls.
+- Retrying non-idempotent operations (payments!) or retrying without backoff and jitter.
+- Catching errors and responding `200` anyway.
+- Keeping the process alive after `uncaughtException`.
+- Leaking internal error messages and stack traces to clients.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you handle errors and failing dependencies in a Node service?">
+
+Inside the service I separate operational errors, which I handle — invalid input, not found, a dependency failing — from programmer errors, which are bugs. Async errors are rejected promises, so every promise is awaited, and errors flow to one central error handler that logs them with request context and returns a safe response. Process-level handlers for unhandled rejections and uncaught exceptions only log and shut down cleanly, and the orchestrator restarts the process. For dependencies, every outbound call has a timeout that actually cancels it; transient failures on idempotent calls are retried with exponential backoff and jitter; a circuit breaker fails fast when a dependency is clearly unhealthy; and bulkheads cap concurrent calls so one slow dependency can't exhaust everything.
+
+<Fragment slot="deeper">
+
+- **What does Node do on an unhandled rejection?** Since v15, it crashes the process by default.
+- **Why jitter?** It spreads retries out so clients don't retry in lockstep.
+- **Why are slow dependencies worse than down ones?** They hold resources for the whole timeout, causing cascading failure.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Operational error", "An expected runtime failure, such as a timeout or invalid input."],
+  ["Programmer error", "A bug; usually best handled by crashing and restarting."],
+  ["Exponential backoff", "Increasing the wait between retries exponentially."],
+  ["Jitter", "Randomness added to retry delays to avoid synchronised retries."],
+  ["Circuit breaker", "Stops calling a failing dependency for a while, failing fast instead."],
+  ["Bulkhead", "A limit on concurrent use of one dependency, isolating its failures."],
+]} />

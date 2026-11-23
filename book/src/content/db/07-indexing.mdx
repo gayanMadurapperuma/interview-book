@@ -1,0 +1,159 @@
+---
+title: "Indexes: B-trees, composite indexes and selectivity"
+part: Performance
+order: 7
+level: core
+summary: An index is a sorted shortcut to your rows. Knowing how a B-tree is laid out tells you which queries it can speed up — and which it can't.
+---
+
+Without an index, the only way to find rows matching `WHERE email = 'ada@x.com'` is to read **every row** in the table — a **sequential scan**. An **index** is a separate data structure, kept sorted by one or more columns, that lets the database jump almost straight to the matching rows. The most common kind is the **B-tree**. Indexes make reads dramatically faster, but every index costs disk space and slows down every write.
+
+<Analogy>
+  The index at the back of a textbook. To find "photosynthesis" you don't read all 600 pages; you look it up alphabetically and jump to pages 112 and 340. But the index only helps for the way it's sorted: an alphabetical index can't help you find "every word on page 200", and adding a new chapter means updating the index too.
+</Analogy>
+
+## Why it matters
+
+Missing or wrong indexes are the single most common cause of slow applications. Interviewers ask how indexes work, how to choose column order in a composite index, why an index isn't being used, and what indexes cost.
+
+## How a B-tree works
+
+A B-tree is a balanced tree of sorted keys. The root and inner pages hold separator keys that route you; the **leaf** pages hold every indexed value, in order, each with a pointer to its table row. Leaf pages are linked to each other, so range scans just walk sideways.
+
+<Diagram
+  caption="Looking up email = 'kim@…' in a B-tree: three page reads instead of millions of rows."
+  chart={`flowchart TB
+    R["root<br/>[ g · p ]"] --> L1["inner<br/>[ c · e ]"]
+    R --> L2["inner<br/>[ j · m ]"]
+    R --> L3["inner<br/>[ s · v ]"]
+    L2 --> LF1["leaf: g… i…"]
+    L2 --> LF2["leaf: j… kim@ → row 8812 · l…"]
+    L2 --> LF3["leaf: m… o…"]
+    LF1 --- LF2 --- LF3
+    LF2 --> ROW[("table row 8812")]`}
+  steps={[
+    { nodes: ["R"], text: "Start at the root. 'kim' sorts between 'g' and 'p', so follow the middle pointer." },
+    { nodes: ["R", "L2"], text: "In the inner page, 'kim' falls between 'j' and 'm'." },
+    { nodes: ["L2", "LF2"], text: "The leaf page contains the exact key with a pointer to the row." },
+    { nodes: ["LF2", "ROW"], text: "One more read fetches the row. A table of 100 million rows needs only about 4 levels." },
+    { nodes: ["LF1", "LF2", "LF3"], text: "Leaves are linked in order, so `BETWEEN`, `>`, `ORDER BY` and prefix `LIKE 'ki%'` can walk across them." },
+  ]}
+/>
+
+Because the tree is sorted, a B-tree helps with:
+
+- equality: `WHERE email = ?`
+- ranges: `WHERE created_at >= ?`, `BETWEEN`
+- sorting: `ORDER BY created_at DESC LIMIT 20` (read the index in order, stop after 20)
+- prefix matches: `LIKE 'abc%'` (not `'%abc'`)
+- `MIN`/`MAX`
+
+## Selectivity
+
+An index is useful when it narrows the search a lot. **Selectivity** is the fraction of rows a condition matches. `WHERE id = ?` matches one row (very selective). `WHERE is_active = true` might match 95% of rows; jumping through the index for each one is slower than just scanning the table, so the planner ignores the index. That's not a bug — it's the planner being right.
+
+## Composite indexes and column order
+
+An index on `(customer_id, created_at)` is sorted by `customer_id` first, then by `created_at` **within** each customer — like a phone book sorted by last name, then first name.
+
+<Diagram
+  caption="A composite index can only be used from its leftmost column. Think: can I find my rows as one contiguous slice of this sort order?"
+  chart={`flowchart TB
+    IDX["index (customer_id, status, created_at)"] --> Q1["WHERE customer_id = 7<br/>✓ uses index"]
+    IDX --> Q2["WHERE customer_id = 7 AND status = 'paid'<br/>✓ uses both columns"]
+    IDX --> Q3["WHERE customer_id = 7 AND status = 'paid'<br/>ORDER BY created_at DESC LIMIT 10<br/>✓ filter + sort from the index"]
+    IDX --> Q4["WHERE status = 'paid'<br/>✗ leftmost column missing"]
+    IDX --> Q5["WHERE customer_id = 7 AND created_at > ?<br/>~ uses customer_id; created_at not contiguous<br/>because status sits between"]`}
+/>
+
+Guidelines for ordering columns:
+
+1. Columns compared with **equality** first.
+2. Then the column used for **range** or **sorting**.
+3. Among equality columns, it doesn't matter much for correctness; put the ones that are always present first.
+
+A query that filters `customer_id = ?` and sorts by `created_at` wants exactly `(customer_id, created_at)` — the database reads one contiguous, already-sorted slice and stops at the `LIMIT`.
+
+## Covering indexes
+
+If the index contains **every column the query needs**, the database never visits the table: an **index-only scan**.
+
+```sql
+CREATE INDEX orders_customer_recent ON orders (customer_id, created_at DESC) INCLUDE (total_cents, status);
+
+SELECT created_at, total_cents, status
+FROM orders WHERE customer_id = $1
+ORDER BY created_at DESC LIMIT 20;      -- answered entirely from the index
+```
+
+## Other index types (PostgreSQL)
+
+| Type | Good for |
+|---|---|
+| B-tree (default) | equality, ranges, sorting |
+| Hash | equality only |
+| GIN | `jsonb` containment, arrays, full-text search |
+| GiST | geometric data, ranges, exclusion constraints |
+| BRIN | huge, naturally ordered tables (time-series): tiny, approximate |
+| Partial index | `WHERE status = 'pending'` — index only the rows you query |
+| Expression index | `ON users (lower(email))` for case-insensitive lookups |
+
+```sql
+CREATE INDEX jobs_pending ON jobs (created_at) WHERE status = 'pending';   -- small and fast
+CREATE UNIQUE INDEX users_email_ci ON users (lower(email));
+```
+
+## When an index can't be used
+
+```sql
+WHERE lower(email) = 'ada@x.com'        -- function on the column (needs an expression index)
+WHERE created_at::date = '2026-11-23'   -- cast on the column; use a range instead
+WHERE name LIKE '%smith'                -- leading wildcard
+WHERE customer_id = '42'                -- type mismatch may prevent use (varies)
+WHERE a = 1 OR b = 2                    -- may need two indexes + bitmap OR
+```
+
+Rewrite to compare the **bare column** with a value: `created_at >= '2026-11-23' AND created_at < '2026-11-24'`.
+
+## The cost of indexes
+
+- Every `INSERT`, and every `UPDATE` touching an indexed column, must also update every index.
+- Indexes use disk and, more importantly, **memory** — hot indexes should fit in RAM.
+- Unused indexes are pure cost. PostgreSQL's `pg_stat_user_indexes` shows how often each is used.
+- On large tables, create indexes without blocking writes: `CREATE INDEX CONCURRENTLY`.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Indexing every column separately instead of designing composite indexes for real queries.
+- Wrong column order in a composite index.
+- Wrapping indexed columns in functions or casts in `WHERE`.
+- Expecting an index on a low-selectivity column (booleans, status with 3 values) to help on its own.
+- Forgetting foreign-key columns: joins and `ON DELETE CASCADE` on unindexed foreign keys are slow.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does a database index work, and how do you design a composite index?">
+
+The default index is a B-tree: a balanced tree of sorted keys, a few levels deep even for huge tables, with linked leaf pages pointing to rows. Because it's sorted, it serves equality lookups, ranges, `ORDER BY` with `LIMIT` and prefix matches. A composite index is sorted by the first column, then the second within it, so it can only be used from the leftmost column onward. I put equality-filtered columns first and the range or sort column last — for "a customer's latest orders", `(customer_id, created_at)` gives one contiguous, pre-sorted slice. If I include the selected columns, it becomes covering and avoids table lookups entirely. Indexes speed reads but slow every write and use memory, so I index for real query patterns, check with EXPLAIN, and drop unused ones.
+
+<Fragment slot="deeper">
+
+- **Why might the planner ignore an index?** Low selectivity — scanning is cheaper — or a function/cast on the column.
+- **What's a covering index?** One containing all columns the query needs, enabling index-only scans.
+- **Partial index?** Indexes only rows matching a condition — smaller and faster for targeted queries.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["B-tree", "Balanced, sorted tree index supporting equality, range and ordered scans."],
+  ["Sequential scan", "Reading every row of a table."],
+  ["Selectivity", "The fraction of rows a condition matches; lower is better for indexes."],
+  ["Composite index", "An index on multiple columns, sorted left to right."],
+  ["Covering index", "An index containing every column a query needs."],
+  ["Partial index", "An index over only the rows matching a predicate."],
+]} />

@@ -1,0 +1,147 @@
+---
+title: gRPC and Protocol Buffers
+part: Beyond request–response
+order: 7
+level: core
+summary: Strongly typed, fast remote procedure calls over HTTP/2 — the common choice for service-to-service communication, including streaming.
+---
+
+**gRPC** is a framework for **remote procedure calls**: one service calls a method on another as if it were a local function. The interface is defined in a `.proto` file using **Protocol Buffers** (protobuf), a compact binary serialisation format. From that file, tools generate typed client and server code in many languages. Calls travel over **HTTP/2**, which allows multiplexing and **streaming** in either or both directions.
+
+<Analogy>
+  REST with JSON is like sending letters in plain English — anyone can read them, but they're long and a typo isn't caught until someone reads it. gRPC is like a standardised order form printed from the same template on both sides: compact, machine-checked, and impossible to fill in with the wrong kind of value.
+</Analogy>
+
+## Why it matters
+
+Microservice architectures commonly use gRPC internally. Interviewers ask when to choose gRPC over REST, how protobuf schemas evolve safely, what the streaming modes are, and how deadlines work.
+
+## Defining a service
+
+```protobuf
+syntax = "proto3";
+package inventory.v1;
+
+service InventoryService {
+  rpc GetStock (GetStockRequest) returns (Stock);                         // unary
+  rpc WatchStock (WatchStockRequest) returns (stream StockChange);       // server streaming
+  rpc ImportStock (stream StockRow) returns (ImportSummary);             // client streaming
+  rpc Sync (stream SyncMessage) returns (stream SyncMessage);            // bidirectional
+}
+
+message GetStockRequest { string sku = 1; string warehouse_id = 2; }
+message Stock { string sku = 1; int32 available = 2; int32 reserved = 3; }
+```
+
+The **field numbers** (`= 1`, `= 2`) identify fields on the wire — names don't travel, which is part of why messages are small.
+
+<Diagram
+  caption="One .proto file generates typed stubs for every language. Calls are binary protobuf over multiplexed HTTP/2 streams."
+  chart={`flowchart LR
+    P["inventory.proto"] --> GEN["protoc / buf<br/>code generation"]
+    GEN --> CL["Node client stub<br/>getStock(req): Promise of Stock"]
+    GEN --> SV["Go server interface<br/>GetStock(ctx, req)"]
+    CL -- "HTTP/2 stream<br/>protobuf binary" --> SV`}
+  flow
+/>
+
+## Four call types
+
+| Type | Shape | Example |
+|---|---|---|
+| Unary | one request → one response | `GetStock` |
+| Server streaming | one request → stream of responses | live price updates, large result sets |
+| Client streaming | stream of requests → one response | uploading telemetry or a big import |
+| Bidirectional | both stream independently | chat, collaborative sync |
+
+## gRPC vs REST
+
+| | gRPC | REST + JSON |
+|---|---|---|
+| Contract | required `.proto`, generated code | optional (OpenAPI) |
+| Payload | binary protobuf — small, fast to parse | text JSON — readable, larger |
+| Transport | HTTP/2 (multiplexed, streaming) | HTTP/1.1 or 2 |
+| Streaming | built in, all directions | SSE/WebSockets separately |
+| Browser support | needs gRPC-Web or a proxy (or Connect protocol) | native |
+| Caching | none at HTTP level | HTTP caching works |
+| Debugging | needs tooling (grpcurl, Postman) | curl, browser |
+| Best for | internal service-to-service, low latency, polyglot teams | public APIs, browsers, simplicity |
+
+A common architecture: **REST or GraphQL at the edge** for browsers and partners, **gRPC between internal services**.
+
+## Deadlines, status codes, metadata
+
+- **Deadlines**: the client sets an absolute deadline; it propagates to downstream calls, and servers can stop work when it passes. Always set one.
+- **Status codes**: `OK`, `INVALID_ARGUMENT`, `NOT_FOUND`, `ALREADY_EXISTS`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED`, `UNAVAILABLE` (retryable), `DEADLINE_EXCEEDED`, `INTERNAL`.
+- **Metadata**: key–value headers for auth tokens, trace IDs.
+- **Interceptors**: middleware for logging, auth, retries, metrics.
+
+```js
+// @grpc/grpc-js client with a deadline
+client.getStock({ sku: 'KB-1', warehouseId: 'lon-1' },
+  { deadline: Date.now() + 300 },
+  (err, stock) => { /* err.code === grpc.status.DEADLINE_EXCEEDED on timeout */ });
+```
+
+## Evolving protobuf schemas safely
+
+<Diagram
+  caption="Rules for backward- and forward-compatible changes."
+  chart={`flowchart TB
+    OK["Safe"] --> o1["add a new field with a new number"]
+    OK --> o2["remove a field — and reserve its number and name"]
+    OK --> o3["add a new RPC or message"]
+    BAD["Breaking"] --> b1["change a field's number or type"]
+    BAD --> b2["reuse an old field number"]
+    BAD --> b3["rename/remove RPCs clients still call"]`}
+/>
+
+- Old readers ignore unknown fields; new readers see defaults for missing fields (proto3 has no "required").
+- `reserved 4; reserved "old_name";` prevents accidental reuse.
+- Version packages for big changes: `inventory.v1` → `inventory.v2`.
+- Tools like `buf breaking` check compatibility in CI.
+
+## Load balancing gotcha
+
+gRPC reuses a long-lived HTTP/2 connection and multiplexes requests over it. An L4 load balancer balances **connections**, not requests — so one client may send all traffic to one server. Use L7 (HTTP/2-aware) proxies like Envoy, a service mesh, or client-side load balancing.
+
+## Related: Connect, tRPC
+
+- **Connect** (Buf) speaks gRPC, gRPC-Web and a simple HTTP+JSON protocol from the same proto definitions — browser-friendly.
+- **tRPC** gives end-to-end type safety between a TypeScript server and client without a schema language — great inside a TypeScript monorepo, not for polyglot or public APIs.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- No deadlines on calls.
+- Reusing or renumbering protobuf fields.
+- L4 load balancing with long-lived gRPC connections.
+- Exposing gRPC directly to browsers without gRPC-Web/Connect.
+- Huge unary messages instead of streaming.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="When would you choose gRPC over REST?">
+
+For internal service-to-service communication where performance and contracts matter. gRPC defines services and messages in a protobuf file, generates typed clients and servers for every language, and sends compact binary messages over HTTP/2 with multiplexing, so calls are fast and mismatched types are caught at build time. It also supports server, client and bidirectional streaming natively, and has first-class deadlines that propagate through call chains. I'd keep REST or GraphQL at the edge for browsers and partners, since gRPC needs gRPC-Web or a proxy there and isn't HTTP-cacheable. I'd evolve schemas only additively — new field numbers, reserved old ones — check compatibility in CI, set deadlines on every call, and use L7 or client-side load balancing because requests share long-lived connections.
+
+<Fragment slot="deeper">
+
+- **Why are protobuf messages small?** Binary encoding with numeric field tags instead of names.
+- **What are the four RPC types?** Unary, server streaming, client streaming, bidirectional.
+- **How does a deadline differ from a timeout?** It's an absolute time that propagates to downstream calls.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["RPC", "Remote procedure call: invoking a function on another machine."],
+  ["Protocol Buffers", "Compact binary serialisation with a schema language."],
+  ["Field number", "Numeric tag identifying a protobuf field on the wire."],
+  ["Streaming RPC", "A call where requests and/or responses are streams."],
+  ["Deadline", "Absolute time by which a call must complete, propagated downstream."],
+  ["gRPC-Web / Connect", "Protocols making gRPC services usable from browsers."],
+]} />

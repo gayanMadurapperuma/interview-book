@@ -1,0 +1,83 @@
+---
+import { withBase } from '../lib/subjects';
+const pagefindUrl = withBase('/pagefind/pagefind.js');
+---
+<button class="search-trigger" id="searchOpen" aria-label="Search the book">
+  <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.8" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.6 10.6 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+  <span class="st-text">Search</span>
+  <kbd>⌘K</kbd>
+</button>
+
+<dialog class="search-dialog" id="searchDialog" aria-label="Search">
+  <div class="sd-box">
+    <div class="sd-input-row">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.8" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.6 10.6 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <input id="searchInput" type="search" placeholder="Search chapters — closures, MVCC, backpressure…" autocomplete="off" spellcheck="false" />
+      <kbd>esc</kbd>
+    </div>
+    <ol class="sd-results" id="searchResults" role="listbox"></ol>
+    <p class="sd-empty" id="searchEmpty" hidden></p>
+  </div>
+</dialog>
+
+<script define:vars={{ pagefindUrl }}>
+  const dlg = document.getElementById('searchDialog');
+  const input = document.getElementById('searchInput');
+  const list = document.getElementById('searchResults');
+  const empty = document.getElementById('searchEmpty');
+  let pf = null, sel = -1, seq = 0;
+
+  async function load() {
+    if (pf) return pf;
+    try {
+      pf = await import(/* @vite-ignore */ pagefindUrl);
+      await pf.options({ excerptLength: 22 });
+    } catch (e) {
+      pf = false;
+    }
+    return pf;
+  }
+  function open() { dlg.showModal(); input.value = ''; render([]); input.focus(); load(); }
+  function highlight(i) {
+    const items = list.querySelectorAll('a');
+    items.forEach((a, k) => a.setAttribute('aria-selected', String(k === i)));
+    sel = i;
+    items[i]?.scrollIntoView({ block: 'nearest' });
+  }
+  function render(items, q) {
+    list.innerHTML = '';
+    empty.hidden = true;
+    if (q && !items.length) { empty.hidden = false; empty.textContent = pf === false ? 'Search is available on the built site (run npm run build).' : `Nothing found for “${q}”.`; }
+    for (const r of items) {
+      const li = document.createElement('li');
+      const sub = r.meta && r.meta.subject ? `<span class="sd-sub">${r.meta.subject}</span>` : '';
+      li.innerHTML = `<a href="${r.url}">${sub}<span class="sd-title">${r.meta?.title || r.url}</span><span class="sd-ex">${r.excerpt}</span></a>`;
+      list.appendChild(li);
+    }
+    sel = -1;
+    if (items.length) highlight(0);
+  }
+  input.addEventListener('input', async () => {
+    const q = input.value.trim();
+    const my = ++seq;
+    if (!q) return render([]);
+    const api = await load();
+    if (!api) return render([], q);
+    const res = await api.debouncedSearch(q, {}, 120);
+    if (!res || my !== seq) return;
+    const data = await Promise.all(res.results.slice(0, 8).map((r) => r.data()));
+    if (my === seq) render(data, q);
+  });
+  input.addEventListener('keydown', (e) => {
+    const n = list.querySelectorAll('a').length;
+    if (e.key === 'ArrowDown') { e.preventDefault(); if (n) highlight((sel + 1) % n); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); if (n) highlight((sel - 1 + n) % n); }
+    if (e.key === 'Enter') { const a = list.querySelectorAll('a')[sel]; if (a) location.href = a.href; }
+  });
+  dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+  document.getElementById('searchOpen').addEventListener('click', open);
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); dlg.open ? dlg.close() : open(); }
+    if (e.key === '/' && !dlg.open && !/input|textarea/i.test(document.activeElement?.tagName || '')) { e.preventDefault(); open(); }
+  });
+</script>

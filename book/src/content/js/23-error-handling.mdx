@@ -1,0 +1,212 @@
+---
+title: Error handling
+part: Asynchrony
+order: 23
+level: core
+summary: How errors travel through synchronous and asynchronous code, how to design useful custom errors, and where to catch them.
+---
+
+An **error** in JavaScript is usually an object created with `new Error(message)` (or a subclass). Throwing it stops normal execution and sends it up the call stack until some `try/catch` catches it. In asynchronous code, errors travel differently: as **rejected promises**. Good error handling means knowing how errors travel, giving them enough information to be useful, and catching them in the right place — not everywhere.
+
+<Analogy>
+  Throwing an error is like pulling a fire alarm. Everyone stops what they're doing and the alarm goes up through the building until someone responsible (a `catch`) deals with it. If nobody does, the whole building is evacuated (the program crashes). Asynchronous errors are like an alarm in a different building: your local fire warden can't hear it unless they're specifically listening (`await` or `.catch`).
+</Analogy>
+
+## Why it matters
+
+Error handling separates toy code from production code. Interviewers ask how errors propagate through promises, how you'd design an API's error responses, and what happens to an error thrown in a callback. Bad error handling causes swallowed failures, crashed servers and logs that are useless at 3 a.m.
+
+## Throwing and catching
+
+```js
+function parseAge(input) {
+  const age = Number(input);
+  if (!Number.isInteger(age) || age < 0) {
+    throw new RangeError(`invalid age: ${input}`);
+  }
+  return age;
+}
+
+try {
+  parseAge('abc');
+} catch (err) {
+  console.error(err.name, err.message);   // RangeError invalid age: abc
+} finally {
+  // always runs: cleanup, close files, release locks
+}
+```
+
+Always throw `Error` objects (not strings): they capture a **stack trace** that shows where the error was created.
+
+### Built-in error types
+
+| Type | Thrown when |
+|---|---|
+| `TypeError` | A value is the wrong type (calling `undefined`, reading a property of `null`) |
+| `ReferenceError` | A name does not exist, or is used in its TDZ |
+| `RangeError` | A number is out of range, stack overflow |
+| `SyntaxError` | Invalid code, or invalid `JSON.parse` input |
+| `AggregateError` | Several errors at once (`Promise.any`) |
+
+## How errors travel
+
+<Diagram
+  caption="Synchronous errors unwind the call stack. Async errors travel along the promise chain instead — only await or .catch can see them."
+  chart={`flowchart TB
+    subgraph Sync["Synchronous"]
+      direction TB
+      s3["validate() throws"] --> s2["save() — no catch, unwinds"] --> s1["handler() — try/catch catches it"]
+    end
+    subgraph Async["Asynchronous"]
+      direction TB
+      a3["db.query() rejects"] --> a2["async save() — awaits, rethrows"] --> a1["handler() — awaits inside try/catch, catches it"]
+      a3 -. "if nobody awaits" .-> U["unhandled rejection"]
+    end`}
+/>
+
+- **Synchronous:** an uncaught throw goes up the call stack, frame by frame, until a `catch`.
+- **Promises:** a throw inside `.then` or an `async` function becomes a rejected promise. It reaches your code only through `await` (inside `try/catch`) or `.catch()`.
+- **Callbacks scheduled for later** (`setTimeout`, event emitters) run on a fresh stack. A `try/catch` around the code that *scheduled* them cannot catch their errors.
+
+```js
+try {
+  setTimeout(() => { throw new Error('boom'); }, 0);
+} catch {
+  // never reached
+}
+```
+
+## Custom errors
+
+Custom error classes let callers handle different failures differently, and carry structured details.
+
+```js
+class AppError extends Error {
+  constructor(message, { status = 500, code = 'INTERNAL', cause } = {}) {
+    super(message, { cause });     // `cause` keeps the original error
+    this.name = this.constructor.name;
+    this.status = status;
+    this.code = code;
+  }
+}
+class NotFoundError extends AppError {
+  constructor(what, opts) { super(`${what} not found`, { status: 404, code: 'NOT_FOUND', ...opts }); }
+}
+class ValidationError extends AppError {
+  constructor(details) {
+    super('validation failed', { status: 400, code: 'VALIDATION' });
+    this.details = details;
+  }
+}
+```
+
+### Wrapping with `cause`
+
+When you catch a low-level error and throw a higher-level one, attach the original as `cause` so no information is lost:
+
+```js
+async function getInvoice(id) {
+  try {
+    return await db.query('SELECT * FROM invoices WHERE id = $1', [id]);
+  } catch (err) {
+    throw new AppError(`could not load invoice ${id}`, { cause: err });
+  }
+}
+// later: err.cause is the original database error, with its own stack
+```
+
+<Diagram
+  caption="Each layer translates the error into its own vocabulary but keeps the original in cause, forming a chain you can log."
+  chart={`flowchart LR
+    D["Driver error<br/>ECONNRESET"] -- "cause" --> R["Repository error<br/>could not load invoice 42"] -- "cause" --> H["HTTP 503<br/>code: UPSTREAM_UNAVAILABLE"]`}
+  flow
+/>
+
+## Where to catch
+
+Catch an error only where you can **do something useful** with it:
+
+- **Recover** — retry, use a fallback or cached value.
+- **Translate** — turn a database error into a domain error with `cause`.
+- **Report** — at the top of a request, a job or the process, log it and return a clean response.
+
+Catching everywhere and logging the same error at every level ("log and rethrow") produces noise. Catching and ignoring hides bugs.
+
+```js
+// Express-style central error handler: one place turns errors into responses
+app.use((err, req, res, next) => {
+  const status = err.status ?? 500;
+  if (status >= 500) logger.error({ err, path: req.path });
+  res.status(status).json({
+    code: err.code ?? 'INTERNAL',
+    message: status >= 500 ? 'Something went wrong' : err.message,   // don't leak internals
+  });
+});
+```
+
+## Expected failures versus bugs
+
+Not every failure should be an exception. "User not found" or "card declined" are **expected outcomes**; a `TypeError` from a typo is a **bug**. Some teams return a result object for expected failures, so the type system and the reader see them clearly:
+
+```js
+function parseConfig(text) {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch (err) {
+    return { ok: false, error: `invalid JSON: ${err.message}` };
+  }
+}
+
+const result = parseConfig(raw);
+if (!result.ok) return showWarning(result.error);
+```
+
+## Last-resort handlers
+
+Every environment has a global safety net. Use it to **log and exit cleanly**, not to keep running in an unknown state.
+
+```js
+// browser
+window.addEventListener('error', (e) => report(e.error));
+window.addEventListener('unhandledrejection', (e) => report(e.reason));
+
+// Node
+process.on('uncaughtException', (err) => { logger.fatal(err); process.exit(1); });
+process.on('unhandledRejection', (reason) => { logger.fatal(reason); process.exit(1); });
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `catch (e) {}` — silently swallowing errors.
+- Throwing strings or plain objects — no stack trace.
+- Losing the original error when rethrowing; use `{ cause }`.
+- Returning internal error messages (SQL, file paths) to API clients.
+- Expecting `try/catch` to catch errors from promises you did not `await`.
+- Keeping a Node process running after `uncaughtException` — its state may be corrupted.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you approach error handling in a JavaScript application?">
+
+Synchronous errors unwind the call stack to the nearest `try/catch`; asynchronous ones become rejected promises, which only `await` in a `try` or a `.catch` can observe. I throw `Error` subclasses with a status and a machine-readable code, and when I translate a low-level error into a domain error I keep the original as `cause`. I catch only where I can recover, translate, or report — typically a central handler at the edge, like Express error middleware, which logs server errors with context and returns a safe response. Expected outcomes like "not found" I model explicitly, and global handlers for uncaught errors just log and exit so a supervisor can restart cleanly.
+
+<Fragment slot="deeper">
+
+- **What is `error.cause`?** A standard way (ES2022) to chain an underlying error to a new one.
+- **Why not catch errors from `setTimeout` with an outer `try`?** The callback runs later on a fresh stack.
+- **Should a process survive `uncaughtException`?** No — log, clean up and exit; let the orchestrator restart it.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Stack trace", "The list of calls active when an error object was created."],
+  ["Error propagation", "Errors moving up the call stack (sync) or along a promise chain (async) until handled."],
+  ["Custom error", "A subclass of `Error` with extra fields such as `status` or `code`."],
+  ["`cause`", "An option on `Error` that links the underlying error being wrapped."],
+  ["Unhandled rejection", "A rejected promise no code handled."],
+]} />

@@ -1,0 +1,197 @@
+---
+title: Getters, setters, private fields and property descriptors
+part: Objects & prototypes
+order: 16
+level: advanced
+summary: Properties are more than name and value — each one has switches for writability, visibility and configurability, and can run code when read or written.
+---
+
+So far we have treated object properties as simple name–value pairs. In fact each property carries a small set of hidden settings called a **property descriptor**: can it be changed? does it show up in loops? can it be deleted? A property can also be an **accessor** — a pair of functions (a *getter* and a *setter*) that run when the property is read or written. Classes add **private fields** (`#name`) and **static** members on top.
+
+<Analogy>
+  A property descriptor is like the settings on a shared document: "can edit", "visible in search", "can be deleted". A getter is like a dashboard tile: when you look at it, it calculates the number on the spot rather than storing it.
+</Analogy>
+
+## Why it matters
+
+These features explain how `Object.freeze` works, why some properties do not appear in `Object.keys`, how libraries create computed or validated properties, and how to encapsulate data in classes properly. They show up in senior interviews and in framework internals (Vue 2's reactivity, MobX, TypeScript decorators).
+
+## Getters and setters
+
+```js
+class Temperature {
+  #celsius = 0;
+
+  get fahrenheit() {                 // computed on every read
+    return this.#celsius * 9 / 5 + 32;
+  }
+  set fahrenheit(f) {                // runs on every write
+    this.#celsius = (f - 32) * 5 / 9;
+  }
+  get celsius() { return this.#celsius; }
+  set celsius(c) {
+    if (typeof c !== 'number' || Number.isNaN(c)) throw new TypeError('celsius must be a number');
+    this.#celsius = c;
+  }
+}
+
+const t = new Temperature();
+t.fahrenheit = 212;    // calls the setter
+t.celsius;             // 100
+t.celsius = 'hot';     // TypeError — validation in a setter
+```
+
+From the outside, getters and setters look like ordinary properties, which lets you add validation or computed values later without changing callers.
+
+<Diagram
+  caption="Reading or writing an accessor property runs a function instead of touching stored data directly."
+  chart={`flowchart LR
+    R["t.fahrenheit<br/>(read)"] --> G["get fahrenheit()<br/>compute from #celsius"] --> V["212"]
+    W["t.fahrenheit = 50<br/>(write)"] --> S["set fahrenheit(f)<br/>validate · convert"] --> P["#celsius = 10"]`}
+  flow
+/>
+
+## Private fields and methods
+
+Fields that start with `#` are **truly private**: the language enforces that only code inside the class body can access them.
+
+```js
+class BankAccount {
+  #balance = 0;
+  static #count = 0;
+
+  constructor(owner) {
+    this.owner = owner;
+    BankAccount.#count++;
+  }
+  deposit(amount) {
+    this.#assertPositive(amount);
+    this.#balance += amount;
+  }
+  #assertPositive(n) {                  // private method
+    if (n <= 0) throw new RangeError('must be positive');
+  }
+  static get count() { return BankAccount.#count; }
+  get balance() { return this.#balance; }
+}
+
+const acc = new BankAccount('Ada');
+acc.#balance;          // SyntaxError: private field must be declared in an enclosing class
+Object.keys(acc);      // ['owner'] — private fields are invisible
+'#balance' in acc;     // false
+```
+
+| Approach | Truly hidden? | Notes |
+|---|---|---|
+| `_balance` naming convention | No | Just a hint to other developers |
+| Closure variable | Yes | Per-instance functions, no `class` needed |
+| `WeakMap` keyed by instance | Yes | Older pattern, used before `#` existed |
+| `#balance` | Yes | Built-in, fast, the modern choice |
+
+TypeScript's `private` keyword is only checked at compile time; at runtime the property is fully visible. Use `#` when privacy must hold at runtime.
+
+## Static members
+
+`static` members belong to the class itself, not to instances. They are used for factory functions, constants and caches shared across all instances.
+
+```js
+class Color {
+  static WHITE = new Color(255, 255, 255);
+  static fromHex(hex) { /* parse */ return new Color(/* … */); }
+  constructor(r, g, b) { Object.assign(this, { r, g, b }); }
+}
+Color.fromHex('#ff0000');
+```
+
+## Property descriptors
+
+Every property has a descriptor. You can inspect it:
+
+```js
+const user = { name: 'Ada' };
+Object.getOwnPropertyDescriptor(user, 'name');
+// { value: 'Ada', writable: true, enumerable: true, configurable: true }
+```
+
+<Diagram
+  caption="The two kinds of property and the flags each one carries."
+  chart={`flowchart TB
+    P["A property"] --> D["Data property"]
+    P --> A["Accessor property"]
+    D --> d1["value"]
+    D --> d2["writable — can the value change?"]
+    A --> a1["get — function run on read"]
+    A --> a2["set — function run on write"]
+    D --> both["enumerable — shows in keys / for…in / spread?<br/>configurable — can it be deleted or redefined?"]
+    A --> both`}
+/>
+
+You can define properties with precise settings using `Object.defineProperty`. Flags you do not mention default to **false** here (the opposite of normal assignment):
+
+```js
+const config = {};
+Object.defineProperty(config, 'version', {
+  value: '1.4.0',
+  writable: false,
+  enumerable: true,
+  configurable: false,
+});
+config.version = '2.0';  // ignored (TypeError in strict mode)
+delete config.version;   // false / TypeError in strict mode
+
+Object.defineProperty(config, 'secretToken', {
+  value: 'abc',
+  enumerable: false,     // hidden from Object.keys and JSON.stringify
+});
+JSON.stringify(config);  // '{"version":"1.4.0"}'
+```
+
+## Freeze, seal, prevent extensions
+
+These helpers flip descriptor flags for you, for every own property:
+
+| | Add new props | Delete props | Change values |
+|---|---|---|---|
+| `Object.preventExtensions(o)` | No | Yes | Yes |
+| `Object.seal(o)` | No | No | Yes |
+| `Object.freeze(o)` | No | No | No |
+
+All three are **shallow** — nested objects are not affected.
+
+<Callout type="note" title="How old Vue tracked changes">
+  Vue 2 made data reactive by redefining every property with `Object.defineProperty` and a getter/setter pair, so it could notice reads and writes. This could not detect newly added properties, which is why Vue 3 switched to `Proxy` (see the *Symbols, Proxy and Reflect* chapter).
+</Callout>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- A getter that is expensive or has side effects — callers treat property reads as cheap and safe.
+- A setter that assigns to the same property name (`set x(v) { this.x = v; }`) — infinite recursion. Store the value in a differently named or private field.
+- `Object.defineProperty` without flags creates a read-only, hidden, non-deletable property.
+- Relying on TypeScript `private` for real security.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you make data private in a JavaScript class?">
+
+The modern way is private fields with a `#` prefix — the language enforces that only code inside the class body can read or write them, they do not appear in `Object.keys` or JSON, and trying to access them from outside is a syntax error. Before that, people used closures or a `WeakMap` keyed by the instance. An underscore prefix is just a convention, and TypeScript's `private` is compile-time only. I typically pair private fields with getters and setters, so the class can expose read-only or validated access to its state.
+
+<Fragment slot="deeper">
+
+- **What is a property descriptor?** The settings of a property: `value`/`writable` or `get`/`set`, plus `enumerable` and `configurable`.
+- **Freeze vs seal?** Seal prevents adding or removing properties; freeze also prevents changing values. Both are shallow.
+- **What are static members for?** Class-level helpers, constants, factories and shared state.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Getter / setter", "Functions that run when a property is read or written."],
+  ["Private field", "A `#name` field accessible only inside the class body."],
+  ["Static member", "A property or method on the class itself rather than on instances."],
+  ["Property descriptor", "The flags of a property: `writable`, `enumerable`, `configurable`, plus value or accessors."],
+  ["`Object.freeze`", "Makes all own properties read-only and prevents adding or removing properties. Shallow."],
+]} />

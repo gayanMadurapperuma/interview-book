@@ -1,0 +1,179 @@
+---
+title: Execution context and the call stack
+part: Engine & memory
+order: 6
+level: core
+summary: Every time code runs, JavaScript builds a small box of bookkeeping around it and stacks those boxes up. That stack is the backbone of everything else.
+---
+
+When JavaScript runs your code, it does not just read lines one by one. For every chunk of code that runs — the whole file, or one function call — it first sets up an **execution context**: a record of which variables exist, what `this` is, and where to go back to when the function finishes. These contexts are kept on the **call stack**. Understanding this stack explains hoisting, closures, recursion limits and stack traces.
+
+<Analogy>
+  Think of a pile of trays in a cafeteria. Each time a function is called, a new tray is placed on top with that function's notes on it. You can only work on the top tray. When the function finishes, its tray is removed and you go back to the one underneath, exactly where you left off.
+</Analogy>
+
+## Why it matters
+
+"What is the call stack?" is the opening question for nearly every event loop discussion. It also explains practical things: reading a stack trace from top to bottom, why deep recursion crashes with `Maximum call stack size exceeded`, and why `var` declarations seem to exist before their line.
+
+## The call stack in action
+
+```js
+function greet(name) {
+  return 'Hi ' + format(name);
+}
+function format(name) {
+  return name.toUpperCase();
+}
+greet('ada');
+```
+
+<Diagram
+  caption="Each call pushes a frame. Each return pops one. The engine always works on the top frame."
+  chart={`flowchart TB
+    subgraph Stack["Call stack (top is running)"]
+      direction TB
+      F3["format('ada')"]
+      F2["greet('ada')"]
+      F1["global"]
+    end
+    F3 -. "returns 'ADA'" .-> F2
+    F2 -. "returns 'Hi ADA'" .-> F1`}
+  steps={[
+    { nodes: ["F1"], text: "The program starts by pushing the **global execution context**." },
+    { nodes: ["F1", "F2"], text: "`greet('ada')` is called: a new frame is pushed on top, holding `name = 'ada'`." },
+    { nodes: ["F1", "F2", "F3"], text: "Inside `greet`, `format(name)` is called. Another frame goes on top. `greet` is paused, waiting." },
+    { nodes: ["F1", "F2"], text: "`format` returns `'ADA'` and its frame is **popped**. `greet` continues where it left off." },
+    { nodes: ["F1"], text: "`greet` returns `'Hi ADA'` and is popped. Back in global code." },
+  ]}
+/>
+
+This is also exactly how a **stack trace** reads. When an error is thrown inside `format`, the trace lists `format` first (the top), then `greet`, then the global code — the path of calls that led to the error.
+
+```text
+TypeError: Cannot read properties of undefined (reading 'toUpperCase')
+    at format (app.js:5:15)      ← where it broke
+    at greet (app.js:2:22)       ← who called it
+    at app.js:7:1                ← who called that
+```
+
+## What is inside an execution context
+
+Each context is created in **two phases**.
+
+<Diagram
+  caption="Before running a single line of a function, the engine prepares its context. Then it executes."
+  chart={`flowchart LR
+    subgraph C["1 · Creation phase"]
+      direction TB
+      c1["Create variables:<br/>var → undefined<br/>let/const → uninitialised<br/>function declarations → ready"]
+      c2["Link to the outer scope<br/>(where the function was written)"]
+      c3["Decide this"]
+    end
+    subgraph E["2 · Execution phase"]
+      direction TB
+      e1["Run statements top to bottom"]
+      e2["Assign values as lines run"]
+    end
+    C --> E`}
+/>
+
+1. **Creation phase.** The engine scans the function body and registers every declaration. `var` variables start as `undefined`. `let` and `const` are registered but left *uninitialised* (touching them throws). Function declarations are created completely. It also records a link to the **outer scope** — the place where the function was *written* — and works out what `this` is.
+2. **Execution phase.** The code runs line by line, assigning real values.
+
+That creation phase is what people call **hoisting**, covered in its own chapter. The outer-scope link is what makes **closures** work.
+
+## Global context versus function context
+
+- The **global execution context** is created once when your script starts. In a browser script, its `this` is `window`; in an ES module it is `undefined`; in a CommonJS Node file it is `module.exports`.
+- A **function execution context** is created for every single call. Calling the same function twice creates two separate contexts with separate local variables — that is why recursion works.
+
+## When the stack overflows
+
+The stack has a limited size. If functions keep calling functions without returning, it fills up.
+
+```js
+function countDown(n) {
+  return countDown(n - 1);   // forgot the base case
+}
+countDown(10);
+// RangeError: Maximum call stack size exceeded
+```
+
+<Diagram
+  caption="Without a base case, frames are only ever pushed, never popped, until the engine's limit is reached."
+  chart={`flowchart TB
+    G["global"] --> C1["countDown(10)"] --> C2["countDown(9)"] --> C3["countDown(8)"] --> D["…thousands more…"] --> X["RangeError:<br/>Maximum call stack size exceeded"]`}
+  flow
+/>
+
+Even correct recursion can overflow if the input is large enough — the limit is usually around ten thousand frames in V8, depending on how big each frame is. Fixes:
+
+- Rewrite the recursion as a loop.
+- Use an explicit stack (an array) to process a tree iteratively.
+- Use a *trampoline*: return a function instead of calling, and let a loop call it.
+
+```js
+// iterative tree walk: no recursion, no stack limit
+function sumTree(root) {
+  let total = 0;
+  const todo = [root];
+  while (todo.length) {
+    const node = todo.pop();
+    total += node.value;
+    todo.push(...node.children);
+  }
+  return total;
+}
+```
+
+<Callout type="note" title="No tail-call optimisation in practice">
+  The 2015 specification includes *proper tail calls*, which would let a function call itself as its very last action without growing the stack. Only Safari implemented it. In Chrome and Node (V8), tail-recursive code still grows the stack, so do not rely on it.
+</Callout>
+
+## Asynchronous callbacks start fresh
+
+When you schedule a callback with `setTimeout` or `.then`, the function that scheduled it finishes and its frame is popped long before the callback runs. The callback later runs on a **new, almost empty stack**. That is why errors inside callbacks used to show very short stack traces, and why a `try/catch` around `setTimeout` cannot catch an error thrown inside the callback.
+
+```js
+try {
+  setTimeout(() => { throw new Error('later'); }, 0);
+} catch (e) {
+  // never runs: by the time the callback throws, this try block is long gone
+}
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Quoting a fixed maximum stack depth as a rule. It varies by engine and by frame size.
+- Expecting `try/catch` to catch errors from callbacks that run later.
+- Reading a stack trace bottom-up. The top line is where the error happened.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is an execution context, and what is the call stack?">
+
+An execution context is the environment the engine creates to run a piece of code: it holds the variables, a link to the outer scope, and the value of `this`. It is built in two phases — creation, where declarations are hoisted and scope is set up, then execution, where the code runs. The call stack is the last-in, first-out list of these contexts: calling a function pushes a new one, returning pops it, and the engine always runs whatever is on top.
+
+<Fragment slot="deeper">
+
+- **What causes "Maximum call stack size exceeded"?** Recursion that is too deep or never stops. Convert to a loop or an explicit stack.
+- **Does V8 do tail-call optimisation?** No; only Safari's engine ships it.
+- **Why can't `try/catch` catch an error thrown in a `setTimeout` callback?** The callback runs later on a fresh stack, after the `try` has finished.
+
+</Fragment>
+</InterviewAnswer>
+
+<DemoLink id="js-event-loop" />
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Execution context", "The record the engine builds to run code: variables, outer-scope link and `this`."],
+  ["Call stack", "A last-in, first-out stack of execution contexts. The top one is running."],
+  ["Stack frame", "One entry on the call stack, for one function call."],
+  ["Creation phase", "The step before execution where declarations are registered (hoisting)."],
+  ["Stack overflow", "Running out of stack space, usually from runaway recursion."],
+]} />

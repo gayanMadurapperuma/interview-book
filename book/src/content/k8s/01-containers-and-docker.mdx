@@ -1,0 +1,136 @@
+---
+title: Containers and Docker
+part: Containers
+order: 1
+level: foundation
+summary: What a container really is — an isolated process, not a tiny virtual machine — and how images, layers and registries make software run the same everywhere.
+---
+
+A **container** packages an application with everything it needs — runtime, libraries, files — and runs it as an **isolated process** on a shared operating-system kernel. An **image** is the read-only template a container starts from, built in **layers** and stored in a **registry**. **Docker** popularised the tooling; today the formats are open standards (OCI), and runtimes like containerd run containers under Kubernetes. The promise: build once, and run the same artefact on a laptop, in CI and in production.
+
+<Analogy>
+  Shipping containers. Before them, every cargo was loaded differently — sacks, barrels, crates. A standard container doesn't care what's inside; every ship, crane and truck handles it the same way. Software containers do the same for applications: the platform doesn't care whether it's Node, Python or Go inside.
+</Analogy>
+
+## Why it matters
+
+Almost every modern backend is deployed in containers, usually on Kubernetes or a managed container service. Interviewers ask how containers differ from virtual machines, what's in an image, and how to build small, secure images.
+
+## Containers vs virtual machines
+
+<Diagram
+  caption="VMs virtualise hardware and each runs a full OS. Containers share the host kernel and isolate processes — lighter and faster to start."
+  chart={`flowchart TB
+    subgraph VM["Virtual machines"]
+      direction TB
+      A1["app A + libs"] --> G1["guest OS"]
+      A2["app B + libs"] --> G2["guest OS"]
+      G1 --> HV["hypervisor"]
+      G2 --> HV
+      HV --> H1["host hardware"]
+    end
+    subgraph CT["Containers"]
+      direction TB
+      C1["app A + libs"] --> RT["container runtime"]
+      C2["app B + libs"] --> RT
+      RT --> K["shared host kernel"]
+      K --> H2["host hardware"]
+    end`}
+/>
+
+| | Virtual machine | Container |
+|---|---|---|
+| Isolation | strong (separate kernels) | process-level (shared kernel) |
+| Size | gigabytes | megabytes |
+| Start time | tens of seconds to minutes | milliseconds to seconds |
+| Density | few per host | many per host |
+| Use | different OSes, strong isolation, legacy apps | microservices, CI, dense packing |
+
+For untrusted multi-tenant workloads, stronger sandboxes (gVisor, Firecracker microVMs — used by AWS Lambda and Fargate) combine container convenience with VM-like isolation.
+
+## How isolation works
+
+Containers are ordinary Linux processes with:
+
+- **Namespaces** — give the process its own view of the system: process IDs (PID 1 inside), network interfaces, mount points (filesystem), hostname, users.
+- **cgroups** — limit and account for resources: CPU, memory, I/O. Exceed the memory limit and the kernel kills the process (OOMKilled).
+- **Union/overlay filesystems** — stack read-only image layers plus a thin writable layer.
+- Security layers — capabilities, seccomp and AppArmor/SELinux profiles restrict what the process may do.
+
+## Images and layers
+
+<Diagram
+  caption="An image is a stack of read-only layers. Each Dockerfile instruction adds a layer; unchanged layers are cached and shared."
+  chart={`flowchart TB
+    W["writable container layer<br/>(lost when the container is removed)"]
+    L4["layer: COPY . /app — your code"]
+    L3["layer: RUN npm ci — node_modules"]
+    L2["layer: COPY package*.json"]
+    L1["base image: node:24-alpine"]
+    W --> L4 --> L3 --> L2 --> L1`}
+  steps={[
+    { nodes: ["L1"], text: "The base image provides the OS userland and Node runtime." },
+    { nodes: ["L2", "L3"], text: "Copying only `package.json` first and installing dependencies creates layers that change rarely — so they're cached across builds." },
+    { nodes: ["L4"], text: "Your code changes often, so it's copied last; a code change rebuilds only this small layer." },
+    { nodes: ["W"], text: "A running container adds a thin writable layer. Anything written there disappears with the container — persistent data belongs in volumes or external services." },
+  ]}
+/>
+
+- Images are identified by **digest** (`sha256:…`, immutable) and **tags** (`myapp:1.4.2`, mutable labels). Deploy by digest or immutable tags, never `latest`.
+- **Registries** store and distribute images: Docker Hub, Amazon ECR, GitHub Container Registry, Google Artifact Registry.
+
+## Essential Docker commands
+
+```bash
+docker build -t orders-api:1.4.2 .          # build an image from a Dockerfile
+docker run -p 3000:3000 --env-file .env orders-api:1.4.2
+docker ps / docker logs <id> / docker exec -it <id> sh
+docker push registry.example.com/orders-api:1.4.2
+```
+
+**Docker Compose** runs multi-container setups locally (API + Postgres + Redis) from one YAML file — great for development, not a production orchestrator.
+
+## Containers are ephemeral
+
+Treat containers as **cattle, not pets**: they can be killed and replaced at any time. That means:
+
+- **Stateless processes** — store state in databases, caches and object storage.
+- **Configuration via environment** — the same image runs in every environment.
+- **Logs to stdout/stderr** — the platform collects them.
+- **Fast startup and graceful shutdown** — handle SIGTERM (see the Node chapter).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Treating a container like a VM: SSHing in to patch it, storing data in its filesystem.
+- Deploying `:latest` tags.
+- Running as root inside the container.
+- Baking secrets into images.
+- Huge images with build tools and dev dependencies.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is a container, and how is it different from a virtual machine?">
+
+A container is a normal process on the host, isolated using Linux namespaces — its own view of processes, network, filesystem and hostname — and limited by cgroups for CPU and memory. It runs from an image: a stack of read-only, cached layers containing the app and its dependencies, plus a thin writable layer that's discarded with the container. Because containers share the host kernel, they're megabytes rather than gigabytes and start in milliseconds, so you can pack many per host — whereas a VM virtualises hardware and runs a full guest OS, giving stronger isolation at a higher cost. Containers are meant to be ephemeral and immutable: stateless, configured by environment, logging to stdout, deployed by immutable tag or digest, and replaced rather than patched.
+
+<Fragment slot="deeper">
+
+- **What are namespaces and cgroups?** Isolation of what a process sees vs limits on what it uses.
+- **Why order Dockerfile instructions carefully?** Layer caching: rarely changing steps first.
+- **Why not `latest`?** It's mutable, so deployments aren't reproducible or easily rolled back.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Container", "An isolated process running from an image on a shared kernel."],
+  ["Image", "Read-only, layered template for containers."],
+  ["Layer", "A cached filesystem change produced by a build step."],
+  ["Registry", "Service that stores and distributes images."],
+  ["Namespaces / cgroups", "Kernel features for isolation and resource limits."],
+  ["Digest", "Immutable content hash identifying an image."],
+]} />

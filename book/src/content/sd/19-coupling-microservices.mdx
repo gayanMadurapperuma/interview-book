@@ -1,0 +1,136 @@
+---
+title: Coupling, cohesion, Conway's law and microservices
+part: Architecture
+order: 19
+level: core
+summary: How to draw boundaries between parts of a system — and when splitting into microservices helps more than it hurts.
+---
+
+Architecture is mostly about **boundaries**: which code and data belong together, and how separate pieces talk. Two old ideas guide it. **Cohesion**: things that change together should live together. **Coupling**: separate pieces should depend on each other as little as possible. **Conway's law** adds that a system's structure tends to mirror the communication structure of the organisation that builds it. **Microservices** are one way to apply these ideas — splitting a system into independently deployable services, each owning its data — with real benefits and very real costs.
+
+<Analogy>
+  A restaurant kitchen organised into stations: grill, pastry, salads. Each station has everything it needs at hand (high cohesion) and passes finished plates through a clear window, not by reaching into each other's fridges (low coupling). If the pastry chef needs the grill chef's permission for every dessert, the stations are coupled — splitting them into separate rooms just adds walking.
+</Analogy>
+
+## Why it matters
+
+"Monolith or microservices?" is a staple question, as is "how would you split this system into services?" Strong answers talk about domains, data ownership, team structure and operational cost — not just "microservices scale better".
+
+## Coupling and cohesion
+
+| | Good | Bad |
+|---|---|---|
+| **Cohesion** (within a module) | the order module contains everything about orders | order logic scattered across ten modules |
+| **Coupling** (between modules) | modules talk through small, stable interfaces | modules reach into each other's internals or tables |
+
+Kinds of coupling to watch for:
+
+- **Data coupling via a shared database**: two services reading and writing the same tables can't change their schema independently.
+- **Temporal coupling**: A only works if B is up right now (synchronous calls).
+- **Deployment coupling**: A and B must be released together.
+- **Semantic coupling**: A depends on B's internal meaning of a status field.
+
+## Conway's law
+
+> Organisations design systems that mirror their own communication structure.
+
+Three teams building a compiler will produce a three-pass compiler. If your teams are split by technical layer (frontend, backend, DBA), you'll get layered systems where every feature needs all three teams. The **inverse Conway manoeuvre** designs teams around the architecture you want: a team per business capability, each owning its services end to end.
+
+## The spectrum: monolith to microservices
+
+<Diagram
+  caption="Not a binary choice. The modular monolith is often the best starting point."
+  chart={`flowchart LR
+    BM["Big ball of mud<br/>everything touches everything"] --> MM["Modular monolith<br/>one deployable, clear internal modules,<br/>module-owned tables"]
+    MM --> SOA["A few services<br/>split where scaling, teams or<br/>reliability demand it"]
+    SOA --> MS["Microservices<br/>many small services,<br/>each owns its data and deploys alone"]`}
+/>
+
+| | Modular monolith | Microservices |
+|---|---|---|
+| Deploy | one unit | each service independently |
+| Calls between parts | in-process function calls (fast, reliable) | network calls (latency, failures) |
+| Transactions | local ACID across modules | sagas, eventual consistency |
+| Scaling | scale the whole app | scale each service separately |
+| Teams | works well up to a few teams | lets many teams work independently |
+| Tech choice | one stack | per-service choice |
+| Operations | simple | needs CI/CD per service, observability, service discovery, on-call |
+| Debugging | stack traces | distributed tracing |
+
+### When microservices make sense
+
+- Many teams need to ship **independently** without coordinating releases.
+- Parts of the system have very **different scaling** or reliability needs (video transcoding vs user profiles).
+- **Fault isolation** matters: a crash in reporting shouldn't take down checkout.
+- You have the **platform maturity**: automated deployment, monitoring, tracing, on-call.
+
+If none of these apply, a well-structured monolith is usually faster and cheaper. Many successful companies started with a monolith and extracted services as specific pressures appeared.
+
+## Drawing boundaries: bounded contexts
+
+Domain-Driven Design's **bounded contexts** are a good guide: areas of the business where a term has one consistent meaning. "Product" means something different to the catalogue (descriptions, images), inventory (stock levels, warehouses) and shipping (weight, dimensions) — three contexts, three potential services, each with its own model.
+
+<Diagram
+  caption="Services aligned with business capabilities, each owning its data, communicating through APIs and events — never through each other's tables."
+  chart={`flowchart TB
+    GW["API gateway / BFF"] --> CAT["Catalogue service"]
+    GW --> ORD["Orders service"]
+    GW --> ACC["Accounts service"]
+    CAT --> CDB[("catalogue DB")]
+    ORD --> ODB[("orders DB")]
+    ACC --> ADB[("accounts DB")]
+    ORD -- "OrderPlaced event" --> BUS["event bus"]
+    BUS --> INV["Inventory service"]
+    BUS --> NOT["Notifications service"]
+    INV --> IDB[("inventory DB")]`}
+  steps={[
+    { nodes: ["GW", "CAT", "ORD", "ACC"], text: "Clients reach services through a gateway (or a backend-for-frontend per client type)." },
+    { nodes: ["CAT", "CDB", "ORD", "ODB", "ACC", "ADB"], text: "**Database per service**: each service owns its data. Others never query its tables directly." },
+    { nodes: ["ORD", "BUS"], text: "Services announce facts as events (via an outbox)." },
+    { nodes: ["BUS", "INV", "NOT", "IDB"], text: "Other services react asynchronously. Orders doesn't need to know who listens — low coupling." },
+  ]}
+/>
+
+Signs of a bad split — a **distributed monolith**: services that must be deployed together, chains of synchronous calls for every request, shared databases, and "small" changes that touch five services. That's the cost of microservices with none of the benefits.
+
+## Communication styles
+
+- **Synchronous** (REST, gRPC): simple request/response; creates temporal coupling. Keep chains short; apply timeouts and breakers.
+- **Asynchronous** (events, queues): decouples availability and load; eventual consistency; harder to trace.
+- Prefer **events for notifying** ("order placed") and **synchronous calls for queries** that need an immediate answer — and cache or replicate data you query often.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Starting with dozens of microservices for a new product and a small team.
+- Splitting by technical layer ("user-db-service", "email-sender-service") instead of business capability.
+- Sharing a database between services.
+- Long synchronous call chains across services.
+- Ignoring the operational cost: CI/CD, observability, on-call per service.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="When would you choose microservices over a monolith?">
+
+I'd usually start with a modular monolith: one deployable with clear internal modules aligned to business domains and owning their own tables, which keeps calls fast, transactions simple and operations cheap. I'd split out services when there's a concrete reason — several teams that need to deploy independently, components with very different scaling or reliability needs, or a need for fault isolation — and when we have the platform for it: automated deployment, distributed tracing and on-call. Boundaries should follow bounded contexts, each service owning its data and communicating through APIs and events rather than shared tables. The thing to avoid is a distributed monolith, where services must be deployed together and every request is a chain of synchronous calls — that's all the cost with none of the benefit. Conway's law also matters: team structure should match the service boundaries.
+
+<Fragment slot="deeper">
+
+- **What is Conway's law?** System structure mirrors the organisation's communication structure.
+- **Why database per service?** Independent schema changes and deploys; no hidden coupling.
+- **What is a bounded context?** A domain area with one consistent model and language.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Cohesion", "How closely the responsibilities inside a module belong together."],
+  ["Coupling", "How much modules depend on each other's details."],
+  ["Conway's law", "Systems mirror the communication structure of the organisations that build them."],
+  ["Modular monolith", "A single deployable divided into well-separated modules."],
+  ["Bounded context", "A domain area with its own consistent model and language."],
+  ["Distributed monolith", "Microservices so coupled they must change and deploy together."],
+]} />

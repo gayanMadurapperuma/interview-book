@@ -1,0 +1,143 @@
+---
+title: CQRS and event sourcing
+part: Architecture
+order: 20
+level: advanced
+summary: Separate the model you write with from the models you read with — and, optionally, store the history of changes instead of just the current state.
+---
+
+**CQRS** (Command Query Responsibility Segregation) splits a system into a **write side** that handles commands ("place order") and a **read side** with one or more models shaped exactly for the queries the UI needs. **Event sourcing** stores every change as an immutable **event** ("OrderPlaced", "ItemAdded", "OrderShipped") and derives the current state by replaying them, instead of storing only the latest state. They're often used together, but each is useful on its own — and both add complexity you should only accept for a good reason.
+
+<Analogy>
+  A bank account. The bank doesn't just store your balance; it stores every transaction ever, and the balance is the sum of them (event sourcing). Separately, it produces your monthly statement, a fraud-detection feed and a tax summary — different views built from the same transactions, each shaped for its reader (CQRS read models).
+</Analogy>
+
+## Why it matters
+
+These patterns appear in senior and architect interviews, often around audit requirements, complex domains or read-heavy dashboards. Interviewers want to see that you know the benefits — and the costs: eventual consistency, schema evolution of events, and operational complexity.
+
+## CQRS
+
+In a classic design, one model serves both writes and reads, so it's a compromise: normalised for correct writes, then joined and reshaped for every screen. CQRS separates them.
+
+<Diagram
+  caption="CQRS: commands go to a write model that enforces business rules; changes are projected into read models optimised for each query."
+  chart={`flowchart LR
+    UI["UI / clients"] -- "commands<br/>PlaceOrder" --> W["Write side<br/>domain model, validation,<br/>transactions"]
+    W --> WDB[("write store<br/>normalised")]
+    W -- "changes / events" --> P["Projectors"]
+    P --> R1[("read model:<br/>order summary table")]
+    P --> R2[("read model:<br/>search index")]
+    P --> R3[("read model:<br/>dashboard aggregates")]
+    UI -- "queries" --> R1
+    UI -- "queries" --> R2`}
+  steps={[
+    { nodes: ["UI", "W", "WDB"], text: "Commands express intent and go to the write model, which enforces invariants inside transactions." },
+    { nodes: ["W", "P"], text: "Every change is published (via outbox/CDC or as events)." },
+    { nodes: ["P", "R1", "R2", "R3"], text: "Projectors update **read models**, each denormalised for a specific query — a summary table, a search index, pre-computed aggregates." },
+    { nodes: ["UI", "R1", "R2"], text: "Queries hit the read models directly: fast, simple, independently scalable. They lag the write side slightly." },
+  ]}
+/>
+
+Benefits: reads are fast and simple, read and write sides scale and evolve independently, and complex domains keep a clean write model. Cost: read models are **eventually consistent** — a user may not see their change instantly (handle with read-your-writes tricks, or return the new state in the command response).
+
+Lightweight CQRS is common and cheap: a write path through domain services plus a few denormalised read tables or a search index updated by events. You don't need separate databases or event sourcing to benefit.
+
+## Event sourcing
+
+Instead of updating rows in place, append events to an **event store**. Current state is a **fold** over the events.
+
+```text
+stream: order-1042
+  1  OrderCreated      { customerId: 7 }
+  2  ItemAdded         { sku: "KB-1", qty: 1, price: 4999 }
+  3  ItemAdded         { sku: "MS-2", qty: 2, price: 1999 }
+  4  ItemRemoved       { sku: "MS-2" }
+  5  OrderPlaced       { total: 4999 }
+  6  PaymentCaptured   { amount: 4999 }
+```
+
+```js
+function applyEvent(order, e) {
+  switch (e.type) {
+    case 'OrderCreated':  return { id: e.streamId, customerId: e.data.customerId, items: {}, status: 'draft' };
+    case 'ItemAdded':     return { ...order, items: { ...order.items, [e.data.sku]: e.data } };
+    case 'ItemRemoved': { const { [e.data.sku]: _, ...rest } = order.items; return { ...order, items: rest }; }
+    case 'OrderPlaced':   return { ...order, status: 'placed', total: e.data.total };
+    default:              return order;
+  }
+}
+const order = events.reduce(applyEvent, undefined);
+```
+
+<Diagram
+  caption="State is derived by replaying events. Snapshots avoid replaying thousands of events on every load."
+  chart={`flowchart LR
+    E1["OrderCreated"] --> E2["ItemAdded"] --> E3["ItemAdded"] --> E4["ItemRemoved"] --> E5["OrderPlaced"]
+    E5 --> S["current state<br/>status: placed, 1 item"]
+    SN["snapshot at event 4"] -. "load snapshot +<br/>replay only E5" .-> S`}
+/>
+
+### Writing safely
+
+To append, load the stream, check the command against current state, and append new events with an **expected version** (optimistic concurrency): if someone else appended in the meantime, the write fails and you retry.
+
+### Benefits
+
+- **Complete audit trail** for free — essential in finance, healthcare, compliance.
+- **Time travel**: rebuild state as of any moment; debug by replaying.
+- **New read models from history**: add a new projection and replay all past events into it.
+- Events are a natural integration feed for other services.
+
+### Costs
+
+- **Event schema evolution**: events are forever. You need versioning and upcasters to read old shapes.
+- **Querying** the current state requires projections (hence CQRS).
+- **Eventual consistency** for read models.
+- **GDPR deletion**: immutable events containing personal data need crypto-shredding (encrypt per user, delete the key).
+- More moving parts, unfamiliar to many developers.
+
+## When to use which
+
+| Situation | Choice |
+|---|---|
+| CRUD app, simple screens | neither — plain tables |
+| Read-heavy app with complex screens/search | lightweight CQRS (read tables, search index) |
+| Strict audit, temporal queries, complex domain (ledgers, trading, logistics) | event sourcing + CQRS |
+| Need an event feed for other services | outbox events — no need to event-source internally |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Event sourcing an entire system when only one domain needs it.
+- Treating events as a public API without versioning.
+- Events that describe low-level changes ("FieldUpdated") rather than business facts ("AddressChanged").
+- Forgetting that read models lag, causing "my change disappeared" bugs.
+- Rebuilding state from very long streams without snapshots.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What are CQRS and event sourcing, and when would you use them?">
+
+CQRS separates the write side, which handles commands and enforces business rules, from read models that are denormalised for specific queries and updated from the write side's changes. Reads become fast and simple and scale independently, at the cost of read models being eventually consistent. Event sourcing stores the sequence of business events — OrderPlaced, PaymentCaptured — as the source of truth and derives current state by replaying them, with snapshots for speed and optimistic concurrency on appends. It gives a full audit trail, time travel and the ability to build new projections from history, but event schemas live forever and need versioning, and deleting personal data needs techniques like crypto-shredding. I'd use lightweight CQRS for read-heavy, complex screens, and full event sourcing only for domains like ledgers where history and auditability are core requirements.
+
+<Fragment slot="deeper">
+
+- **Can you use CQRS without event sourcing?** Yes — and that's the most common form.
+- **How do you handle concurrent writes to a stream?** Append with an expected version; retry on conflict.
+- **What is a projection?** A read model built by processing events.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["CQRS", "Separating the write (command) model from read (query) models."],
+  ["Command", "A request expressing intent to change state."],
+  ["Read model / projection", "A query-optimised view built from changes or events."],
+  ["Event sourcing", "Storing all state changes as immutable events and deriving state from them."],
+  ["Event store", "Append-only storage of event streams."],
+  ["Snapshot", "Saved state at an event position, to avoid replaying the whole stream."],
+]} />

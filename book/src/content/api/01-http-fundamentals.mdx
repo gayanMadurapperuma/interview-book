@@ -1,0 +1,176 @@
+---
+title: HTTP fundamentals
+part: HTTP
+order: 1
+level: foundation
+summary: Requests, responses, methods, status codes and headers — plus what changed in HTTP/2 and HTTP/3. The language every web API speaks.
+---
+
+**HTTP** (HyperText Transfer Protocol) is the request–response protocol of the web. A client sends a **request** — a method, a path, headers and maybe a body — and the server sends back a **response** — a status code, headers and maybe a body. REST, GraphQL, webhooks, most of gRPC's transport and every browser page load are built on it. Understanding HTTP properly makes every API style easier.
+
+<Analogy>
+  HTTP is like ordering at a counter with a standard form. The form has a box for what you want to do (method: get, create, replace, delete), which item (path), extra notes (headers: "I'd like it in JSON", "here's my membership card"), and sometimes an attachment (body). The counter always answers with a code you can understand without reading the details: 200 "here you go", 404 "we don't have that", 503 "kitchen closed, come back later".
+</Analogy>
+
+## Why it matters
+
+Interviewers check that you know which methods are safe and idempotent, what status codes mean, what headers do, and how HTTP/2 and HTTP/3 improve performance. Mistakes here show up as broken caching, unsafe retries and confusing APIs.
+
+## Anatomy of an exchange
+
+```http
+POST /api/orders HTTP/1.1
+Host: shop.example.com
+Content-Type: application/json
+Accept: application/json
+Authorization: Bearer eyJhbGciOi…
+Idempotency-Key: 7f9c2b1e-…
+
+{"items":[{"sku":"KB-1","qty":1}]}
+```
+
+```http
+HTTP/1.1 201 Created
+Content-Type: application/json
+Location: /api/orders/1042
+Cache-Control: no-store
+
+{"id":1042,"status":"pending","total":4999}
+```
+
+<Diagram
+  sequence
+  caption="One HTTPS request over a fresh connection. Keep-alive and HTTP/2 reuse the connection so later requests skip the handshakes."
+  chart={`sequenceDiagram
+    participant C as Client
+    participant S as Server
+    C->>S: TCP handshake (SYN, SYN-ACK, ACK)
+    C->>S: TLS handshake (keys, certificate)
+    C->>S: request: POST /api/orders + headers + body
+    S-->>C: response: 201 Created + headers + body
+    C->>S: next request on the same connection`}
+  notes={[
+    "A new TCP connection costs one round trip before any data can flow.",
+    "TLS adds another round trip (TLS 1.3) to agree keys and verify the server's certificate.",
+    "The request: method, path, headers, body.",
+    "The response: status line, headers, body.",
+    "With keep-alive (HTTP/1.1) or multiplexing (HTTP/2), the next request reuses this connection.",
+  ]}
+/>
+
+## Methods
+
+| Method | Meaning | Safe? | Idempotent? | Body? |
+|---|---|---|---|---|
+| `GET` | read a resource | ✓ | ✓ | no |
+| `HEAD` | like GET, headers only | ✓ | ✓ | no |
+| `POST` | create / submit / trigger an action | ✗ | ✗ | yes |
+| `PUT` | replace a resource entirely (or create at a known URL) | ✗ | ✓ | yes |
+| `PATCH` | partially update | ✗ | not necessarily | yes |
+| `DELETE` | delete | ✗ | ✓ | rarely |
+| `OPTIONS` | ask what's allowed (CORS preflight) | ✓ | ✓ | no |
+
+- **Safe** = doesn't change server state; crawlers, prefetchers and caches may call it freely.
+- **Idempotent** = repeating it has the same effect as doing it once; clients and proxies may **retry** it automatically. `DELETE /orders/1` twice leaves the order deleted; `POST /orders` twice creates two orders — unless you use an idempotency key.
+
+## Status codes
+
+<Diagram
+  caption="The first digit tells the client what kind of answer it is, before it reads anything else."
+  chart={`flowchart LR
+    S{"status"} --> S1["1xx informational<br/>100 Continue, 101 Switching Protocols"]
+    S --> S2["2xx success<br/>200 OK · 201 Created · 202 Accepted · 204 No Content"]
+    S --> S3["3xx redirection<br/>301 · 302 · 304 Not Modified · 307 · 308"]
+    S --> S4["4xx client error<br/>400 · 401 · 403 · 404 · 409 · 422 · 429"]
+    S --> S5["5xx server error<br/>500 · 502 · 503 · 504"]`}
+/>
+
+| Code | Use it when |
+|---|---|
+| 200 OK | successful read or update with a body |
+| 201 Created | resource created; include `Location` |
+| 202 Accepted | work queued, not done yet (long-running operations) |
+| 204 No Content | success with no body (DELETE, some updates) |
+| 304 Not Modified | the client's cached copy is still valid |
+| 400 Bad Request | malformed request, invalid syntax |
+| 401 Unauthorized | not authenticated (missing/invalid credentials) |
+| 403 Forbidden | authenticated but not allowed |
+| 404 Not Found | resource doesn't exist (or you won't reveal it does) |
+| 409 Conflict | state conflict: duplicate, version mismatch |
+| 422 Unprocessable Content | well-formed but fails validation |
+| 429 Too Many Requests | rate limited; include `Retry-After` |
+| 500 Internal Server Error | unexpected bug |
+| 502 Bad Gateway / 504 Gateway Timeout | a proxy couldn't get a (timely) answer from upstream |
+| 503 Service Unavailable | temporarily overloaded or down; retry later |
+
+Retry guidance for clients: retry **429, 502, 503, 504** and network errors (with backoff, idempotent requests only); never blindly retry **4xx** except 429 and 409 after re-reading.
+
+## Headers that matter
+
+| Header | Purpose |
+|---|---|
+| `Content-Type` / `Accept` | format of the body / formats the client accepts (content negotiation) |
+| `Authorization` | credentials (`Bearer <token>`, `Basic …`) |
+| `Cache-Control`, `ETag`, `If-None-Match` | caching and conditional requests (next chapter) |
+| `Location` | where a created resource lives, or a redirect target |
+| `Content-Encoding` / `Accept-Encoding` | compression (gzip, br, zstd) |
+| `Cookie` / `Set-Cookie` | browser session state |
+| `Origin`, `Access-Control-*` | CORS (Security volume) |
+| `traceparent` | distributed tracing context |
+| `Idempotency-Key` | safe retries of POST (convention) |
+| `Retry-After` | when to retry after 429/503 |
+
+## HTTP versions
+
+<Diagram
+  caption="HTTP/1.1 sends one request at a time per connection; HTTP/2 multiplexes many streams over one TCP connection; HTTP/3 does the same over QUIC (UDP) to avoid TCP head-of-line blocking."
+  chart={`flowchart TB
+    H1["HTTP/1.1<br/>text protocol · one in-flight request per connection<br/>browsers open ~6 connections per host"]
+    H2["HTTP/2<br/>binary frames · many streams on one TCP connection<br/>header compression (HPACK) · server push (deprecated)"]
+    H3["HTTP/3<br/>same semantics over QUIC (UDP)<br/>no TCP head-of-line blocking · faster handshakes · connection migration"]
+    H1 --> H2 --> H3`}
+/>
+
+- **Head-of-line blocking**: in HTTP/1.1 a slow response blocks the next on that connection; HTTP/2 fixes this at the HTTP layer, but one lost TCP packet still stalls all streams; HTTP/3 (QUIC) fixes it at the transport layer.
+- **QUIC** combines transport and TLS 1.3 handshakes (often one round trip, or zero for resumed connections) and survives network changes (Wi-Fi → mobile).
+- The **semantics** (methods, status codes, headers) are identical across versions; your API design doesn't change.
+
+## Statelessness
+
+Each HTTP request carries everything the server needs to process it (credentials, parameters). Servers don't rely on memory of previous requests — which is what lets any server behind a load balancer handle any request. "Sessions" are built on top with cookies or tokens that point to state stored elsewhere.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using GET for actions that change state (crawlers and prefetchers will trigger them).
+- Returning 200 with `{ "error": … }` in the body.
+- Confusing 401 (who are you?) with 403 (you can't do this).
+- Retrying non-idempotent POSTs automatically.
+- Ignoring compression and keep-alive.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What's the difference between PUT, PATCH and POST, and which are idempotent?">
+
+POST submits data to be processed — usually creating a new resource under a collection, so the server chooses the ID — and it's not idempotent: sending it twice creates two resources unless you add an idempotency key. PUT replaces the resource at a known URL with the full representation you send, so repeating it leaves the same state: it's idempotent. PATCH applies a partial update; it can be idempotent (setting a field) or not (incrementing a counter), so you can't assume it. GET, HEAD, OPTIONS, PUT and DELETE are idempotent, and GET, HEAD and OPTIONS are also safe — they don't change state — which is why proxies and clients may retry or prefetch them.
+
+<Fragment slot="deeper">
+
+- **401 vs 403?** Not authenticated vs authenticated but not permitted.
+- **What does HTTP/2 improve?** Multiplexed streams over one connection, binary framing, header compression.
+- **Why HTTP/3?** QUIC over UDP removes TCP head-of-line blocking and speeds up handshakes.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Safe method", "Doesn't change server state (GET, HEAD, OPTIONS)."],
+  ["Idempotent method", "Repeating it has the same effect as once (GET, PUT, DELETE…)."],
+  ["Status code", "Three-digit result class of a response."],
+  ["Content negotiation", "Choosing a representation via `Accept` / `Content-Type`."],
+  ["Multiplexing", "Many concurrent request streams on one connection (HTTP/2, HTTP/3)."],
+  ["QUIC", "UDP-based transport underlying HTTP/3, with built-in TLS 1.3."],
+]} />

@@ -1,0 +1,172 @@
+---
+title: Mapped types, conditional types and infer
+part: Type-level programming
+order: 13
+level: advanced
+summary: The machinery behind utility types — looping over keys, branching on types, and extracting parts of types — so you can build your own.
+---
+
+Utility types aren't magic: they're written with three type-level tools you can use yourself. **Mapped types** loop over the keys of a type to produce a new one (`{ [K in keyof T]: … }`). **Conditional types** choose between types based on a test (`T extends U ? X : Y`). **`infer`** captures part of a type inside a conditional test — the element of an array, the value of a promise, the arguments of a function. Together they let types follow your data automatically.
+
+<Analogy>
+  Mapped types are a mail merge: take a list of names and produce a letter for each one, transformed the same way. Conditional types are an "if" in a form ("if you're a student, fill in section B"). `infer` is a highlighter: "whatever is written in *this* box, call it X and use it later".
+</Analogy>
+
+## Why it matters
+
+Senior TypeScript interviews ask you to implement `Partial`, `DeepReadonly`, `ReturnType` or `Awaited` from scratch, and to explain distributive conditional types. In real code these tools remove large amounts of hand-maintained type boilerplate.
+
+## Mapped types
+
+```ts
+type MyPartial<T>  = { [K in keyof T]?: T[K] };
+type MyReadonly<T> = { readonly [K in keyof T]: T[K] };
+type Nullable<T>   = { [K in keyof T]: T[K] | null };
+type Mutable<T>    = { -readonly [K in keyof T]: T[K] };   // remove readonly
+type Concrete<T>   = { [K in keyof T]-?: T[K] };           // remove optional
+```
+
+<Diagram
+  caption="A mapped type iterates over each key of T and produces a new property from it."
+  chart={`flowchart LR
+    T["T = { id: string, age: number }"] --> K["keyof T = 'id' | 'age'"]
+    K --> L1["K = 'id' → id?: T['id'] → string"]
+    K --> L2["K = 'age' → age?: T['age'] → number"]
+    L1 --> R["{ id?: string, age?: number }"]
+    L2 --> R`}
+  steps={[
+    { nodes: ["T", "K"], text: "Take the keys of `T` as a union." },
+    { nodes: ["K", "L1", "L2"], text: "For each key `K`, produce a property: here optional, with the original value type `T[K]`." },
+    { nodes: ["L1", "L2", "R"], text: "The result is a new object type — `Partial<T>` in a single line." },
+  ]}
+/>
+
+### Key remapping with `as`
+
+```ts
+type Getters<T> = { [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K] };
+type UserGetters = Getters<{ name: string; age: number }>;
+// { getName: () => string; getAge: () => number }
+
+type OnlyStrings<T> = { [K in keyof T as T[K] extends string ? K : never]: T[K] };   // filter keys
+```
+
+## Conditional types
+
+```ts
+type IsString<T> = T extends string ? true : false;
+type A = IsString<'hi'>;      // true
+type B = IsString<42>;        // false
+
+type NonNullable2<T> = T extends null | undefined ? never : T;
+```
+
+### Distribution over unions
+
+When the checked type is a **bare type parameter** and you pass a union, the conditional is applied to **each member** separately and the results are unioned:
+
+```ts
+type ToArray<T> = T extends unknown ? T[] : never;
+type C = ToArray<string | number>;           // string[] | number[]   (distributed)
+
+type ToArrayND<T> = [T] extends [unknown] ? T[] : never;
+type D = ToArrayND<string | number>;         // (string | number)[]   (not distributed)
+```
+
+That's how `Exclude<T, U> = T extends U ? never : T` removes members from a union: each member is tested, and matches become `never`, which disappears from unions.
+
+<Diagram
+  caption="Distributive conditional types: a union input is split, each member tested, and the results recombined."
+  chart={`flowchart LR
+    U["Exclude of ('a' | 'b' | 'c'), 'a'"] --> S1["'a' extends 'a' ? never : 'a' → never"]
+    U --> S2["'b' extends 'a' ? never : 'b' → 'b'"]
+    U --> S3["'c' extends 'a' ? never : 'c' → 'c'"]
+    S1 --> R["never | 'b' | 'c' = 'b' | 'c'"]
+    S2 --> R
+    S3 --> R`}
+/>
+
+## `infer`
+
+`infer X` declares a type variable to capture whatever appears at that position, if the pattern matches.
+
+```ts
+type ElementOf<T>  = T extends readonly (infer E)[] ? E : never;
+type MyReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
+type MyParameters<T> = T extends (...args: infer P) => any ? P : never;
+type UnwrapPromise<T> = T extends PromiseLike<infer V> ? UnwrapPromise<V> : T;   // recursive
+
+type E1 = ElementOf<string[]>;                     // string
+type R1 = MyReturnType<() => Promise<number>>;     // Promise<number>
+type V1 = UnwrapPromise<Promise<Promise<User>>>;   // User
+
+type RouteParams<S extends string> =
+  S extends `${string}:${infer Param}/${infer Rest}` ? Param | RouteParams<`/${Rest}`>
+  : S extends `${string}:${infer Param}` ? Param
+  : never;
+type P = RouteParams<'/users/:userId/orders/:orderId'>;   // 'userId' | 'orderId'
+```
+
+## Recursive types
+
+```ts
+type DeepReadonly<T> =
+  T extends (...args: any[]) => any ? T
+  : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+  : T;
+
+type DeepPartial<T> = T extends object ? { [K in keyof T]?: DeepPartial<T[K]> } : T;
+
+type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
+```
+
+## A practical example: typed event handlers
+
+```ts
+type Events = {
+  'order.placed': { orderId: string; total: number };
+  'order.cancelled': { orderId: string; reason: string };
+};
+
+type Handlers = { [E in keyof Events as `on${Capitalize<Replace<E & string, '.', ''>>}`]: (p: Events[E]) => void };
+// → { onOrderplaced: (p: …) => void; onOrdercancelled: (p: …) => void }  (with a Replace helper)
+```
+
+## Know when to stop
+
+Type-level code is powerful but can become unreadable and slow to compile. Prefer simple, explicit types unless the derivation removes real duplication or catches real bugs. Add tests for complex types (`expectTypeOf` in Vitest, `tsd`).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Being surprised by distribution over unions (wrap in `[T]` to prevent it).
+- Forgetting that `never` disappears from unions but passing `never` to a distributive conditional gives `never`.
+- Deeply recursive types that slow the compiler or hit depth limits.
+- Clever types without tests or comments.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you implement Partial and ReturnType yourself?">
+
+`Partial` is a mapped type: `type MyPartial<T> = { [K in keyof T]?: T[K] }` — it iterates over the keys of T and makes each property optional with its original value type, `T[K]`. `ReturnType` is a conditional type with `infer`: `T extends (...args: any[]) => infer R ? R : never` — if T matches a function shape, `infer R` captures whatever sits in the return position. Conditional types distribute over unions when the checked type is a bare type parameter, which is how `Exclude` removes members: each member is tested separately and matches become `never`. With key remapping using `as` and template literals, mapped types can also rename or filter keys, and recursive versions give things like `DeepReadonly`.
+
+<Fragment slot="deeper">
+
+- **How do you stop distribution?** Wrap both sides in a tuple: `[T] extends [U]`.
+- **What does `-readonly` / `-?` do?** Removes those modifiers in a mapped type.
+- **How do you test types?** `expectTypeOf`/`assertType` in Vitest, or `tsd`.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Mapped type", "Type built by iterating over keys: `{ [K in keyof T]: … }`."],
+  ["Key remapping", "Renaming or filtering keys in a mapped type with `as`."],
+  ["Conditional type", "`T extends U ? X : Y` — a type-level if."],
+  ["Distributive conditional", "Conditional applied to each member of a union separately."],
+  ["`infer`", "Captures part of a type within a conditional's pattern."],
+  ["Recursive type", "A type that refers to itself, e.g. `DeepReadonly` or `Json`."],
+]} />

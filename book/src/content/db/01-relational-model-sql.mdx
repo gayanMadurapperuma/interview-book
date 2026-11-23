@@ -1,0 +1,242 @@
+---
+title: The relational model, SQL and joins
+part: Fundamentals
+order: 1
+level: foundation
+summary: Tables, keys and relationships — and the SQL you need to ask questions across them. The foundation every other database chapter builds on.
+---
+
+A **relational database** stores data in **tables** (also called relations). Each table has **columns** with fixed types and **rows** holding the actual records. Tables are linked by **keys**: a column in one table that refers to a row in another. **SQL** (Structured Query Language) is how you ask questions: you describe *what* data you want, and the database works out *how* to get it efficiently.
+
+<Analogy>
+  A relational database is a set of well-organised spreadsheets that reference each other. Instead of writing a customer's full address on every order, the orders sheet just says "customer #42", and the customers sheet holds the address once. A join is looking up #42 in the other sheet to put the two together.
+</Analogy>
+
+## Why it matters
+
+Even teams using document stores rely on SQL for analytics and reporting, and most backend interviews include writing a query with a join, a `GROUP BY` or a subquery. Understanding keys and joins is also the basis for indexing, normalisation and performance.
+
+## Tables, rows, keys
+
+```sql
+CREATE TABLE customers (
+  id         BIGSERIAL PRIMARY KEY,
+  email      TEXT NOT NULL UNIQUE,
+  name       TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE orders (
+  id          BIGSERIAL PRIMARY KEY,
+  customer_id BIGINT NOT NULL REFERENCES customers(id),   -- foreign key
+  status      TEXT NOT NULL CHECK (status IN ('pending', 'paid', 'shipped', 'cancelled')),
+  total_cents INTEGER NOT NULL CHECK (total_cents >= 0),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+- A **primary key** uniquely identifies each row. It's never null and never repeats.
+- A **foreign key** points at a primary key in another table. The database refuses an order for a customer that doesn't exist — that's **referential integrity**.
+- **Constraints** (`NOT NULL`, `UNIQUE`, `CHECK`) push rules into the database, so bad data can't get in even if application code has a bug.
+
+<Diagram
+  caption="An entity-relationship diagram. One customer has many orders; each order has many line items, each referring to one product."
+  chart={`erDiagram
+    CUSTOMERS ||--o{ ORDERS : places
+    ORDERS ||--|{ ORDER_ITEMS : contains
+    PRODUCTS ||--o{ ORDER_ITEMS : "appears in"
+    CUSTOMERS {
+      bigint id PK
+      text email UK
+      text name
+    }
+    ORDERS {
+      bigint id PK
+      bigint customer_id FK
+      text status
+      int total_cents
+    }
+    ORDER_ITEMS {
+      bigint order_id FK
+      bigint product_id FK
+      int quantity
+    }
+    PRODUCTS {
+      bigint id PK
+      text name
+      int price_cents
+    }`}
+/>
+
+### Relationship kinds
+
+- **One-to-many**: one customer, many orders. Put the foreign key on the "many" side (`orders.customer_id`).
+- **Many-to-many**: orders and products. Use a **join table** (`order_items`) holding both foreign keys, plus any data about the relationship (quantity, price at the time).
+- **One-to-one**: a user and their profile settings. A foreign key with a `UNIQUE` constraint, or the same primary key in both tables.
+
+## Querying
+
+```sql
+SELECT name, email
+FROM customers
+WHERE created_at >= now() - interval '30 days'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+### The order SQL is evaluated in
+
+SQL is written `SELECT … FROM … WHERE …`, but it is logically evaluated in a different order. This explains why you can't use a column alias from `SELECT` in `WHERE`.
+
+<Diagram
+  caption="The logical order of a SELECT. The database may physically do things differently, but results must match this order."
+  chart={`flowchart LR
+    F["FROM / JOIN<br/>gather rows"] --> W["WHERE<br/>filter rows"] --> G["GROUP BY<br/>make groups"] --> H["HAVING<br/>filter groups"] --> S["SELECT<br/>compute columns"] --> O["ORDER BY<br/>sort"] --> L["LIMIT / OFFSET"]`}
+  steps={[
+    { nodes: ["F"], text: "**FROM/JOIN**: start with the tables and combine them." },
+    { nodes: ["F", "W"], text: "**WHERE**: drop rows that don't match. Aggregates don't exist yet, so `WHERE COUNT(*) > 1` is invalid." },
+    { nodes: ["W", "G"], text: "**GROUP BY**: collapse rows into groups." },
+    { nodes: ["G", "H"], text: "**HAVING**: filter whole groups, using aggregates like `COUNT(*)`." },
+    { nodes: ["H", "S"], text: "**SELECT**: compute output columns and aliases." },
+    { nodes: ["S", "O", "L"], text: "**ORDER BY** (can use aliases) and finally **LIMIT**." },
+  ]}
+/>
+
+## Joins
+
+A join combines rows from two tables where a condition matches.
+
+```sql
+SELECT o.id, o.total_cents, c.name
+FROM orders o
+JOIN customers c ON c.id = o.customer_id      -- INNER JOIN
+WHERE o.status = 'paid';
+```
+
+| Join | Returns |
+|---|---|
+| `INNER JOIN` | only rows with a match on both sides |
+| `LEFT JOIN` | every row from the left table; right columns are `NULL` when there's no match |
+| `RIGHT JOIN` | the mirror of LEFT (rarely used — just swap the tables) |
+| `FULL OUTER JOIN` | all rows from both sides, `NULL`s where unmatched |
+| `CROSS JOIN` | every combination (rows × rows) |
+
+<Diagram
+  caption="Customers and orders. INNER keeps only customers who ordered; LEFT keeps every customer, with NULL order columns for those who never ordered."
+  chart={`flowchart LR
+    subgraph C["customers"]
+      direction TB
+      c1["1 Ada"]
+      c2["2 Grace"]
+      c3["3 Linus"]
+    end
+    subgraph O["orders"]
+      direction TB
+      o1["101 → customer 1"]
+      o2["102 → customer 1"]
+      o3["103 → customer 2"]
+    end
+    c1 --- o1
+    c1 --- o2
+    c2 --- o3
+    c3 -. "no match:<br/>INNER drops it,<br/>LEFT keeps it with NULLs" .- X["∅"]`}
+/>
+
+A classic use of `LEFT JOIN`: find things **without** a match.
+
+```sql
+-- customers who have never ordered
+SELECT c.id, c.name
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+WHERE o.id IS NULL;
+```
+
+## Aggregation
+
+```sql
+SELECT c.id, c.name, COUNT(o.id) AS orders, SUM(o.total_cents) AS revenue_cents
+FROM customers c
+JOIN orders o ON o.customer_id = c.id
+WHERE o.status = 'paid'
+GROUP BY c.id, c.name
+HAVING SUM(o.total_cents) > 100000
+ORDER BY revenue_cents DESC;
+```
+
+Every column in `SELECT` must either be in `GROUP BY` or wrapped in an aggregate (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`).
+
+## Subqueries, CTEs and window functions
+
+**CTEs** (`WITH`) name intermediate results, making complex queries readable:
+
+```sql
+WITH monthly AS (
+  SELECT customer_id, date_trunc('month', created_at) AS month, SUM(total_cents) AS spent
+  FROM orders WHERE status = 'paid'
+  GROUP BY 1, 2
+)
+SELECT * FROM monthly WHERE spent > 50000;
+```
+
+**Window functions** compute across related rows **without** collapsing them — rankings, running totals, "latest per group":
+
+```sql
+-- each customer's most recent order
+SELECT * FROM (
+  SELECT o.*, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at DESC) AS rn
+  FROM orders o
+) t
+WHERE rn = 1;
+
+-- running total of revenue by day
+SELECT day, revenue, SUM(revenue) OVER (ORDER BY day) AS running_total
+FROM daily_revenue;
+```
+
+## NULL is not a value
+
+`NULL` means "unknown". Any comparison with `NULL` is unknown, not true or false:
+
+```sql
+SELECT * FROM users WHERE deleted_at = NULL;    -- returns nothing, ever
+SELECT * FROM users WHERE deleted_at IS NULL;   -- correct
+```
+
+`COUNT(*)` counts rows; `COUNT(column)` skips `NULL`s. `NOT IN (subquery)` returns nothing if the subquery contains a `NULL` — prefer `NOT EXISTS`.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `= NULL` instead of `IS NULL`.
+- An `INNER JOIN` that silently drops rows you meant to keep (use `LEFT JOIN`).
+- Joining one-to-many twice in one query and multiplying rows — sums come out too large.
+- `SELECT *` in application queries: fetches unneeded data and breaks when columns change.
+- Building SQL with string concatenation — always use parameters.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Explain the different kinds of join, and when you'd use a LEFT JOIN.">
+
+A join combines rows from two tables where a condition matches, typically a foreign key equal to a primary key. An inner join returns only rows that match on both sides. A left join returns every row from the left table, filling the right side's columns with NULL when there's no match — so I use it when the left rows must appear regardless, like listing all customers with their order counts including zero, or with `WHERE right.id IS NULL` to find rows that have no match, such as customers who never ordered. Full outer join keeps unmatched rows from both sides, and cross join produces every combination.
+
+<Fragment slot="deeper">
+
+- **WHERE vs HAVING?** WHERE filters rows before grouping; HAVING filters groups after aggregation.
+- **What's a window function?** An aggregate computed over a partition of rows without collapsing them — ranking, running totals, latest per group.
+- **Why is `NOT IN` with NULLs dangerous?** Comparisons with NULL are unknown, so the predicate never becomes true.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Primary key", "Column(s) uniquely identifying each row."],
+  ["Foreign key", "A column referencing another table's primary key; enforces referential integrity."],
+  ["Join table", "A table linking two others in a many-to-many relationship."],
+  ["Aggregate", "A function over many rows: COUNT, SUM, AVG, MIN, MAX."],
+  ["CTE", "A named subquery introduced with `WITH`."],
+  ["Window function", "Computes values across related rows without grouping them away."],
+]} />

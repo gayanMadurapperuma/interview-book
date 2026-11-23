@@ -1,0 +1,165 @@
+---
+title: Decorators and metadata (the NestJS engine)
+part: Classes & OOP
+order: 10
+level: advanced
+summary: Functions that annotate and wrap classes and their members — how they run, the two decorator standards, and how frameworks like NestJS use them for routing and dependency injection.
+---
+
+A **decorator** is a function applied to a class or class member with the `@` syntax. It runs **when the class is defined** and can observe, modify or replace what it decorates — wrapping a method with logging, registering a route, recording that a parameter should be injected. Frameworks such as **NestJS**, **Angular**, **TypeORM** and **class-validator** are built on decorators plus **metadata** stored about classes.
+
+<Analogy>
+  Decorators are sticky labels on boxes in a warehouse. The label "fragile" doesn't change what's in the box, but the warehouse system reads it and handles the box accordingly. `@Get('/orders')` is a label that tells the framework "route GET /orders here"; `@Injectable()` says "the container may build this".
+</Analogy>
+
+## Why it matters
+
+If you interview for a NestJS or Angular role, expect questions on how decorators work, when they run, and how dependency injection uses them. Writing a simple method decorator (timing, caching, retry) is a common exercise.
+
+## Two decorator standards
+
+| | Legacy / experimental (`experimentalDecorators`) | Standard (TC39, TypeScript 5+) |
+|---|---|---|
+| Used by | NestJS, Angular (historically), TypeORM, class-validator | new code, libraries adopting the standard |
+| Parameter decorators | ✓ | ✗ |
+| Metadata | via `emitDecoratorMetadata` + `reflect-metadata` | `context.metadata` (decorator metadata proposal) |
+| Signature | `(target, propertyKey, descriptor)` | `(value, context)` |
+
+NestJS still relies on the **legacy** flavour (with `experimentalDecorators` and `emitDecoratorMetadata` enabled in `tsconfig`). Know both exist.
+
+## A method decorator (standard)
+
+```ts
+function timed(threshold = 100) {
+  return function <This, Args extends unknown[], R>(
+    original: (this: This, ...args: Args) => Promise<R>,
+    context: ClassMethodDecoratorContext<This>,
+  ) {
+    const name = String(context.name);
+    return async function (this: This, ...args: Args): Promise<R> {
+      const start = performance.now();
+      try {
+        return await original.apply(this, args);
+      } finally {
+        const ms = performance.now() - start;
+        if (ms > threshold) console.warn(`${name} took ${ms.toFixed(0)} ms`);
+      }
+    };
+  };
+}
+
+class ReportService {
+  @timed(200)
+  async build(month: string) { /* slow work */ }
+}
+```
+
+The decorator receives the original method and returns a **replacement** that wraps it — the decorator pattern from the previous chapter, applied declaratively.
+
+## When decorators run
+
+<Diagram
+  caption="Decorators run once, at class definition time — not on each call. The wrapper they return is what runs on each call."
+  chart={`flowchart TB
+    LOAD["module loads"] --> DEF["class ReportService is defined"]
+    DEF --> EVAL["decorator expressions evaluated<br/>timed(200) → returns decorator"]
+    EVAL --> APPLY["decorators applied: members first,<br/>then the class (bottom-up for stacked decorators)"]
+    APPLY --> REPL["build() replaced by wrapper"]
+    REPL --> CALL["later: service.build('11')<br/>→ wrapper runs → original runs"]`}
+  steps={[
+    { nodes: ["LOAD", "DEF"], text: "When the file is imported, the class definition executes." },
+    { nodes: ["DEF", "EVAL"], text: "Decorator factory calls like `timed(200)` run first, producing the actual decorator functions." },
+    { nodes: ["EVAL", "APPLY"], text: "Decorators are applied: member decorators before the class decorator; stacked decorators closest to the member first." },
+    { nodes: ["APPLY", "REPL"], text: "A method decorator can return a new function that replaces the method." },
+    { nodes: ["REPL", "CALL"], text: "Only the wrapper runs per call. Side effects in the decorator itself (like registering routes) happen once, at load." },
+  ]}
+/>
+
+## How NestJS uses decorators
+
+```ts
+@Controller('orders')
+export class OrdersController {
+  constructor(private readonly orders: OrdersService) {}        // injected by type
+
+  @Get(':id')
+  @UseGuards(AuthGuard)
+  findOne(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: User) {
+    return this.orders.findOne(id, user);
+  }
+
+  @Post()
+  @HttpCode(201)
+  create(@Body() dto: CreateOrderDto) {
+    return this.orders.create(dto);
+  }
+}
+
+@Injectable()
+export class OrdersService {
+  constructor(private readonly repo: OrdersRepository, private readonly events: EventBus) {}
+}
+```
+
+<Diagram
+  caption="Decorators record metadata at load time; Nest reads it at bootstrap to build routes and the dependency graph."
+  chart={`flowchart LR
+    D1["@Controller('orders')<br/>@Get(':id')"] --> M[("metadata store<br/>(reflect-metadata)")]
+    D2["@Injectable()<br/>+ emitDecoratorMetadata:<br/>constructor param types"] --> M
+    D3["@Body() / @Param()"] --> M
+    M --> BOOT["NestFactory.create(AppModule)"]
+    BOOT --> RT["router: GET /orders/:id<br/>→ OrdersController.findOne"]
+    BOOT --> DI["DI container: build OrdersRepository,<br/>EventBus → OrdersService → controller"]`}
+/>
+
+- `@Controller`, `@Get`, `@Post` record route metadata.
+- `@Injectable` marks a provider; with **`emitDecoratorMetadata`**, the compiler emits the **constructor parameter types**, so Nest knows to inject an `OrdersRepository` — which is why injection works "by type" even though types are normally erased.
+- Parameter decorators (`@Body`, `@Param`) tell Nest what to pass to each argument; **pipes** and **class-validator** decorators on DTOs (`@IsEmail()`, `@Min(1)`) drive validation.
+- Interfaces can't be injected by type (they're erased) — Nest uses **injection tokens** for them (`@Inject(PAYMENTS)`).
+
+## Other uses
+
+- ORMs: `@Entity()`, `@Column()`, `@ManyToOne()` (TypeORM, MikroORM).
+- Validation and serialisation: class-validator, class-transformer.
+- Cross-cutting concerns: caching, retries, logging, tracing, authorisation.
+
+## Cautions
+
+- Decorators hide behaviour — readers must know what each one does.
+- Ordering of stacked decorators matters.
+- Legacy decorators depend on compiler flags; mixing the two standards in one project is confusing.
+- Plain higher-order functions can do much of the same without special syntax.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Assuming decorators run on each call (they run once at definition; the returned wrapper runs per call).
+- Losing `this` or arguments in a wrapper (use `original.apply(this, args)`).
+- Expecting interface types to be injectable by type in NestJS.
+- Forgetting `experimentalDecorators`/`emitDecoratorMetadata` for frameworks that need them.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do decorators work, and how does NestJS use them for dependency injection?">
+
+A decorator is a function applied with `@` to a class, method, accessor, field or — in the legacy flavour — a parameter. It runs once when the class is defined and can record metadata or return a replacement, like a method wrapped with timing or retries; the wrapper is what runs on each call. NestJS uses the legacy decorators: `@Controller` and `@Get` record routing metadata, `@Body` and `@Param` record how to fill arguments, and `@Injectable` marks providers. With `emitDecoratorMetadata`, TypeScript emits the constructor parameter types as metadata, so at bootstrap Nest reads it, builds the dependency graph and injects instances by class. Because interfaces are erased, they need explicit injection tokens. TypeScript 5 also supports the standardised TC39 decorators, which have a different signature and no parameter decorators.
+
+<Fragment slot="deeper">
+
+- **When do decorators execute?** At class definition (module load), not per call.
+- **Why does `emitDecoratorMetadata` matter?** It preserves constructor parameter types for DI at runtime.
+- **Legacy vs standard decorators?** Different signatures; parameter decorators only in legacy.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Decorator", "A function applied with `@` to a class or member at definition time."],
+  ["Decorator factory", "A function returning a decorator, allowing arguments: `@timed(200)`."],
+  ["Metadata", "Information recorded about classes/members for frameworks to read."],
+  ["`emitDecoratorMetadata`", "Compiler option emitting design-time type info (e.g. constructor params)."],
+  ["Injection token", "A key used to inject dependencies that have no runtime class, like interfaces."],
+]} />

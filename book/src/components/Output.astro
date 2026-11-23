@@ -1,0 +1,9 @@
+---
+/** Console output shown directly under a code block. */
+interface Props { lines?: string[]; label?: string }
+const { lines, label = 'Output' } = Astro.props;
+---
+<div class="output" role="group" aria-label={label}>
+  <span class="out-label">{label}</span>
+  {lines ? <pre>{lines.join('\n')}</pre> : <div class="out-slot"><slot /></div>}
+</div>

@@ -1,0 +1,126 @@
+---
+title: Object storage, file uploads and CDNs
+part: Core components
+order: 30
+level: core
+summary: Where images, videos, documents and backups live — and how to upload and serve them without your application servers carrying the bytes.
+---
+
+**Object storage** — Amazon S3, Google Cloud Storage, Azure Blob Storage, and compatible systems like MinIO and Cloudflare R2 — stores files ("objects") of any size under keys in **buckets**, with extremely high durability and practically unlimited capacity, accessed over HTTP. It's the default home for user uploads, media, static assets, backups, logs and data lakes. Paired with a **CDN**, it serves those files to users worldwide quickly and cheaply.
+
+<Analogy>
+  A huge, infinitely expandable warehouse of labelled boxes. You don't care which shelf a box is on — you just quote its label to store or fetch it. And instead of every customer driving to the central warehouse, local depots (the CDN) keep copies of the most popular boxes nearby.
+</Analogy>
+
+## Why it matters
+
+Any design with photos, videos or documents needs this: interviewers expect "store files in S3, metadata in the database, upload with pre-signed URLs, serve through a CDN". Getting it wrong means API servers choking on large uploads and big bandwidth bills.
+
+## Object storage basics
+
+| Property | S3 (typical) |
+|---|---|
+| Model | bucket + key → object (bytes + metadata); flat namespace ("folders" are key prefixes) |
+| Durability | 99.999999999% (11 nines) — replicated across zones |
+| Consistency | strong read-after-write for new objects and overwrites |
+| Size | up to 5 TB per object (multipart upload for large files) |
+| Access | HTTP API; IAM policies; pre-signed URLs |
+| Features | versioning, lifecycle rules, storage classes, event notifications, replication, object lock |
+
+**Not a file system**: no in-place edits or appends (you replace whole objects), and listing is slow at scale — keep an index of objects in your database.
+
+## Uploading: pre-signed URLs
+
+<Diagram
+  sequence
+  caption="Direct-to-S3 upload. The API only issues short-lived permission; the file bytes never pass through your servers."
+  chart={`sequenceDiagram
+    participant C as Client
+    participant API as API server
+    participant S3 as S3 bucket
+    participant W as Worker
+    C->>API: POST /uploads { filename, type, size }
+    API->>API: auth, validate, create upload record (pending)
+    API-->>C: pre-signed PUT URL (expires in 5 min)
+    C->>S3: PUT file bytes directly
+    S3->>W: ObjectCreated event
+    W->>W: scan, generate thumbnails, mark ready`}
+  notes={[
+    "The client asks to upload, describing the file.",
+    "The API checks permissions, size and type, and records a pending upload with a generated key (never the user's filename).",
+    "It returns a pre-signed URL: a time-limited permission to PUT exactly that key.",
+    "The client uploads straight to S3 — your servers handle no bytes, no matter how big the file.",
+    "S3 emits an event when the object lands.",
+    "A worker processes it: virus scan, image resizing or video transcoding, then marks the record ready.",
+  ]}
+/>
+
+- Large files: **multipart upload** (parallel parts, resumable).
+- Enforce constraints in the pre-signed policy (content type, max size).
+- Key design: `uploads/{userId}/{uuid}.jpg` — unique, unguessable, no user-controlled path.
+
+## Serving: CDN in front
+
+<Diagram
+  caption="Files are served from CDN edges near users. The bucket stays private; only the CDN can read it."
+  chart={`flowchart LR
+    U["users worldwide"] --> E1["CDN edge (EU)"]
+    U --> E2["CDN edge (APAC)"]
+    E1 -- "cache miss" --> O[("private S3 bucket<br/>(origin)")]
+    E2 -- "cache miss" --> O
+    API["API"] -- "signed URL / cookie<br/>for private files" --> U`}
+/>
+
+- **Public assets** (product images, JS bundles): cache long with content-hashed names (`hero.3f9a.webp`) — new versions get new URLs, no invalidation needed.
+- **Private files** (invoices, paid videos): keep the bucket private and issue **signed CDN URLs/cookies** that expire.
+- **Image variants**: generate sizes on upload, or on the fly with an image service at the edge (resize, WebP/AVIF).
+- **Video**: transcode into adaptive streaming formats (HLS/DASH) with several bitrates; the CDN serves small segments.
+
+## Cost and lifecycle
+
+- **Storage classes**: Standard → Infrequent Access → Glacier tiers; **lifecycle rules** move or expire objects automatically (e.g. raw uploads to Glacier after 90 days, temp files deleted after 7).
+- **Egress** (data out to the internet) often costs more than storage — the CDN reduces it.
+- **Versioning + object lock** protect against accidental deletes and ransomware; cross-region replication for disaster recovery.
+
+## Security
+
+- Block public access by default; grant least-privilege IAM.
+- Encrypt at rest (default SSE) and in transit.
+- Never use user-supplied names as keys; validate content type by inspecting the file, not trusting the header.
+- Scan uploads; serve user content from a separate domain so a malicious file can't run in your app's origin.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Uploading large files through API servers.
+- Public buckets for private data.
+- Storing files in the database as blobs at scale.
+- Relying on `ListObjects` instead of a metadata table.
+- Forgetting lifecycle rules, so temporary and abandoned uploads cost money forever.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you handle user photo and video uploads?">
+
+Files go to object storage like S3 and metadata to the database. The client asks the API for an upload; the API authorises, validates size and type, creates a pending record with a generated key, and returns a short-lived pre-signed URL, so the client uploads directly to S3 — with multipart upload for large videos — and no bytes pass through our servers. An S3 event triggers workers that scan the file, create thumbnails or transcode video into HLS renditions, and mark the record ready. Files are served through a CDN with the bucket private: public assets get long cache lifetimes with versioned names, private ones get expiring signed URLs. Lifecycle rules move old originals to cheaper storage classes, and versioning protects against accidental deletion.
+
+<Fragment slot="deeper">
+
+- **What is a pre-signed URL?** A time-limited URL granting permission for one specific operation on one object.
+- **Why not store files in the database?** Bloats backups and memory; object storage is cheaper and built for it.
+- **How do you serve private files via CDN?** Signed URLs or cookies with expiry.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Object storage", "Flat key → object storage accessed over HTTP (S3, GCS, Azure Blob)."],
+  ["Pre-signed URL", "Temporary URL allowing a specific upload or download without credentials."],
+  ["Multipart upload", "Uploading a large object in parallel, resumable parts."],
+  ["Lifecycle rule", "Policy moving or deleting objects by age or prefix."],
+  ["Egress", "Data transferred out of the cloud provider to the internet."],
+  ["HLS", "HTTP Live Streaming: video split into segments at several bitrates."],
+]} />

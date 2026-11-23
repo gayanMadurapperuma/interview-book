@@ -1,0 +1,175 @@
+---
+title: Scope and the scope chain
+part: Scope & functions
+order: 10
+level: foundation
+summary: Where a variable can be seen is decided by where it is written in the code — and lookups always travel outward, never inward.
+---
+
+**Scope** is the set of places in your code where a variable can be used. JavaScript uses **lexical scope** (also called *static* scope): the visibility of a variable is decided by **where it is written in the source code**, not by where or when a function is called. When code uses a name, the engine looks in the current scope first, then the scope around it, then the one around that, all the way out to the global scope. That outward path is the **scope chain**.
+
+<Analogy>
+  Scopes are like nested rooms in a house. From the kitchen you can see everything in the kitchen and, through the open door, the hallway and the rest of the house. But from the hallway you cannot see inside the kitchen cupboards. Looking for something always means checking your own room first, then walking *outward* — never into a room nested inside yours.
+</Analogy>
+
+## Why it matters
+
+Scope is the foundation for closures, hoisting and the `var`/`let` debate. Bugs like accidentally sharing a variable between loop iterations, or a variable being "undefined" because it was shadowed, are scope bugs.
+
+## Kinds of scope
+
+| Scope | Created by | Holds |
+|---|---|---|
+| Global | The program itself | Top-level declarations in scripts |
+| Module | Each ES module file | Top-level declarations in that module (not global!) |
+| Function | Every function | Parameters, `var`, `let`, `const`, inner functions |
+| Block | Any `{ }` — `if`, `for`, `while`, bare blocks | `let`, `const`, `class` (**not** `var`) |
+
+```js
+const appName = 'Shop';            // module/global scope
+
+function checkout(cart) {          // function scope: cart, total
+  let total = 0;
+  for (const item of cart) {       // block scope: item (one per iteration)
+    const price = item.price;      // block scope: price
+    total += price;
+  }
+  // item and price are not visible here
+  return `${appName}: ${total}`;   // appName found by walking outward
+}
+```
+
+## The scope chain
+
+<Diagram
+  caption="Each scope links to the scope it was written inside. Lookups walk outward along these links until the name is found."
+  chart={`flowchart TB
+    subgraph G["Global / module scope"]
+      appName["appName = 'Shop'"]
+      subgraph F["checkout() function scope"]
+        cart["cart"]
+        total["total"]
+        subgraph B["for-loop block scope"]
+          item["item"]
+          price["price"]
+        end
+      end
+    end`}
+  steps={[
+    { nodes: ["price"], text: "Inside the loop, the engine needs `price`. It is found right here in the block scope." },
+    { nodes: ["price", "total"], text: "`total += price` needs `total`. Not in the block, so the engine looks one level **out**: found in the function scope." },
+    { nodes: ["appName"], text: "In the `return`, `appName` is not in the function scope either, so the lookup continues out to the module scope." },
+    { nodes: ["item", "price"], text: "From the function scope, `item` and `price` are **not** visible: lookups never go inward into nested blocks." },
+  ]}
+/>
+
+If the lookup reaches the global scope without finding the name, you get `ReferenceError: x is not defined`.
+
+## Lexical means "where it was written"
+
+The scope chain is fixed when the function is **written**, not when it is called:
+
+```js
+const level = 'global';
+
+function printLevel() {
+  console.log(level);
+}
+
+function run() {
+  const level = 'inside run';
+  printLevel();   // prints 'global'
+}
+run();
+```
+
+`printLevel` was written at the top level, so its outer scope is the top level — no matter that it is called from inside `run`. (A language with *dynamic* scope would print `'inside run'`. JavaScript does not work that way; the only "dynamic" thing in JavaScript is `this`.)
+
+<Diagram
+  caption="printLevel's outer link points to where it was defined, not to whoever calls it."
+  chart={`flowchart LR
+    subgraph Global["Global scope · level = 'global'"]
+      P["printLevel()"]
+      subgraph Run["run() scope · level = 'inside run'"]
+        Call["printLevel() is called here"]
+      end
+    end
+    P -- "outer scope" --> Global
+    Call -. "calls" .-> P`}
+/>
+
+## Shadowing
+
+An inner variable with the same name as an outer one **shadows** it: inside the inner scope, the outer one is hidden.
+
+```js
+const user = 'outer';
+function show() {
+  const user = 'inner';   // shadows the outer user
+  console.log(user);      // 'inner'
+}
+```
+
+Shadowing is legal but can confuse readers. Linters can warn about it (`no-shadow`).
+
+## `var` ignores blocks
+
+`var` is scoped to the whole **function**, not to the block it is written in. That is the root of many old bugs.
+
+```js
+function demo() {
+  if (true) {
+    var a = 1;
+    let b = 2;
+  }
+  console.log(a); // 1 — var leaked out of the if-block
+  console.log(b); // ReferenceError — let stayed inside
+}
+```
+
+The most famous consequence is loops: a single `var i` is shared by every iteration, which is why callbacks created in a `var` loop all see the final value. The *Closures* chapter walks through it with a live demo.
+
+## The global scope is shared
+
+In a classic `<script>` tag (not a module), top-level `var` and function declarations become properties of the global object (`window`). Every script on the page shares them, so names can collide.
+
+```html
+<script>var config = { theme: 'dark' };</script>
+<script>var config = 'oops';</script> <!-- silently overwrites the first -->
+```
+
+ES modules fix this: each module has its **own** top-level scope, and you share things only through `export` and `import`.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Assuming a function can see variables from the place it is **called**. It sees the place it was **written**.
+- Using `var` inside blocks and loops.
+- Forgetting a declaration keyword: in sloppy mode `count = 1` silently creates a global. Strict mode (on in modules) throws instead.
+- Confusing scope (where a variable is visible) with `this` (the object a function is called on).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is lexical scope and the scope chain?">
+
+Lexical scope means a variable's visibility is determined by where it is written in the source. Every function and block creates a scope, and each scope keeps a link to the scope it was written inside. When code refers to a name, the engine looks in the current scope, then follows those links outward until it finds it or reaches the global scope, at which point it throws a `ReferenceError`. Because the links are set by where the code is written, a function always sees the variables around its definition, regardless of who calls it — which is exactly what makes closures possible.
+
+<Fragment slot="deeper">
+
+- **Block scope vs function scope?** `let`/`const`/`class` are block-scoped; `var` is function-scoped.
+- **What is shadowing?** An inner declaration hiding an outer one with the same name.
+- **Is anything in JavaScript dynamically scoped?** No variables are; `this` is the dynamic part, decided at call time.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Scope", "The region of code where a variable can be accessed."],
+  ["Lexical scope", "Scope decided by where code is written, not where it is called."],
+  ["Scope chain", "The outward sequence of scopes searched when resolving a name."],
+  ["Block scope", "Scope created by `{ }`; applies to `let`, `const` and `class`."],
+  ["Shadowing", "An inner variable hiding an outer variable with the same name."],
+]} />

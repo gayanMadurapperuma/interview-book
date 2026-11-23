@@ -1,0 +1,245 @@
+---
+title: Functions, arrow functions and parameters
+part: Foundations
+order: 2
+level: foundation
+summary: Functions are values you can store, pass around and return. The way you write one changes how it behaves.
+---
+
+A **function** is a reusable block of code with a name (or sometimes without one) that takes inputs, does some work and can give back a result. In JavaScript, functions are also ordinary **values**: you can put them in variables, pass them to other functions and return them from functions. That single fact powers callbacks, event handlers, array methods like `map`, and closures.
+
+<Analogy>
+  A function is a recipe card. Writing the card (declaring the function) cooks nothing. Following the card (calling it) does the work, with whatever ingredients you hand over (arguments). Because it is just a card, you can also give the card to someone else and let them cook it later — that is a callback.
+</Analogy>
+
+## Why it matters
+
+Questions about the difference between function declarations, function expressions and arrow functions come up in almost every JavaScript interview, usually leading into hoisting and `this`. Knowing parameters well (defaults, rest, destructuring) also makes your everyday code shorter and safer.
+
+## Three ways to create a function
+
+```js
+// 1. Function declaration
+function add(a, b) {
+  return a + b;
+}
+
+// 2. Function expression (stored in a variable)
+const subtract = function (a, b) {
+  return a - b;
+};
+
+// 3. Arrow function
+const multiply = (a, b) => a * b;
+```
+
+All three can be called the same way: `add(2, 3)`. The differences are about **when they exist** and **what `this` and `arguments` mean inside them**.
+
+<Diagram
+  caption="Choosing between the three forms."
+  chart={`flowchart TB
+    Q{"What do you need?"} --> D["A named, reusable helper<br/>at the top level"]
+    Q --> C["A short callback<br/>map / filter / then"]
+    Q --> M["A method on an object<br/>or class that uses this"]
+    D --> FD["function declaration<br/>hoisted, usable before its line"]
+    C --> AR["arrow function<br/>short, borrows outer this"]
+    M --> MS["method syntax<br/>obj = { save() { … } }"]`}
+/>
+
+| | Declaration | Expression | Arrow |
+|---|---|---|---|
+| Hoisted (callable before its line)? | Yes, fully | No | No |
+| Has its own `this`? | Yes, set by the call | Yes, set by the call | **No**, uses the outer one |
+| Has `arguments`? | Yes | Yes | No |
+| Can be used with `new`? | Yes | Yes | No |
+| Typical use | Named helpers | Conditional or inline definitions | Callbacks |
+
+### Arrow function shortcuts
+
+```js
+const square = (x) => x * x;          // one expression: the value is returned automatically
+const greet = () => 'hello';          // no parameters
+const toUser = (name) => ({ name });  // returning an object literal needs ( )
+const log = (msg) => {                // a block body needs an explicit return
+  console.log(msg);
+};
+```
+
+The last two lines catch beginners out. Without the parentheses, `=> { name }` is read as a function body containing the label `name`, and it returns `undefined`.
+
+## Functions are values
+
+Because a function is a value, you can pass it into another function. The function you pass in is called a **callback**.
+
+```js
+const prices = [10, 25, 40];
+const withTax = prices.map((p) => p * 1.2);  // map calls our arrow once per item
+// [12, 30, 48]
+
+button.addEventListener('click', () => {
+  console.log('clicked');                   // runs later, when the user clicks
+});
+```
+
+<Diagram
+  sequence
+  caption="map calls the callback you give it once for every element, and collects the return values into a new array."
+  chart={`sequenceDiagram
+    participant You as Your code
+    participant Map as prices.map
+    participant Cb as callback
+    You->>Map: map(callback)
+    Map->>Cb: callback(10)
+    Cb-->>Map: 12
+    Map->>Cb: callback(25)
+    Cb-->>Map: 30
+    Map->>Cb: callback(40)
+    Cb-->>Map: 48
+    Map-->>You: [12, 30, 48]`}
+  notes={[
+    "You hand `map` a function. You do not call it yourself.",
+    "`map` calls it with the first element…",
+    "…and keeps the result, 12.",
+    "Second element.",
+    "Result 30.",
+    "Third element.",
+    "Result 48.",
+    "`map` returns a **new** array. The original `prices` is unchanged.",
+  ]}
+/>
+
+## Parameters and arguments
+
+**Parameters** are the names in the definition; **arguments** are the actual values you pass when calling. JavaScript is relaxed about the count: missing arguments become `undefined`, and extra ones are ignored (unless you collect them).
+
+### Default values
+
+```js
+function connect(host = 'localhost', port = 5432) {
+  return `${host}:${port}`;
+}
+connect();              // 'localhost:5432'
+connect('db.internal'); // 'db.internal:5432'
+connect(undefined, 6543); // 'localhost:6543' — only undefined triggers a default
+connect(null, 6543);    // 'null:6543'      — null does NOT
+```
+
+### Rest parameters
+
+`...name` collects any number of arguments into a real array.
+
+```js
+function sum(...numbers) {
+  return numbers.reduce((total, n) => total + n, 0);
+}
+sum(1, 2, 3, 4); // 10
+```
+
+Rest parameters replaced the old `arguments` object, which looked like an array but was not one (and does not exist in arrow functions).
+
+### Destructuring parameters
+
+When a function takes many options, accept one object and pull out the fields you need. Callers can then pass options in any order, and the call site is self-describing.
+
+```js
+function createUser({ name, role = 'viewer', active = true }) {
+  return { name, role, active };
+}
+
+createUser({ name: 'Ada', role: 'admin' });
+// instead of the unclear: createUser('Ada', 'admin', true)
+```
+
+## Return values
+
+A function stops as soon as it hits `return`. If it never returns (or uses a bare `return;`), the result is `undefined`.
+
+```js
+function findUser(users, id) {
+  for (const u of users) {
+    if (u.id === id) return u;  // leave early once found
+  }
+  return null;                   // explicit "not found"
+}
+```
+
+<Callout type="pitfall" title="Watch out for automatic semicolon insertion">
+
+```js
+function getConfig() {
+  return            // JavaScript inserts a ; here
+  {
+    debug: true
+  };
+}
+getConfig(); // undefined
+```
+
+Always start the returned value on the **same line** as `return`.
+
+</Callout>
+
+## Pure functions and side effects
+
+A **pure** function always gives the same output for the same input and changes nothing outside itself. Pure functions are easy to test and safe to reuse.
+
+```js
+// pure
+const total = (items) => items.reduce((s, i) => s + i.price, 0);
+
+// impure: changes its input and depends on outside state
+let discount = 0.1;
+function applyDiscount(items) {
+  items.forEach((i) => (i.price *= 1 - discount)); // mutates the caller's array
+}
+```
+
+You cannot avoid side effects completely — saving to a database or printing is a side effect — but keeping most logic pure and pushing side effects to the edges makes code much easier to reason about.
+
+## Immediately invoked functions
+
+You will see this pattern in older code. It creates a private scope and runs once:
+
+```js
+(function () {
+  const secret = 42;  // not visible outside
+})();
+```
+
+Modern code rarely needs it, because block scope (`let`/`const` inside `{ }`) and ES modules give you privacy for free.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using an arrow function as an object method that needs `this` — arrows do not get their own `this`.
+- Forgetting parentheses when an arrow returns an object: `() => ({ ok: true })`.
+- Passing `null` and expecting a default parameter to apply. Only `undefined` triggers defaults.
+- Calling a function expression before the line that defines it.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is the difference between a function declaration and an arrow function?">
+
+A function declaration is hoisted, so it can be called before the line where it appears, and it gets its own `this` and `arguments` decided by how it is called. An arrow function is an expression, so it only exists after its line runs, and it has no `this`, `arguments` or `prototype` of its own — it uses the `this` of the surrounding code. That makes arrows ideal for callbacks inside methods, but wrong as object methods or constructors.
+
+<Fragment slot="deeper">
+
+- **What does "first-class functions" mean?** Functions are values: they can be stored, passed as arguments and returned.
+- **What is a callback?** A function passed to another function to be called later.
+- **Why prefer rest parameters over `arguments`?** Rest gives a real array, is explicit in the signature and works in arrow functions.
+- **What is a pure function?** Same input gives the same output, with no side effects.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Function declaration", "`function name() {}` at statement level. Hoisted with its body."],
+  ["Function expression", "A function created as part of an expression, e.g. assigned to a variable."],
+  ["Arrow function", "Short syntax `(a) => a * 2`. No own `this`, `arguments` or `new`."],
+  ["Callback", "A function passed to another function, to be called by it."],
+  ["Rest parameter", "`...args` — collects remaining arguments into an array."],
+  ["Pure function", "Returns the same output for the same input and has no side effects."],
+]} />

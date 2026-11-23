@@ -1,0 +1,151 @@
+---
+title: "Real-time APIs: WebSockets, SSE, webhooks — and choosing an API style"
+part: Beyond request–response
+order: 8
+level: core
+summary: How servers push data to clients and to other systems, and a guide to picking REST, GraphQL, gRPC or a push channel for each job.
+---
+
+Request–response APIs answer when asked. Many features need the server to **push**: chat messages, live scores, notifications, progress bars, collaborative edits, or events to a partner's system. The main options are **polling** (asking repeatedly), **long polling**, **Server-Sent Events** (a one-way stream from server to browser), **WebSockets** (a two-way persistent connection) and **webhooks** (the server calls *another server's* HTTP endpoint). This chapter compares them and closes with a guide to choosing an API style overall.
+
+<Analogy>
+  Polling is phoning the pizza shop every two minutes to ask "is it ready?". Long polling is phoning and staying on hold until it is. SSE is the shop texting you updates. WebSockets is an open phone line where both of you can talk any time. A webhook is the shop calling *your office's* number when the order is ready.
+</Analogy>
+
+## Why it matters
+
+Chat, notifications and live dashboards appear in many system design questions. Interviewers want you to pick the right push mechanism and explain how it scales across many servers.
+
+## The options
+
+<Diagram
+  caption="From simplest to most capable."
+  chart={`flowchart LR
+    P["Polling<br/>GET every N s"] --> LP["Long polling<br/>request held open<br/>until data or timeout"]
+    LP --> SSE["Server-Sent Events<br/>one-way stream over HTTP<br/>auto-reconnect"]
+    SSE --> WS["WebSockets<br/>full-duplex, persistent"]
+    WH["Webhooks<br/>server → other server<br/>HTTP POST on events"]`}
+/>
+
+| | Polling | Long polling | SSE | WebSockets | Webhooks |
+|---|---|---|---|---|---|
+| Direction | client pulls | client pulls (held) | server → client | both ways | server → server |
+| Latency | up to interval | low | low | lowest | low |
+| Overhead | high (empty requests) | medium | low | low | per event |
+| Protocol | HTTP | HTTP | HTTP (text/event-stream) | WS upgrade | HTTP POST |
+| Reconnect / resume | n/a | manual | built in (`Last-Event-ID`) | manual | retries by sender |
+| Good for | rare updates, simplicity | legacy fallback | feeds, notifications, AI token streaming, progress | chat, games, collaboration | integrations between companies |
+
+## Server-Sent Events
+
+A plain HTTP response that never ends; the server writes events as text lines. Browsers have `EventSource` built in, with automatic reconnection.
+
+```js
+app.get('/events', (req, res) => {
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  res.flushHeaders();
+  const send = (e) => res.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e.data)}\n\n`);
+  const unsubscribe = bus.subscribe(req.user.id, send);
+  const ping = setInterval(() => res.write(': ping\n\n'), 25_000);   // keep proxies from closing it
+  req.on('close', () => { clearInterval(ping); unsubscribe(); });
+});
+```
+
+SSE works through standard HTTP infrastructure, is easy to secure with cookies, and is ideal when only the server needs to push — which is most "live update" features (and how LLM APIs stream tokens).
+
+## WebSockets
+
+A WebSocket starts as an HTTP request with `Upgrade: websocket`, then becomes a persistent, two-way, message-based connection.
+
+<Diagram
+  sequence
+  caption="WebSocket lifecycle: HTTP upgrade, then messages in both directions, with heartbeats to detect dead connections."
+  chart={`sequenceDiagram
+    participant C as Browser
+    participant S as WS server
+    C->>S: GET /ws (Upgrade: websocket, auth cookie/token)
+    S-->>C: 101 Switching Protocols
+    C->>S: { type: "subscribe", room: "order-1042" }
+    S-->>C: { type: "status", value: "shipped" }
+    S->>C: ping
+    C-->>S: pong`}
+  notes={[
+    "The connection begins as an HTTP request asking to upgrade; authenticate here.",
+    "The server agrees, and the TCP connection is now a WebSocket.",
+    "Either side can send messages at any time — here the client subscribes to a room.",
+    "The server pushes updates as they happen.",
+    "Periodic pings detect half-dead connections (mobile networks drop silently)…",
+    "…and the client answers. No pong → close and let the client reconnect.",
+  ]}
+/>
+
+### Scaling push across many servers
+
+<Diagram
+  caption="Each client is connected to one server, but the event can happen anywhere. A pub/sub backplane delivers it to the server holding the right connection."
+  chart={`flowchart LR
+    EV["order service:<br/>order 1042 shipped"] --> PS[("pub/sub backplane<br/>Redis / NATS / Kafka")]
+    PS --> W1["WS server 1<br/>(not subscribed)"]
+    PS --> W2["WS server 2<br/>holds Alice's socket"]
+    W2 --> A["Alice's browser"]`}
+  steps={[
+    { nodes: ["EV", "PS"], text: "An event happens in some backend service and is published to a channel (e.g. `user:alice` or `order:1042`)." },
+    { nodes: ["PS", "W1", "W2"], text: "Every WebSocket/SSE server subscribes to the channels its connected clients care about." },
+    { nodes: ["W2", "A"], text: "Server 2 holds Alice's connection, so it forwards the event down her socket." },
+  ]}
+/>
+
+Practical concerns: connection limits per server (tens of thousands; tune file descriptors and memory), sticky load balancing for the connection's life, graceful **reconnection with resume** (client sends its last event ID or sequence), backpressure for slow clients, authentication on connect plus re-validation for long-lived connections, and draining connections on deploy. Managed options: AWS API Gateway WebSockets, Pusher, Ably, Socket.IO (adds rooms, fallbacks and reconnection on top).
+
+## Webhooks
+
+Server-to-server push: when something happens, you POST an event to a URL the customer registered. Production essentials (detailed in *REST in production*): HMAC signatures with timestamps, at-least-once delivery with retries and backoff, event IDs for dedup, small payloads, a delivery log and replay. As a **receiver**, verify the signature, respond 2xx quickly, and process asynchronously.
+
+## Choosing an API style
+
+<Diagram
+  caption="One system often uses several styles, each where it fits best."
+  chart={`flowchart TB
+    Q{"Who is the client,<br/>and what do they need?"} --> PUB["Public / partner API,<br/>simple, cacheable"] --> REST["REST + OpenAPI"]
+    Q --> UI["Several UIs needing<br/>flexible nested data"] --> GQL["GraphQL (BFF)"]
+    Q --> SVC["Internal services,<br/>low latency, typed"] --> GRPC["gRPC"]
+    Q --> PUSH1["Server → browser updates"] --> SSE2["SSE (one-way) /<br/>WebSockets (two-way)"]
+    Q --> PUSH2["Notify another company's system"] --> WH2["Webhooks"]
+    Q --> ASYNC["Fire-and-forget between services"] --> MQ["Events on a broker<br/>(Kafka, SNS/SQS)"]`}
+/>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Polling every second from thousands of clients when SSE would do.
+- WebSockets for one-way updates (SSE is simpler and HTTP-friendly).
+- No heartbeat, so dead connections pile up.
+- Broadcasting every event to every server without a channel/subscription model.
+- Unsigned webhooks; receivers doing slow work before responding.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you push live updates to users?">
+
+If only the server needs to push — notifications, order status, a live feed — I'd use Server-Sent Events: a long-lived HTTP response that streams events, with built-in browser reconnection and resume via the last event ID, and no special infrastructure. For genuinely two-way, low-latency interaction like chat or collaborative editing, WebSockets. Either way, clients connect to a horizontally scaled tier of connection servers, and backend services publish events to a pub/sub backplane such as Redis or Kafka, keyed by user or room; each connection server subscribes to the channels its clients need and forwards events. I'd add heartbeats, authentication at connect time, reconnection with resume from the last sequence number, and connection draining on deploys. For pushing to other companies' systems, signed webhooks with retries.
+
+<Fragment slot="deeper">
+
+- **SSE vs WebSockets?** One-way over plain HTTP with auto-reconnect vs full-duplex over an upgraded connection.
+- **How do you scale WebSockets?** Many connection servers plus a pub/sub backplane; sticky connections; resume on reconnect.
+- **When is polling fine?** Infrequent updates and small numbers of clients.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Long polling", "Holding a request open until data is available or a timeout."],
+  ["Server-Sent Events", "One-way server-to-client event stream over HTTP."],
+  ["WebSocket", "Persistent full-duplex connection established via HTTP upgrade."],
+  ["Backplane", "Pub/sub system distributing events to the servers holding client connections."],
+  ["Heartbeat", "Periodic ping to detect dead connections."],
+  ["Webhook", "HTTP callback from one system to another on events."],
+]} />

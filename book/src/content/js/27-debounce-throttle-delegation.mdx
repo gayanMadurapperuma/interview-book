@@ -1,0 +1,208 @@
+---
+title: Debounce, throttle and event delegation
+part: Modern JavaScript
+order: 27
+level: core
+summary: Three small patterns for handling events efficiently — and three favourite "write this from scratch" interview questions.
+demo: js-debounce
+---
+
+Browsers fire some events extremely often: `input` on every keystroke, `scroll` and `resize` dozens of times per second, `mousemove` constantly. Running expensive work (a network request, a layout calculation) on every single event wastes resources and makes pages janky. Two techniques limit how often a function runs: **debounce** waits for a pause, **throttle** runs at most once per time window. A third pattern, **event delegation**, handles events for many elements with a single listener.
+
+<Analogy>
+  **Debounce** is a lift door: every time someone walks up, the door stays open a bit longer; it only closes once nobody has arrived for a few seconds. **Throttle** is a metro train: it leaves every five minutes no matter how many people are waiting. **Delegation** is a building's front desk: instead of a guard at every office door, one person at the entrance handles everyone and checks which office they're going to.
+</Analogy>
+
+## Why it matters
+
+"Implement debounce" is one of the most common front-end interview questions. These patterns also prevent real problems: search boxes flooding the API, scroll handlers dropping frames, and pages with thousands of listeners using too much memory.
+
+## Debounce: wait for a pause
+
+A debounced function runs only after it has **not** been called for `ms` milliseconds. Each new call resets the timer.
+
+```js
+function debounce(fn, ms) {
+  let timer;
+  return function (...args) {
+    clearTimeout(timer);                           // cancel the pending run
+    timer = setTimeout(() => fn.apply(this, args), ms);
+  };
+}
+
+const search = debounce((q) => fetch(`/api/search?q=${encodeURIComponent(q)}`), 300);
+input.addEventListener('input', (e) => search(e.target.value));
+```
+
+Typing "hello" quickly sends **one** request, 300 ms after the last keystroke, instead of five.
+
+<DemoLink id="js-debounce" />
+
+### A production-quality version
+
+Interviewers often follow up with: can it fire on the leading edge? Can it be cancelled? Can it flush?
+
+```js
+function debounce(fn, ms, { leading = false } = {}) {
+  let timer = null;
+  let lastArgs, lastThis;
+
+  function debounced(...args) {
+    lastArgs = args; lastThis = this;
+    const callNow = leading && timer === null;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (!leading) fn.apply(lastThis, lastArgs);   // trailing edge
+    }, ms);
+    if (callNow) fn.apply(this, args);              // leading edge
+  }
+  debounced.cancel = () => { clearTimeout(timer); timer = null; };
+  debounced.flush = () => {
+    if (timer !== null) { clearTimeout(timer); timer = null; fn.apply(lastThis, lastArgs); }
+  };
+  return debounced;
+}
+```
+
+## Throttle: at most once per window
+
+A throttled function runs immediately, then ignores (or defers) calls until `ms` has passed. It guarantees regular updates during continuous activity.
+
+```js
+function throttle(fn, ms) {
+  let last = 0;
+  let pending = null;
+  return function (...args) {
+    const now = Date.now();
+    const remaining = ms - (now - last);
+    if (remaining <= 0) {
+      clearTimeout(pending); pending = null;
+      last = now;
+      fn.apply(this, args);
+    } else if (!pending) {
+      // make sure the final call in a burst still happens (trailing edge)
+      pending = setTimeout(() => {
+        last = Date.now(); pending = null;
+        fn.apply(this, args);
+      }, remaining);
+    }
+  };
+}
+
+window.addEventListener('scroll', throttle(updateProgressBar, 100));
+```
+
+## Debounce versus throttle, visually
+
+<Diagram
+  caption="The same burst of events (top), handled three ways."
+  chart={`flowchart TB
+    subgraph Events["Events: a burst, then silence"]
+      direction LR
+      e1["●"] --- e2["●"] --- e3["●"] --- e4["●"] --- e5["●"] --- e6["●"] --- q["· · · silence"]
+    end
+    subgraph Throttle["Throttle (100 ms): steady updates during the burst"]
+      direction LR
+      t1["run"] --- t2["…"] --- t3["run"] --- t4["…"] --- t5["run"]
+    end
+    subgraph Debounce["Debounce (300 ms): one run after the burst ends"]
+      direction LR
+      d1["…"] --- d2["…"] --- d3["…"] --- d4["…"] --- d5["run ✓"]
+    end
+    Events ~~~ Throttle ~~~ Debounce`}
+/>
+
+| | Debounce | Throttle |
+|---|---|---|
+| Runs | once, after activity stops | regularly, during activity |
+| Good for | search-as-you-type, autosave, validation, window resize end | scroll position, infinite scroll, drag, mousemove analytics |
+| Risk | never runs if activity never stops | may miss the final state without a trailing call |
+
+For visual updates driven by scroll or mouse, `requestAnimationFrame` is often better than a fixed-interval throttle: it runs at most once per frame, exactly when the browser is about to paint.
+
+```js
+let scheduled = false;
+window.addEventListener('scroll', () => {
+  if (scheduled) return;
+  scheduled = true;
+  requestAnimationFrame(() => { scheduled = false; updateProgressBar(); });
+});
+```
+
+## Event delegation
+
+Events in the DOM **bubble**: a click on a button also fires on its parent, grandparent, and so on up to `document`. Delegation uses this: put one listener on a container, and figure out which child was clicked from `event.target`.
+
+```js
+// instead of one listener per row (1,000 rows → 1,000 listeners)…
+document.querySelector('#todo-list').addEventListener('click', (e) => {
+  const button = e.target.closest('button[data-action]');
+  if (!button || !e.currentTarget.contains(button)) return;   // not a click we care about
+
+  const item = button.closest('li');
+  if (button.dataset.action === 'delete') removeTodo(item.dataset.id);
+  if (button.dataset.action === 'toggle') toggleTodo(item.dataset.id);
+});
+```
+
+<Diagram
+  caption="A click starts at the target and bubbles up. One listener on the list catches clicks from every row — including rows added later."
+  chart={`flowchart BT
+    B["button.delete<br/>(event.target)"] --> LI["li data-id=42"]
+    LI --> UL["ul#todo-list<br/>★ single listener here"]
+    UL --> BODY["body"]
+    BODY --> DOC["document"]`}
+  steps={[
+    { nodes: ["B"], text: "The user clicks a delete button. That button is `event.target`." },
+    { nodes: ["B", "LI"], text: "The event bubbles up to the list item…" },
+    { nodes: ["LI", "UL"], text: "…and reaches the `ul`, where our one listener runs. `e.target.closest('button')` finds which button was clicked." },
+    { nodes: ["UL", "BODY", "DOC"], text: "Unless stopped, it keeps bubbling to `body` and `document`." },
+  ]}
+/>
+
+Benefits:
+
+- **One listener** instead of thousands — less memory, faster setup.
+- **Works for elements added later**, because the listener is on the container, not on the rows.
+- Simpler cleanup: remove one listener.
+
+Watch-outs:
+
+- `event.target` may be a nested element (an icon inside the button) — use `closest()`.
+- Some events don't bubble (`focus`, `blur`, `mouseenter`). Use their bubbling versions (`focusin`, `focusout`, `mouseover`).
+- `e.stopPropagation()` somewhere below will hide events from your delegated listener.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Creating the debounced function **inside** the event handler — a new timer per call means nothing is ever debounced. Create it once.
+- Losing `this` and arguments — use `fn.apply(this, args)`.
+- Forgetting to cancel pending debounced calls when a component unmounts.
+- Using `e.target.matches('button')` and missing clicks on child elements of the button.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is the difference between debounce and throttle? How would you implement debounce?">
+
+Both limit how often a function runs during bursts of events. Debounce waits until the calls stop: each call cancels the pending timer and starts a new one, so the function runs once, `ms` after the last call — ideal for search inputs and autosave. Throttle runs at most once per time window, giving steady updates during continuous activity like scrolling. Debounce is a closure holding a timer: on each call, `clearTimeout` then `setTimeout` with the latest arguments, using `apply` to preserve `this`. I'd add options for leading-edge calls, plus `cancel` and `flush`.
+
+<Fragment slot="deeper">
+
+- **What is event delegation?** One listener on a container that handles events from its children via bubbling and `event.target`.
+- **Why `closest()`?** The target may be a nested element inside the one you care about.
+- **When would you use `requestAnimationFrame` instead of throttle?** For visual updates, so work happens once per frame right before paint.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Debounce", "Delay a function until calls have stopped for a set time."],
+  ["Throttle", "Allow a function to run at most once per time window."],
+  ["Leading / trailing edge", "Whether the function runs at the start or the end of a burst."],
+  ["Event bubbling", "An event travelling from its target up through its ancestors."],
+  ["Event delegation", "Handling events for many children with a single listener on a common ancestor."],
+]} />

@@ -1,0 +1,179 @@
+---
+title: What TypeScript is, and the runtime gap
+part: Foundations
+order: 1
+level: foundation
+summary: TypeScript is JavaScript plus a type checker that runs before your code does. Everything it knows disappears at runtime — and that gap is where real bugs hide.
+---
+
+**TypeScript** is JavaScript with **type annotations** and a **compiler** that checks them. You describe the shape of your data — "this function takes a `User` and returns a `string`" — and the compiler (`tsc`) reports mistakes **before** the code runs: a typo in a property name, a missing argument, a value that might be `undefined`. Then it **erases** all the types and outputs plain JavaScript. Nothing about TypeScript exists at runtime.
+
+<Analogy>
+  TypeScript is a building inspector who checks the blueprints. They catch a doorway too narrow for a wheelchair before anyone builds it. But once the building is up, the inspector goes home. If someone later drives a truck through the wall — data from outside that doesn't match the plans — the inspector isn't there to stop it.
+</Analogy>
+
+## Why it matters
+
+Most JavaScript jobs now use TypeScript. Interviewers want to know that you understand its benefits (catching errors early, safer refactors, editor help) and its central limitation: **types are compile-time only**. That limitation is why you still need runtime validation for API input, JSON and environment variables.
+
+## The compile step
+
+<Diagram
+  caption="tsc checks the types, then removes them. What runs is ordinary JavaScript with no type information left."
+  chart={`flowchart LR
+    TS["app.ts<br/>function greet(u: User): string"] --> TC["tsc / esbuild / swc"]
+    TC -- "type check" --> ERR["errors shown in<br/>editor and CI"]
+    TC -- "erase types" --> JS["app.js<br/>function greet(u)"]
+    JS --> RUN["Node or browser<br/>runs plain JS"]`}
+  steps={[
+    { nodes: ["TS"], text: "You write TypeScript: JavaScript plus annotations." },
+    { nodes: ["TS", "TC", "ERR"], text: "The type checker analyses the whole program and reports mismatches — in your editor as you type, and in CI." },
+    { nodes: ["TC", "JS"], text: "Then the types are stripped. Tools like esbuild and swc only strip (no checking), which is why they're so fast." },
+    { nodes: ["JS", "RUN"], text: "The runtime sees plain JavaScript. It has no idea what `User` was." },
+  ]}
+/>
+
+```ts
+// input: TypeScript
+interface User { id: number; name: string }
+function greet(user: User): string {
+  return `Hello, ${user.name}`;
+}
+greet({ id: 1, nme: 'Ada' });   // ✘ compile error: 'nme' does not exist in type 'User'
+```
+
+```js
+// output: JavaScript — the interface and annotations are gone
+function greet(user) {
+  return `Hello, ${user.name}`;
+}
+```
+
+Recent Node versions can even run `.ts` files directly by stripping types — confirming that types are just erasable decoration. (Features that generate code, like `enum` and parameter properties, need a full compiler.)
+
+## What you gain
+
+- **Errors before running.** Typos, wrong arguments, forgotten cases, calling something that might be `undefined`.
+- **Safe refactoring.** Rename a field and the compiler lists every place that must change.
+- **Editor intelligence.** Autocomplete, inline documentation, go-to-definition across the codebase.
+- **Documentation that can't go stale.** `function charge(amount: Cents, card: CardToken): Promise<Receipt>` says a lot.
+
+## Structural typing
+
+TypeScript checks **shapes**, not names. Any value with the required properties fits, wherever it came from. (Java and C# are *nominal*: a type must be declared to implement an interface.)
+
+```ts
+interface Point { x: number; y: number }
+
+const p = { x: 1, y: 2, label: 'origin' };
+function plot(pt: Point) {}
+plot(p);                         // ✓ p has x and y — the extra label is fine
+
+class Vector { constructor(public x: number, public y: number) {} }
+plot(new Vector(3, 4));          // ✓ same shape
+```
+
+<Callout type="note" title="Excess property checks">
+  Passing an object **literal** directly is stricter: `plot({ x: 1, y: 2, label: 'a' })` is an error, which catches typos in inline objects. Assigning through a variable first skips the check.
+</Callout>
+
+## The runtime gap
+
+Because types vanish, TypeScript cannot check data that only appears **at runtime**: HTTP request bodies, `JSON.parse` results, database rows, environment variables, `localStorage`, third-party API responses.
+
+```ts
+interface User { id: number; email: string }
+
+const res = await fetch('/api/me');
+const user: User = await res.json();   // compiles — but nothing checked it!
+user.email.toLowerCase();              // runtime crash if the API returned { id: 1 }
+```
+
+`res.json()` returns `any`, and TypeScript simply **trusts** your annotation. The fix is to **validate at the boundary** with a runtime schema, which also gives you a type you can trust:
+
+```ts
+import { z } from 'zod';
+
+const UserSchema = z.object({ id: z.number(), email: z.string().email() });
+type User = z.infer<typeof UserSchema>;     // the type comes from the schema
+
+const parsed = UserSchema.safeParse(await res.json());
+if (!parsed.success) throw new Error('unexpected API response');
+const user: User = parsed.data;            // now genuinely checked
+```
+
+<Diagram
+  caption="Inside your program, the compiler guards you. At the edges, outside data must be validated at runtime before it earns a type."
+  chart={`flowchart LR
+    subgraph Outside["Outside world (unchecked at runtime)"]
+      HTTP["HTTP body"]
+      JSN["JSON files"]
+      ENV["env vars"]
+      DB["DB rows"]
+    end
+    V["Runtime validation<br/>zod · valibot · ajv"]
+    subgraph Inside["Inside your program (compiler-checked)"]
+      CODE["typed business logic"]
+    end
+    HTTP --> V
+    JSN --> V
+    ENV --> V
+    DB --> V
+    V --> CODE`}
+/>
+
+## `any` versus `unknown`
+
+- **`any`** turns the checker off for that value. Anything goes, nothing is checked, and it spreads to everything it touches.
+- **`unknown`** means "I don't know what this is yet". You can't use it until you **narrow** it with a check.
+
+```ts
+function parseAny(text: string): any { return JSON.parse(text); }
+parseAny('{}').foo.bar.baz();          // compiles, crashes at runtime
+
+function parseUnknown(text: string): unknown { return JSON.parse(text); }
+const v = parseUnknown('{}');
+v.foo;                                 // ✘ error: 'v' is of type 'unknown'
+if (typeof v === 'object' && v !== null && 'foo' in v) { /* allowed here */ }
+```
+
+Prefer `unknown` for anything not yet validated, and enable `strict` mode (see *tsconfig*), which among other things makes `catch (err)` variables `unknown`.
+
+## Gradual adoption
+
+TypeScript can be introduced file by file: enable `allowJs`, rename files to `.ts`, add types where they help most, and tighten `strict` options over time. Type definitions for most npm packages are bundled or available from `@types/…`.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Believing TypeScript validates data at runtime.
+- Annotating `res.json()` or `JSON.parse` results without checking them.
+- Reaching for `any` or `as SomeType` to silence errors instead of fixing them.
+- Expecting `interface` declarations to exist at runtime (you can't `instanceof` an interface).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What does TypeScript give you, and what doesn't it do?">
+
+TypeScript adds a static type system to JavaScript. The compiler checks the whole program before it runs — wrong property names, missing arguments, possibly undefined values, missing cases — and gives the editor enough information for autocomplete and safe refactoring. Its types are structural, so anything with the right shape fits. Crucially, all types are erased: the output is plain JavaScript and nothing is checked at runtime. So any data entering from outside — request bodies, `JSON.parse`, environment variables, database rows — has to be validated with a runtime schema such as zod, which can also produce the static type so the two never drift. I'd use `unknown` rather than `any` for unvalidated data and run with `strict` on.
+
+<Fragment slot="deeper">
+
+- **`any` vs `unknown`?** `any` disables checking; `unknown` forces narrowing before use.
+- **Structural vs nominal typing?** TS compares shapes, not declared names.
+- **What do esbuild/swc skip?** Type checking — run `tsc --noEmit` in CI.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Static typing", "Checking types before the program runs."],
+  ["Type erasure", "Removing all type information when compiling to JavaScript."],
+  ["Structural typing", "Compatibility based on shape rather than declared names."],
+  ["`unknown`", "A safe top type that must be narrowed before use."],
+  ["`any`", "Opts a value out of type checking entirely."],
+  ["Runtime validation", "Checking real data's shape while the program runs, e.g. with zod."],
+]} />

@@ -1,0 +1,191 @@
+---
+title: Isolation levels and the anomalies they allow
+part: Transactions
+order: 5
+level: advanced
+summary: Read committed, repeatable read, serializable — each level is defined by which strange things it still lets concurrent transactions see.
+---
+
+**Isolation** is the "I" in ACID: how much concurrent transactions can see of each other. Perfect isolation — every transaction behaving as if it ran alone — is expensive, so databases offer **isolation levels** that trade some safety for speed. Each level is best understood by the **anomalies** (concurrency bugs) it still permits.
+
+<Analogy>
+  Several editors working on the same document. At the lowest level, you might see a colleague's sentence while they're still typing it. A step up, you only see finished sentences — but the paragraph you read a minute ago might have changed. Higher still, you get a frozen copy of the document as it was when you started. At the top, the system guarantees the final result is as if everyone had taken turns.
+</Analogy>
+
+## Why it matters
+
+Isolation bugs are the hardest to find: they only appear under concurrency, can't be reproduced locally, and silently corrupt data — two bookings for one seat, an account below its limit. Interviewers ask about the levels, the anomalies, and the default of common databases.
+
+## The anomalies
+
+<Diagram
+  caption="The classic anomalies, roughly from most to least obvious."
+  chart={`flowchart TB
+    A["Concurrency anomalies"] --> DR["Dirty read<br/>see another transaction's<br/>uncommitted change"]
+    A --> NR["Non-repeatable read<br/>read the same row twice,<br/>get different values"]
+    A --> PH["Phantom read<br/>re-run a query,<br/>new rows appear"]
+    A --> LU["Lost update<br/>two read-modify-writes,<br/>one overwrites the other"]
+    A --> WS["Write skew<br/>two transactions each check a rule,<br/>write different rows, break it together"]`}
+/>
+
+### Dirty read
+
+T1 updates a row but hasn't committed; T2 reads the new value; T1 rolls back. T2 acted on data that never existed. Almost every database prevents this by default.
+
+### Non-repeatable read
+
+<Diagram
+  sequence
+  caption="Non-repeatable read under READ COMMITTED: each statement sees the latest committed data, so two reads in one transaction can differ."
+  chart={`sequenceDiagram
+    participant T1 as Transaction 1
+    participant DB as accounts (balance = 100)
+    participant T2 as Transaction 2
+    T1->>DB: SELECT balance → 100
+    T2->>DB: UPDATE balance = 50
+    T2->>DB: COMMIT
+    T1->>DB: SELECT balance → 50 (!)
+    T1->>DB: COMMIT`}
+  notes={[
+    "Transaction 1 reads the balance: 100.",
+    "Transaction 2 changes it to 50…",
+    "…and commits.",
+    "Transaction 1 reads again in the same transaction and now sees 50. Its two reads disagree.",
+    "Any decision T1 made based on the first read may now be wrong.",
+  ]}
+/>
+
+### Phantom read
+
+T1 runs `SELECT count(*) FROM bookings WHERE room = 7 AND day = '2026-12-01'` and gets 0. T2 inserts a booking for that room and day and commits. T1 runs the query again and gets 1 — a new "phantom" row appeared.
+
+### Lost update
+
+Both transactions read `stock = 10`, both compute `10 - 1 = 9`, both write 9. Two items sold, stock dropped by one.
+
+### Write skew
+
+The subtle one. A hospital rule: at least one doctor must be on call. Two doctors are on call. Each, at the same moment, checks "is someone else on call?" — yes — and takes themselves off call. They updated **different rows**, so no row-level conflict is detected, but together they broke the rule.
+
+<Diagram
+  sequence
+  caption="Write skew: each transaction's check is valid on its own snapshot; the combined result breaks the invariant."
+  chart={`sequenceDiagram
+    participant A as Alice's transaction
+    participant DB as doctors on_call: Alice ✓, Bob ✓
+    participant B as Bob's transaction
+    A->>DB: count on_call → 2
+    B->>DB: count on_call → 2
+    A->>DB: UPDATE Alice on_call = false
+    B->>DB: UPDATE Bob on_call = false
+    A->>DB: COMMIT
+    B->>DB: COMMIT → nobody on call!`}
+  notes={[
+    "Alice's transaction counts doctors on call: 2. Safe to leave.",
+    "At the same time Bob's transaction also sees 2.",
+    "Alice removes herself (her row).",
+    "Bob removes himself (his row) — a different row, so there is no write conflict.",
+    "Alice commits.",
+    "Bob commits. Both checks passed, yet the invariant 'at least one on call' is now broken.",
+  ]}
+/>
+
+## The levels
+
+| Level | Dirty read | Non-repeatable read | Phantom | Lost update | Write skew |
+|---|---|---|---|---|---|
+| Read uncommitted | possible* | possible | possible | possible | possible |
+| **Read committed** | prevented | possible | possible | possible | possible |
+| Repeatable read / snapshot | prevented | prevented | prevented in PostgreSQL** | prevented in PostgreSQL** | possible |
+| **Serializable** | prevented | prevented | prevented | prevented | prevented |
+
+\* PostgreSQL treats read uncommitted as read committed.
+\** The SQL standard only requires less; PostgreSQL's repeatable read is snapshot isolation and detects lost updates by aborting one transaction. MySQL InnoDB's repeatable read behaves differently (locking reads see newer data).
+
+**Defaults**: PostgreSQL, Oracle, SQL Server → **read committed**. MySQL InnoDB → **repeatable read**.
+
+### How each is implemented, roughly
+
+- **Read committed**: each **statement** sees a fresh snapshot of committed data.
+- **Repeatable read / snapshot isolation**: the whole **transaction** sees one snapshot taken at its start. Writes to a row someone else changed since then cause a serialisation error (in PostgreSQL).
+- **Serializable**: PostgreSQL uses *Serializable Snapshot Isolation* — it tracks read/write dependencies and aborts a transaction if committing it could produce a non-serial result. Other databases use strict locking.
+
+## Handling serialisation failures
+
+At repeatable read and serializable, the database may abort a transaction with a **serialisation failure** (PostgreSQL error code `40001`). That's not a bug — it's the database protecting you. The application must **retry the whole transaction**:
+
+```js
+async function inSerializableTx(pool, work, attempts = 5) {
+  for (let i = 1; ; i++) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+      const result = await work(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (err.code === '40001' && i < attempts) continue;   // retry from the start
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+}
+```
+
+## Fixing anomalies without serializable
+
+Serializable is the simplest correct answer, but it costs retries and throughput. Targeted alternatives at read committed:
+
+| Problem | Targeted fix |
+|---|---|
+| Lost update on a counter | atomic update: `SET stock = stock - 1 WHERE stock > 0` |
+| Read-then-write on one row | `SELECT … FOR UPDATE` (pessimistic lock) |
+| Edits from a UI that loaded data earlier | optimistic locking: `UPDATE … WHERE id = $1 AND version = $2` and bump `version` |
+| Write skew / phantom on a rule | lock the parent row (`SELECT … FROM rooms WHERE id = 7 FOR UPDATE`) or a constraint |
+| Double booking | a **constraint**: `UNIQUE (room_id, day)` or an exclusion constraint for time ranges |
+
+Constraints are the strongest option: the database enforces them regardless of isolation level or application bugs.
+
+```sql
+-- PostgreSQL: no two bookings for the same room may overlap in time
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+ALTER TABLE bookings ADD CONSTRAINT no_overlap
+  EXCLUDE USING gist (room_id WITH =, during WITH &&);
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Assuming the default level prevents lost updates or write skew.
+- Using serializable without retry logic.
+- Retrying only the failed statement instead of the whole transaction.
+- Relying on application checks ("is it booked?") instead of a unique or exclusion constraint.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What are transaction isolation levels?">
+
+Isolation levels define how much concurrent transactions can observe of each other, described by the anomalies they allow. Read committed, the default in PostgreSQL, prevents dirty reads, but each statement sees the latest committed data, so repeated reads can differ and lost updates are possible. Repeatable read — snapshot isolation in PostgreSQL — gives the whole transaction one consistent snapshot and aborts conflicting writes to the same row, but still allows write skew, where two transactions check a rule and update different rows. Serializable prevents all of them by aborting transactions that would make the outcome non-serial, so the application must retry on serialisation failures. In practice I often stay at read committed and use targeted tools — atomic conditional updates, row locks, optimistic version columns and, best of all, constraints.
+
+<Fragment slot="deeper">
+
+- **What is write skew?** Two transactions read overlapping data, write disjoint rows, and together violate an invariant.
+- **Optimistic vs pessimistic locking?** Optimistic checks a version at write time and retries on conflict; pessimistic locks rows up front.
+- **What does a `40001` error mean?** A serialisation failure — retry the whole transaction.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Isolation level", "How strictly concurrent transactions are separated."],
+  ["Non-repeatable read", "Reading the same row twice in one transaction with different results."],
+  ["Phantom", "New rows matching a query appearing when it is re-run."],
+  ["Lost update", "Concurrent read-modify-write cycles overwriting each other."],
+  ["Write skew", "Concurrent transactions jointly violating an invariant while writing different rows."],
+  ["Snapshot isolation", "Each transaction reads from one consistent snapshot taken at its start."],
+]} />

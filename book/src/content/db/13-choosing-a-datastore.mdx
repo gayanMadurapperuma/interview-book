@@ -1,0 +1,139 @@
+---
+title: "Choosing a datastore: relational, document, key-value, columnar"
+part: Scale
+order: 13
+level: core
+summary: OLTP versus OLAP, row versus column storage, and a practical way to match a workload to the right kind of database.
+---
+
+Different databases are optimised for different **workloads**. The most important split is between **OLTP** (online transaction processing — many small reads and writes, like an e-commerce checkout) and **OLAP** (online analytical processing — few, huge queries scanning millions of rows, like "revenue by region by month"). Within each, the storage layout — **row-oriented** or **column-oriented** — makes an enormous difference.
+
+<Analogy>
+  A shop's till and its accountant. The till (OLTP) handles thousands of tiny, fast transactions: one sale at a time, all details of that sale together. The accountant (OLAP) reads the whole year's sales but only cares about two columns — amount and date — and adds them up. Giving the accountant the till receipts one by one would take forever; they want the numbers already arranged by column.
+</Analogy>
+
+## Why it matters
+
+System design interviews expect you to pick storage deliberately: a relational database for transactional data, a cache for hot reads, a search engine for text, a warehouse for analytics — and to justify each with the access pattern.
+
+## OLTP versus OLAP
+
+| | OLTP | OLAP |
+|---|---|---|
+| Queries | many, small: fetch/update one order | few, large: aggregate millions of rows |
+| Latency | milliseconds | seconds to minutes is fine |
+| Data | current state | history, often denormalised |
+| Users | your application | analysts, dashboards, ML |
+| Examples | PostgreSQL, MySQL, DynamoDB | BigQuery, Snowflake, Redshift, ClickHouse, DuckDB |
+
+Running heavy analytics on your OLTP database steals resources from users; the usual architecture copies data into an analytical store (see *CDC* and *Data lakes*).
+
+## Row-oriented versus column-oriented storage
+
+<Diagram
+  caption="Row stores keep each record together — ideal for 'get order 42'. Column stores keep each column together — ideal for 'sum all amounts'."
+  chart={`flowchart LR
+    subgraph Row["Row-oriented (PostgreSQL)"]
+      direction TB
+      r1["order 1 | 2026-11-01 | EU | 30.00"]
+      r2["order 2 | 2026-11-01 | US | 80.00"]
+      r3["order 3 | 2026-11-02 | EU | 50.00"]
+    end
+    subgraph Col["Column-oriented (warehouse)"]
+      direction TB
+      c1["id: 1, 2, 3"]
+      c2["date: 11-01, 11-01, 11-02"]
+      c3["region: EU, US, EU"]
+      c4["amount: 30, 80, 50"]
+    end`}
+  steps={[
+    { nodes: ["r1", "r2", "r3"], text: "A row store writes whole records together. Fetching or updating one order reads one place on disk." },
+    { nodes: ["c1", "c2", "c3", "c4"], text: "A column store writes each column contiguously." },
+    { nodes: ["c3", "c4"], text: "`SUM(amount) GROUP BY region` reads just two columns and skips the rest. Similar values side by side also compress extremely well." },
+  ]}
+/>
+
+Column stores add compression (often 5–10×), vectorised execution and parallelism, which is why a warehouse can scan billions of rows in seconds — but they're poor at updating single rows.
+
+## The landscape
+
+| Need | Typical choice |
+|---|---|
+| Transactions, relationships, flexible queries | **PostgreSQL**, MySQL |
+| Massive key-based access, predictable patterns, serverless scale | **DynamoDB**, Cassandra |
+| Flexible documents | MongoDB, Firestore (or PostgreSQL `jsonb`) |
+| Cache, sessions, counters, rate limits, queues | **Redis**, Memcached |
+| Full-text search, fuzzy matching, faceting | **OpenSearch/Elasticsearch**, Meilisearch, PostgreSQL FTS for small cases |
+| Analytics over large history | BigQuery, Snowflake, Redshift, ClickHouse |
+| Files, images, backups, data lake | **Object storage** (S3) |
+| Time-series metrics | TimescaleDB, InfluxDB, Prometheus |
+| Graph traversal | Neo4j, Neptune |
+| Vector similarity (embeddings) | pgvector, OpenSearch, dedicated vector DBs |
+
+## A decision process
+
+<Diagram
+  caption="Questions to ask, in order. Write down the access patterns first."
+  chart={`flowchart TB
+    S["List the access patterns<br/>reads, writes, sizes, latency, consistency"] --> T{"Transactional correctness<br/>across entities?"}
+    T -- yes --> PG["Relational DB"]
+    T -- no --> K{"Only key lookups at<br/>very large scale?"}
+    K -- yes --> KV["DynamoDB / Cassandra"]
+    K -- no --> A{"Aggregations over<br/>huge history?"}
+    A -- yes --> WH["Warehouse / columnar"]
+    A -- no --> X{"Text search?"}
+    X -- yes --> SE["Search engine"]
+    X -- no --> PG
+    PG --> C{"Hot reads?"}
+    C -- yes --> RC["+ Redis cache"]`}
+/>
+
+Questions that matter more than brand names:
+
+- **Access patterns**: by key? by range? ad-hoc filters? full-text?
+- **Consistency**: must reads see the latest write? Are multi-entity transactions required?
+- **Scale**: data size now and in two years; peak reads and writes per second.
+- **Latency**: p99 target.
+- **Operations**: managed service available? Team experience? Cost model (per request vs per server)?
+
+A well-run PostgreSQL handles far more than most teams think — terabytes and tens of thousands of transactions per second. "Boring" technology the team knows is usually the right default.
+
+## Keeping several stores in sync
+
+Every extra store is a copy of data that must be kept consistent. Patterns: update the source of truth, then propagate changes via **change data capture** or an **outbox**, and accept that derived stores (search, cache, warehouse) are eventually consistent. Never "dual write" from application code to two stores without a recovery mechanism (see *CDC and the outbox pattern*).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Choosing a database by popularity rather than access patterns.
+- Running analytics on the production OLTP database.
+- Adding a search engine or NoSQL store without a plan to keep it in sync.
+- Picking a warehouse or column store for transactional row updates.
+- Underestimating the operational cost of each new technology.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you decide which database to use?">
+
+I start from the access patterns and requirements — how data is read and written, the volumes and latency targets, and the consistency and transaction needs — rather than from a product. For transactional data with relationships I default to a relational database like PostgreSQL. For very high-scale key-based access with known patterns, DynamoDB or Cassandra. Analytics go to a columnar warehouse, because column storage only reads the needed columns and compresses well, while row stores are built for fetching and updating individual records. Full-text search goes to a search engine, and hot data gets a Redis cache. When there are several stores, one is the source of truth and the others are fed from it by change data capture or an outbox, accepting eventual consistency.
+
+<Fragment slot="deeper">
+
+- **OLTP vs OLAP?** Many small transactions vs few large analytical scans.
+- **Why are column stores fast for analytics?** They read only the needed columns, compress well and process data in vectorised batches.
+- **Why not query the production DB for dashboards?** Heavy scans compete with user traffic; use a replica or warehouse.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["OLTP", "Workload of many small, fast transactional reads and writes."],
+  ["OLAP", "Workload of large analytical queries over lots of data."],
+  ["Row-oriented storage", "Storing complete records together; best for transactional access."],
+  ["Column-oriented storage", "Storing each column together; best for scans and aggregation."],
+  ["Data warehouse", "An analytical database optimised for OLAP queries."],
+  ["Source of truth", "The authoritative store from which other copies are derived."],
+]} />

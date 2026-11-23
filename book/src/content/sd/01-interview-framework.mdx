@@ -1,0 +1,149 @@
+---
+title: How to approach a system design interview
+part: The interview
+order: 1
+level: foundation
+summary: A repeatable structure for 45 minutes of open-ended design — so you spend your energy on the problem, not on wondering what to do next.
+---
+
+A system design interview gives you a vague prompt — "design a URL shortener", "design WhatsApp" — and 35–60 minutes. There is no single right answer. The interviewer is judging **how you think**: whether you clarify the problem, make reasonable estimates, propose a sensible architecture, go deep where it matters, and talk about trade-offs honestly. A simple, consistent structure keeps you from rambling or freezing.
+
+<Analogy>
+  It's like an architect meeting a client. A good architect doesn't start drawing walls immediately. They ask who will live there, how many people, what budget, which matters more — light or privacy. Then they sketch the overall layout, and only then detail the tricky parts: the staircase, the plumbing. And they explain *why* each choice was made.
+</Analogy>
+
+## Why it matters
+
+Mid-level and senior interviews almost always include a design round, and it's often the deciding one for level. Candidates who know the material still fail by skipping requirements, diving into one component too early, or never mentioning trade-offs.
+
+## The framework
+
+<Diagram
+  caption="A timeline for a 45-minute interview. Adjust proportions to the interviewer's cues."
+  chart={`flowchart LR
+    R["1 · Requirements<br/>5–8 min"] --> E["2 · Estimates<br/>3–5 min"]
+    E --> A["3 · API + data model<br/>5 min"]
+    A --> H["4 · High-level design<br/>10 min"]
+    H --> D["5 · Deep dives<br/>10–15 min"]
+    D --> W["6 · Wrap-up<br/>bottlenecks, trade-offs<br/>3 min"]`}
+  steps={[
+    { nodes: ["R"], text: "**Requirements**: agree on what you're building — features in and out of scope, and the non-functional targets (scale, latency, consistency, availability)." },
+    { nodes: ["R", "E"], text: "**Estimates**: rough numbers for traffic, storage and bandwidth. They tell you whether one database is enough or you need sharding." },
+    { nodes: ["E", "A"], text: "**API and data model**: the key endpoints and the main entities. This pins down what the system must actually do." },
+    { nodes: ["A", "H"], text: "**High-level design**: boxes and arrows covering every requirement end to end — clients, load balancer, services, data stores, caches, queues." },
+    { nodes: ["H", "D"], text: "**Deep dives**: pick the two or three hardest parts (often the interviewer will steer) and design them properly." },
+    { nodes: ["D", "W"], text: "**Wrap-up**: bottlenecks, failure modes, what you'd do with more time, and the trade-offs you made." },
+  ]}
+/>
+
+### 1. Requirements
+
+**Functional** requirements are what the system does. **Non-functional** requirements are how well it does it. Ask, then write them down where the interviewer can see.
+
+| Ask about | Example questions |
+|---|---|
+| Core features | "Can users edit a short URL? Custom aliases? Analytics?" |
+| Users and scale | "How many daily active users? Read/write ratio?" |
+| Latency | "Does redirect need to be under 50 ms?" |
+| Consistency | "Is it OK if a new message appears a second late for some users?" |
+| Availability | "Is downtime acceptable for writes? For reads?" |
+| Constraints | "Mobile clients? Global users? Existing infrastructure?" |
+
+Explicitly state what's **out of scope**. It shows judgement and protects your time.
+
+### 2. Back-of-the-envelope estimates
+
+Rough orders of magnitude, not precision: requests per second (average and peak), storage per year, bandwidth, cache size. The next chapter shows how. Then say what the numbers **imply**: "~1,200 writes/s fits one PostgreSQL primary; 100k reads/s needs caching."
+
+### 3. API and data model
+
+```text
+POST /urls          { longUrl, customAlias? }      → { shortCode }
+GET  /{shortCode}   → 301/302 redirect
+GET  /urls/{code}/stats
+
+Url(shortCode PK, longUrl, ownerId, createdAt, expiresAt)
+```
+
+Keep it brief. The point is a shared vocabulary and catching hidden requirements.
+
+### 4. High-level design
+
+Draw the simplest design that meets every functional requirement, then evolve it for scale:
+
+<Diagram
+  caption="A typical starting skeleton. Most designs are variations on this."
+  chart={`flowchart LR
+    C["Clients"] --> CDN["CDN<br/>(static, cacheable)"]
+    C --> LB["Load balancer"]
+    LB --> API["Stateless API servers"]
+    API --> CA[("Cache")]
+    API --> DB[("Primary DB")]
+    DB --> RR[("Read replicas")]
+    API --> Q["Queue"]
+    Q --> WK["Async workers"]
+    WK --> OS[("Object storage /<br/>search / analytics")]`}
+/>
+
+Walk through a request end to end: "A user posts a message: it hits the load balancer, an API server validates it, writes to the database, enqueues a fan-out job…"
+
+### 5. Deep dives
+
+Typical deep-dive topics: the data model and sharding key, how to generate IDs, caching and invalidation, fan-out strategy, consistency of a counter, handling hot keys, real-time delivery, failure handling. Show options, pick one, and justify it.
+
+### 6. Wrap-up
+
+Name the bottlenecks and single points of failure; how you'd monitor the system; what changes at 10× scale.
+
+## What interviewers listen for
+
+- **Trade-offs**, said out loud: "Fan-out on write makes reads fast but celebrities are expensive, so I'll use a hybrid."
+- **Numbers** backing decisions.
+- **Simplicity first**: start simple, add complexity only when a requirement demands it.
+- **Driving the conversation** while staying responsive to hints.
+- **Failure thinking**: what happens when a component dies or is slow?
+
+<Callout type="tip" title="Useful phrases">
+
+- "Before designing, let me confirm the requirements…"
+- "Let me do a quick estimate to see what scale we're dealing with."
+- "There are two options here: X and Y. X gives us…, Y gives us…. Given that reads dominate, I'd choose X."
+- "This is a single point of failure; we can fix that with…"
+- "If we had to support 10× more traffic, the first thing to break would be…"
+
+</Callout>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Jumping straight into drawing boxes without clarifying requirements.
+- Naming technologies ("Kafka! Cassandra!") without saying why.
+- Over-engineering from the start (microservices and sharding for 1,000 users).
+- Going deep on one component and never covering the full flow.
+- Silence: thinking without talking. The interviewer can only grade what they hear.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you usually structure a system design discussion?">
+
+I start by clarifying requirements: the core features in and out of scope, and the non-functional targets — scale, latency, consistency and availability. Then a quick estimate of traffic, storage and bandwidth, so the design is grounded in numbers. Next I sketch the API and the main entities, then a high-level architecture that satisfies every functional requirement end to end, starting simple. With that in place, I pick the two or three hardest parts — often the data model and scaling, or real-time delivery — and go deep, comparing options and stating trade-offs. I finish by naming bottlenecks, failure modes and what I'd change at ten times the scale.
+
+<Fragment slot="deeper">
+
+- **What are non-functional requirements?** Qualities such as latency, throughput, availability, consistency, durability and cost.
+- **How deep should estimates go?** Orders of magnitude, just enough to drive decisions.
+- **What if the interviewer redirects you?** Follow — they're pointing at what they want to evaluate.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Functional requirement", "What the system must do: features and behaviours."],
+  ["Non-functional requirement", "How well it must do it: scale, latency, availability, consistency."],
+  ["High-level design", "The main components and how a request flows between them."],
+  ["Deep dive", "Detailed design of one critical component or problem."],
+  ["Trade-off", "Choosing one benefit at the cost of another, stated explicitly."],
+]} />

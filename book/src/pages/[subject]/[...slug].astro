@@ -1,0 +1,141 @@
+---
+import { render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import Toc from '../../components/Toc.astro';
+import { allChapters, subjectOf, slugOf, type Chapter } from '../../lib/chapters';
+import { subjectByKey, withBase } from '../../lib/subjects';
+import { scenarioMeta } from '../../demos/catalog';
+import Diagram from '../../components/Diagram.astro';
+import Callout from '../../components/Callout.astro';
+import Analogy from '../../components/Analogy.astro';
+import InterviewAnswer from '../../components/InterviewAnswer.astro';
+import KeyTerms from '../../components/KeyTerms.astro';
+import Output from '../../components/Output.astro';
+import DemoLink from '../../components/DemoLink.astro';
+
+const mdxComponents = { Diagram, Callout, Analogy, InterviewAnswer, KeyTerms, Output, DemoLink };
+
+export async function getStaticPaths() {
+  const all = await allChapters();
+  return all.map((entry) => {
+    const subject = subjectOf(entry);
+    const siblings = all.filter((c) => subjectOf(c) === subject);
+    const i = siblings.findIndex((c) => c.id === entry.id);
+    return {
+      params: { subject, slug: slugOf(entry) },
+      props: { entry, index: i + 1, prev: siblings[i - 1], next: siblings[i + 1] },
+    };
+  });
+}
+
+interface Props { entry: Chapter; index: number; prev?: Chapter; next?: Chapter }
+const { entry, index, prev, next } = Astro.props;
+const subject = subjectOf(entry);
+const s = subjectByKey[subject];
+const { Content, headings } = await render(entry);
+const outline = headings.filter((h) => h.depth === 2 || h.depth === 3);
+const words = (entry.body ?? '').replace(/<[^>]+>|```[\s\S]*?```/g, ' ').split(/\s+/).filter(Boolean).length;
+const minutes = Math.max(3, Math.round(words / 210));
+const demo = entry.data.demo ? scenarioMeta(entry.data.demo) : undefined;
+const href = (c: Chapter) => withBase(`/${subjectOf(c)}/${slugOf(c)}/`);
+---
+<Base title={entry.data.title} description={entry.data.summary} subject={subject} active={subject}>
+  <div class="book">
+    <Toc subject={subject} currentId={entry.id} />
+    <main id="content">
+      <article data-pagefind-body data-chapter-id={entry.id}>
+        <header class="chapter-head">
+          <div class="kicker">
+            <span class="num">Chapter {index}</span>
+            <span>{s.name}</span>
+            <span aria-hidden="true">·</span>
+            <span>{entry.data.part}</span>
+          </div>
+          <h1>{entry.data.title}</h1>
+          <p class="summary">{entry.data.summary}</p>
+          <div class="meta">
+            <span><b>{minutes} min</b> read</span>
+            <span>Level: <b>{entry.data.level}</b></span>
+            {demo && <span>Has a <a href={withBase(`/demos/${demo.id}/`)}>live demo</a></span>}
+          </div>
+          <span data-pagefind-meta="subject" hidden>{s.short}</span>
+        </header>
+        <div class="prose">
+          <Content components={mdxComponents} />
+        </div>
+      </article>
+
+      <nav class="pager" aria-label="Chapter navigation" data-pagefind-ignore>
+        {prev && (
+          <a class="prev" href={href(prev)}>
+            <span class="caps">← Previous</span>
+            <span class="t">{prev.data.title}</span>
+          </a>
+        )}
+        {next ? (
+          <a class="next" href={href(next)}>
+            <span class="caps">Next →</span>
+            <span class="t">{next.data.title}</span>
+          </a>
+        ) : (
+          <a class="next" href={withBase('/')}>
+            <span class="caps">End of volume</span>
+            <span class="t">Back to all volumes</span>
+          </a>
+        )}
+      </nav>
+    </main>
+
+    <aside class="outline" aria-label="In this chapter" data-pagefind-ignore>
+      <p class="caps">In this chapter</p>
+      <ol>
+        {outline.map((h) => (
+          <li><a href={`#${h.slug}`} class={`d${h.depth}`} data-target={h.slug}>{h.text}</a></li>
+        ))}
+      </ol>
+      {demo && (
+        <a class="demo-cta" href={withBase(`/demos/${demo.id}/`)}>
+          <span class="caps">See it run</span>
+          <b>{demo.title}</b>
+        </a>
+      )}
+    </aside>
+  </div>
+</Base>
+
+<script>
+  // scroll-spy for the outline
+  const links = [...document.querySelectorAll<HTMLAnchorElement>('.outline a[data-target]')];
+  const targets = links.map((a) => document.getElementById(a.dataset.target!)).filter(Boolean) as HTMLElement[];
+  const spy = () => {
+    const y = window.scrollY + 140;
+    let current = targets[0];
+    for (const t of targets) if (t.offsetTop <= y) current = t;
+    links.forEach((a) => a.classList.toggle('active', a.dataset.target === current?.id));
+  };
+  document.addEventListener('scroll', spy, { passive: true });
+  spy();
+
+  // mark chapter read once the reader reaches the end
+  const article = document.querySelector<HTMLElement>('[data-chapter-id]');
+  const pager = document.querySelector('.pager');
+  if (article && pager) {
+    new IntersectionObserver((entries, obs) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        try {
+          const read = JSON.parse(localStorage.getItem('book:read') || '{}');
+          read[article.dataset.chapterId!] = Date.now();
+          localStorage.setItem('book:read', JSON.stringify(read));
+          document.querySelector(`[data-read-key="${article.dataset.chapterId}"]`)?.classList.add('is-read');
+        } catch {}
+        obs.disconnect();
+      }
+    }).observe(pager);
+  }
+
+  // close the mobile drawer when tapping the scrim
+  document.body.addEventListener('click', (e) => {
+    if (e.target === document.body && document.body.classList.contains('toc-open')) document.body.classList.remove('toc-open');
+  });
+  document.querySelectorAll('.toc a').forEach((a) => a.addEventListener('click', () => document.body.classList.remove('toc-open')));
+</script>

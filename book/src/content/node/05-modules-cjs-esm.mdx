@@ -1,0 +1,168 @@
+---
+title: "Modules in Node: CommonJS and ES modules"
+part: Runtime
+order: 5
+level: core
+summary: Node supports two module systems side by side. How Node decides which one a file uses, how they differ, and how to make them work together.
+---
+
+Node grew up with **CommonJS** (CJS) — `require()` and `module.exports` — years before JavaScript had its own module system. Today Node also supports standard **ES modules** (ESM) — `import` and `export`. Both work, they can interoperate, and most real projects meet both. Knowing how Node chooses between them saves hours of confusing `ERR_REQUIRE_ESM` and "Cannot use import statement outside a module" errors.
+
+<Analogy>
+  Two plug standards in one house. CommonJS is the old socket every appliance used for years; ESM is the new international standard. Node's wiring supports both, and adapters exist — but you need to know which socket each room has, and some adapters only work in one direction.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask about the differences, how Node decides a file's module type, and how to use ESM-only packages from CommonJS code. Module loading also affects startup time and how mocking works in tests.
+
+## How Node decides
+
+<Diagram
+  caption="Node picks the module system per file from its extension and the nearest package.json."
+  chart={`flowchart TB
+    F["a .js / .mjs / .cjs file"] --> E{"extension?"}
+    E -- ".mjs" --> ESM["ES module"]
+    E -- ".cjs" --> CJS["CommonJS"]
+    E -- ".js" --> P{"nearest package.json<br/>has type: module?"}
+    P -- yes --> ESM
+    P -- no --> CJS`}
+/>
+
+- `.mjs` → always ESM. `.cjs` → always CommonJS.
+- `.js` → ESM if the nearest `package.json` has `"type": "module"`, otherwise CommonJS.
+- Recent Node versions can also detect ESM syntax in ambiguous `.js` files, but being explicit is clearer.
+
+## Side-by-side
+
+```js
+// CommonJS
+const fs = require('node:fs');
+const { helper } = require('./helper');
+module.exports = { run };
+console.log(__dirname, __filename);
+
+// ES module
+import fs from 'node:fs';
+import { helper } from './helper.js';     // file extension required
+export { run };
+console.log(import.meta.dirname, import.meta.filename);  // Node 20.11+
+```
+
+| | CommonJS | ES modules |
+|---|---|---|
+| Load | `require()` — synchronous, runs when reached | `import` — linked before running; can be async |
+| Exports | `module.exports` object; importer gets **copies** when destructuring | **live** read-only bindings |
+| Path resolution | extension and `index.js` optional | extension required for relative paths |
+| `__dirname`, `__filename`, `require` | available | not available; use `import.meta` |
+| Top-level `await` | no | yes |
+| JSON | `require('./data.json')` | `import data from './data.json' with { type: 'json' }` |
+| Cache | `require.cache` (can be cleared) | internal, cannot be cleared |
+| Conditional loading | `if (x) require('a')` | `if (x) await import('a')` |
+
+## How `require` works
+
+`require` is a plain function. The first time a module is required, Node resolves the path, wraps the file in a function, runs it, and caches `module.exports`. Later `require` calls return the cached object.
+
+<Diagram
+  caption="require(): resolve, check cache, load, wrap, execute, cache, return exports."
+  chart={`flowchart LR
+    R["require('./db')"] --> RES["resolve path<br/>./db.js, ./db/index.js…"]
+    RES --> C{"in require.cache?"}
+    C -- yes --> RET["return cached exports"]
+    C -- no --> W["wrap file in<br/>(exports, require, module,<br/>__filename, __dirname) => { … }"]
+    W --> X["execute it"]
+    X --> S["store module.exports in cache"]
+    S --> RET`}
+  steps={[
+    { nodes: ["R", "RES"], text: "Node turns the specifier into an absolute file path, trying extensions and `index.js`." },
+    { nodes: ["RES", "C", "RET"], text: "If the module was loaded before, the cached exports are returned immediately — modules are singletons." },
+    { nodes: ["C", "W"], text: "Otherwise the source is wrapped in a function. That's where `module`, `exports`, `require`, `__dirname` come from — they're parameters." },
+    { nodes: ["W", "X", "S", "RET"], text: "The function runs once, and `module.exports` is cached and returned." },
+  ]}
+/>
+
+That wrapper explains a classic gotcha:
+
+```js
+exports.a = 1;              // OK: adds to module.exports
+exports = { a: 1 };         // broken: only reassigns the local parameter
+module.exports = { a: 1 };  // OK
+```
+
+## Interoperability
+
+**ESM importing CommonJS** works: the `module.exports` object becomes the default export, and Node tries to detect named exports.
+
+```js
+import express from 'express';          // CJS package, works
+import { readFileSync } from 'node:fs'; // core modules work both ways
+```
+
+**CommonJS loading ESM** used to require dynamic import:
+
+```js
+// works in any Node version
+const { default: chalk } = await import('chalk');   // inside an async function
+```
+
+Newer Node versions (22.12+, 20.19+) also allow `require()` of synchronous ES modules (ones without top-level `await`), which removes most of the pain.
+
+## Publishing packages: `exports` in `package.json`
+
+Libraries declare their entry points with the `exports` field, which can serve different files to `import` and `require` and hides internal files:
+
+```json
+{
+  "name": "my-lib",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    },
+    "./utils": "./dist/utils.js"
+  }
+}
+```
+
+Shipping both formats risks the **dual package hazard**: if one app loads the CJS copy and another dependency loads the ESM copy, you get two separate instances (two singletons, two `instanceof` classes). Many libraries now ship ESM only, or a CJS core with a thin ESM wrapper.
+
+## The `node:` prefix
+
+Import core modules as `node:fs`, `node:path` and so on. It's unambiguous (no npm package can shadow it) and required for some newer modules like `node:test` and `node:sqlite`.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Omitting `.js` in ESM relative imports.
+- Using `__dirname` in ESM — use `import.meta.dirname` (or `fileURLToPath(import.meta.url)` on older Node).
+- `exports = {...}` instead of `module.exports = {...}`.
+- Mixing `"type": "module"` with tools or config files that expect CommonJS — rename those to `.cjs`.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What are the differences between CommonJS and ES modules in Node?">
+
+CommonJS uses `require` and `module.exports`; `require` is a synchronous function that runs the file when it's reached, caches it and returns its exports object, so destructured values are copies. ES modules use `import`/`export`, are statically linked before any code runs, export live read-only bindings, support top-level `await`, require file extensions, and don't have `__dirname` or `require` — you use `import.meta` instead. Node decides per file: `.mjs` is ESM, `.cjs` is CommonJS, and `.js` follows the `type` field of the nearest `package.json`. ESM can import CommonJS directly; CommonJS can load ESM with dynamic `import()`, or with `require` in recent Node versions if the module has no top-level await.
+
+<Fragment slot="deeper">
+
+- **Why does `exports = {}` fail?** `exports` is just a parameter pointing at `module.exports`; reassigning it breaks the link.
+- **What is the dual package hazard?** Two copies (CJS and ESM) of one package loaded in the same app, creating duplicate state.
+- **What is the `exports` field?** Package entry points per condition (`import`, `require`, `types`), plus encapsulation of internal files.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["CommonJS", "Node's original module system: `require` and `module.exports`."],
+  ["ES modules", "The standard JavaScript module system: `import` and `export`."],
+  ["Module wrapper", "The function CommonJS wraps each file in, supplying `require`, `module`, `__dirname`…"],
+  ["`exports` field", "`package.json` entry points per environment, and a public API boundary."],
+  ["Dual package hazard", "Accidentally loading both the CJS and ESM builds of a package."],
+]} />

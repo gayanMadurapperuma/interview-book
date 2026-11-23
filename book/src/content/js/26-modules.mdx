@@ -1,0 +1,202 @@
+---
+title: "ES modules: imports, exports and bundling"
+part: Modern JavaScript
+order: 26
+level: core
+summary: How files share code, why imports are live views rather than copies, what happens with circular imports, and why static imports make tree-shaking possible.
+demo: js-esm-live-bindings
+---
+
+A **module** is a file with its own private scope that explicitly chooses what to share (`export`) and what to use from other files (`import`). ES modules (ESM) are JavaScript's built-in module system, supported in all browsers and in Node. Before them, JavaScript had no module system at all, which led to global-variable chaos and community solutions like CommonJS (`require`) in Node.
+
+<Analogy>
+  Each module is a shop with a shop window. Everything inside is private; `export` is what you put in the window. `import` is another shop putting your window display on a live video screen — when you rearrange your window, their screen shows the change. They can look, but they can't reach through the screen and rearrange your shop.
+</Analogy>
+
+## Why it matters
+
+Modules affect app startup, bundle size and subtle bugs. Interviewers ask about ESM vs CommonJS, live bindings, circular dependencies, default vs named exports, dynamic `import()` for code splitting, and tree-shaking.
+
+## Syntax
+
+```js
+// math.js
+export const PI = 3.14159;                 // named export
+export function area(r) { return PI * r * r; }
+export default class Calculator {}         // one default export per module
+
+// app.js
+import Calculator, { PI, area as circleArea } from './math.js';
+import * as math from './math.js';         // namespace object: math.PI, math.area
+export { circleArea };                     // re-export
+export * from './geometry.js';             // re-export everything named
+```
+
+**Named vs default exports:** named exports keep names consistent across the codebase and work well with editor auto-imports and tree-shaking. Many teams prefer named exports only, so a renamed thing can't silently keep its old import name elsewhere.
+
+## How modules load
+
+ES modules load in three phases before any of your code runs.
+
+<Diagram
+  caption="Modules are parsed and linked completely before any module code executes. That is why imports must be at the top level and are hoisted."
+  chart={`flowchart LR
+    C["1 · Construction<br/>fetch and parse every file,<br/>following import statements"] --> L["2 · Linking<br/>connect each import to the<br/>matching export's variable"]
+    L --> E["3 · Evaluation<br/>run each module's code once,<br/>dependencies first"]`}
+  steps={[
+    { nodes: ["C"], text: "Starting from the entry file, the loader reads `import` statements and fetches every dependency, building a module graph. No code runs yet." },
+    { nodes: ["C", "L"], text: "Each `import { x }` is wired directly to the exporting module's variable `x`. If a name doesn't exist, you get an error now, before anything runs." },
+    { nodes: ["L", "E"], text: "Modules run in dependency order (deepest first), each exactly once. Importing the same module from ten files still runs it once." },
+  ]}
+/>
+
+Because the structure is known before execution, ESM imports are **static**: they must be at the top level with string-literal paths. That static shape is what lets tools analyse your code.
+
+## Live bindings
+
+An import is not a copy of a value; it is a **read-only view** of the exporting module's variable.
+
+```js
+// counter.js
+export let count = 0;
+export function increment() { count++; }
+
+// main.js
+import { count, increment } from './counter.js';
+console.log(count);  // 0
+increment();
+console.log(count);  // 1 — sees the change
+count = 5;           // TypeError: Assignment to constant variable.
+```
+
+<DemoLink id="js-esm-live-bindings" />
+
+Compare CommonJS, where `require` returns an object and destructuring **copies** the current values:
+
+```js
+// counter.cjs
+let count = 0;
+module.exports = { count, increment() { count++; } };
+
+// main.cjs
+const { count, increment } = require('./counter.cjs');
+increment();
+console.log(count);  // 0 — a copy taken at require time
+```
+
+## Circular dependencies
+
+When A imports B and B imports A, one of them must run first, and it will see the other **partially initialised**.
+
+<Diagram
+  caption="A cycle: main imports a, a imports b, b imports a. b runs while a has not finished, so a's exports are still in their TDZ."
+  chart={`flowchart LR
+    M["main.js"] --> A["a.js<br/>export const name = 'A'"]
+    A --> B["b.js<br/>import { name } from './a.js'<br/>console.log(name) ✗"]
+    B -. "cycle" .-> A`}
+/>
+
+```js
+// a.js
+import { helper } from './b.js';
+export const name = 'A';
+
+// b.js
+import { name } from './a.js';
+console.log(name);   // ReferenceError: Cannot access 'name' before initialization
+export function helper() {}
+```
+
+`b.js` runs first (it's the deeper dependency), and `a`'s `const name` hasn't been initialised yet. Functions declared with `function` would work (they are hoisted), and reading `name` later, inside a function called after startup, would also work. Real fixes: move shared code into a third module, or reorganise so the cycle disappears. Tools like `madge` can detect cycles.
+
+## Dynamic `import()`
+
+`import()` loads a module **at runtime** and returns a promise. It works in any code, not just at the top level, so it's how you **code-split**: load heavy code only when needed.
+
+```js
+button.addEventListener('click', async () => {
+  const { openEditor } = await import('./editor.js');   // downloaded on first click
+  openEditor();
+});
+
+// choose an implementation at runtime
+const driver = await import(`./drivers/${process.env.DB_KIND}.js`);
+```
+
+Bundlers turn each dynamic import into a separate file (a *chunk*) that is fetched on demand. React's `lazy()` is built on it.
+
+## Tree-shaking
+
+Because ESM imports and exports are static, a bundler can see exactly which exports are used and **drop the rest** from the final bundle.
+
+<Diagram
+  caption="With static imports the bundler knows only formatDate is used, so the other exports never reach the user."
+  chart={`flowchart LR
+    APP["app.js<br/>import { formatDate } from 'utils'"] --> U["utils.js"]
+    U --> F1["formatDate ✓ kept"]
+    U --> F2["parseCsv ✗ removed"]
+    U --> F3["slugify ✗ removed"]`}
+/>
+
+Tree-shaking can fail when:
+
+- you import a whole namespace and pass it around dynamically,
+- a module has **side effects** at the top level (the bundler must keep it in case they matter). Libraries mark themselves `"sideEffects": false` in `package.json` to say "safe to drop if unused",
+- code uses CommonJS (`require` is dynamic, so it's harder to analyse).
+
+## ESM in browsers
+
+```html
+<script type="module" src="/app.js"></script>
+```
+
+Module scripts are deferred by default (run after HTML parsing), run in strict mode, have their own scope, and are fetched with CORS. **Import maps** let you use bare names like `import { x } from 'lodash-es'` without a bundler by mapping them to URLs.
+
+## ESM versus CommonJS (summary)
+
+| | ES modules | CommonJS |
+|---|---|---|
+| Syntax | `import` / `export` | `require()` / `module.exports` |
+| Loading | static, parsed before running; async-capable | synchronous, at the point of `require` |
+| Bindings | live, read-only | copied values from an object |
+| Top-level `await` | yes | no |
+| `this` at top level | `undefined` | `module.exports` |
+| Tree-shaking | easy | hard |
+| Where | browsers, Node, Deno, Bun | Node (legacy default) |
+
+The Node volume has a chapter on mixing the two in Node specifically.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Importing a file without its extension in the browser or Node ESM (`'./utils'` instead of `'./utils.js'`) — only bundlers guess extensions for you.
+- Top-level side effects in shared utility modules, which defeat tree-shaking.
+- Circular imports that read values during startup.
+- Mixing default and named exports inconsistently across a codebase.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do ES modules differ from CommonJS?">
+
+ES modules are static: the loader parses all `import` and `export` statements and links them before any code runs, so imports must be at the top level, missing exports fail early, and tools can tree-shake unused code. Imports are live, read-only bindings to the exporter's variables, so you see later changes but cannot assign to them. CommonJS `require` is a normal function call that runs synchronously when reached and returns an object, so destructured values are copies. ESM also supports top-level `await` and is the standard in browsers; CommonJS is Node's older system. For on-demand loading, ESM has dynamic `import()`, which returns a promise and is how bundlers do code splitting.
+
+<Fragment slot="deeper">
+
+- **What happens with circular imports?** One module runs first and sees the other partially initialised; `const` exports throw in their TDZ.
+- **What is tree-shaking and what breaks it?** Removing unused exports; broken by side effects, dynamic access and CommonJS.
+- **How many times does a module run?** Once per module graph, however many importers.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Module", "A file with its own scope that shares values via `export`."],
+  ["Live binding", "An import that reflects the exporter's current value and cannot be reassigned."],
+  ["Module graph", "All modules and their import relationships, built before execution."],
+  ["Dynamic `import()`", "Loads a module at runtime and returns a promise; enables code splitting."],
+  ["Tree-shaking", "Removing unused exports from a bundle, possible because ESM is static."],
+  ["Circular dependency", "Modules that import each other directly or indirectly."],
+]} />

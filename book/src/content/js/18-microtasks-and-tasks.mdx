@@ -1,0 +1,179 @@
+---
+title: Microtasks and tasks
+part: Asynchrony
+order: 18
+level: core
+summary: Two queues, two priorities. This one distinction answers most "predict the output" questions about promises and timers.
+demo: js-micro-vs-macro
+---
+
+The previous chapter introduced two waiting lines for callbacks. This chapter looks at them closely, because their priority rules decide the order of almost every asynchronous program. **Tasks** (also called *macrotasks*) are things like timers, user events and network messages — the loop runs **one** of them per turn. **Microtasks** are promise reactions, `await` continuations and `queueMicrotask` callbacks — and after every task, the loop runs **all** of them, including any that are added while it is running them.
+
+<Analogy>
+  Think of a doctor's surgery. Tasks are patients in the waiting room: the doctor sees one at a time. Microtasks are quick follow-up questions from the patient currently in the room: "one more thing, doctor…". The doctor answers every follow-up — even new ones that come up while answering — before calling the next patient from the waiting room.
+</Analogy>
+
+## Why it matters
+
+Interviewers love snippets mixing `setTimeout`, `Promise.then`, `async/await` and `queueMicrotask`. Knowing the two-queue rule lets you answer them mechanically. It also explains real issues: why UI updates sometimes wait until a promise chain finishes, and how a self-repeating promise can freeze a page.
+
+## What goes where
+
+| Tasks (one per loop turn) | Microtasks (drained completely after each task) |
+|---|---|
+| `setTimeout`, `setInterval` callbacks | `.then`, `.catch`, `.finally` callbacks |
+| UI events: click, input, scroll | the code after an `await` |
+| `MessageChannel` / `postMessage` messages | `queueMicrotask(fn)` |
+| I/O completion (network, in Node) | `MutationObserver` callbacks |
+| The initial script itself | |
+
+## The rule
+
+<Diagram
+  caption="After any task finishes, the microtask queue is emptied completely — including microtasks added during the drain — before the next task can start."
+  chart={`flowchart TB
+    T["Run one task"] --> Q{"Microtask queue<br/>empty?"}
+    Q -- no --> M["Run the oldest microtask<br/>(it may queue more)"]
+    M --> Q
+    Q -- yes --> R["Render if needed"]
+    R --> T`}
+  steps={[
+    { nodes: ["T"], text: "A task runs to completion — for example, the whole script, or one timer callback." },
+    { nodes: ["T", "Q"], text: "As soon as it finishes, the engine checks the microtask queue." },
+    { nodes: ["Q", "M"], text: "If there is anything there, it runs the oldest microtask. That microtask can queue more microtasks…" },
+    { nodes: ["M", "Q"], text: "…and the engine keeps looping until the queue is truly empty." },
+    { nodes: ["Q", "R", "T"], text: "Only then may the browser render, and only then does the next task start." },
+  ]}
+/>
+
+## Working through an example
+
+```js
+console.log('a');
+
+setTimeout(() => console.log('timeout'), 0);
+
+Promise.resolve().then(() => {
+  console.log('p1');
+  Promise.resolve().then(() => console.log('p2'));
+});
+
+queueMicrotask(() => console.log('qm'));
+
+console.log('b');
+```
+
+<Output lines={['a', 'b', 'p1', 'qm', 'p2', 'timeout']} />
+
+1. The script (a task) logs `a`, queues a timer task, queues microtask `p1`, queues microtask `qm`, logs `b`.
+2. The script ends. Drain microtasks in order: `p1` runs and queues `p2` at the **back** of the queue. Then `qm` runs. Then `p2`.
+3. The queue is empty. Now the next task: `timeout`.
+
+Notice that `qm` beats `p2`: microtasks are first-in, first-out, and `p2` was queued later.
+
+<DemoLink id="js-micro-vs-macro" />
+
+## `async` functions run synchronously until `await`
+
+A very common trick question:
+
+```js
+async function f() {
+  console.log('1: inside f');
+  await null;
+  console.log('3: after await');
+}
+f();
+console.log('2: after calling f');
+```
+
+<Output lines={['1: inside f', '2: after calling f', '3: after await']} />
+
+The body of an `async` function starts immediately, on the caller's stack. Only the part **after** the first `await` is deferred — as a microtask — even when you `await` a plain value like `null`.
+
+<Diagram
+  sequence
+  caption="Only the code after await is deferred, and it is deferred as a microtask."
+  chart={`sequenceDiagram
+    participant Main as Script
+    participant F as f()
+    participant MQ as Microtasks
+    Main->>F: call f()
+    F->>F: log "1: inside f"
+    F->>MQ: await null → queue the rest
+    F-->>Main: returns a pending promise
+    Main->>Main: log "2: after calling f"
+    MQ->>F: resume f
+    F->>F: log "3: after await"`}
+  notes={[
+    "The script calls `f()`. Nothing is deferred yet.",
+    "The first line of `f` runs right away.",
+    "`await` suspends `f` and queues its continuation as a microtask.",
+    "`f()` returns a pending promise to the caller immediately.",
+    "The caller continues with its next line.",
+    "Once the script (the current task) ends, the microtask resumes `f`.",
+    "The rest of `f` runs.",
+  ]}
+/>
+
+## Microtask starvation
+
+Because the microtask queue must be empty before the loop moves on, a microtask that keeps queueing another microtask blocks **everything** — timers, clicks and rendering.
+
+```js
+function forever() {
+  Promise.resolve().then(forever);   // always one more microtask
+}
+forever();
+setTimeout(() => console.log('never runs'), 0);
+```
+
+A recursive `setTimeout` does **not** have this problem: each call is a separate task, and the loop gets to render and handle input in between.
+
+## Choosing where to schedule work
+
+| You want… | Use |
+|---|---|
+| Run right after the current code, before anything else | `queueMicrotask(fn)` or a resolved promise |
+| Let the browser paint and handle input first | `setTimeout(fn, 0)` or `MessageChannel` |
+| Run just before the next frame is painted | `requestAnimationFrame(fn)` |
+| Run when the browser is idle | `requestIdleCallback(fn)` |
+| Yield inside a long loop (modern browsers) | `await scheduler.yield()` |
+
+<Callout type="note" title="Node adds a third queue">
+  In Node.js, `process.nextTick` callbacks go into their own queue, which runs **before** promise microtasks. The Node volume explains its event loop phases in detail.
+</Callout>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Thinking the whole `async` function body is deferred. Only the part after the first `await` is.
+- Assuming `await` on a non-promise is free — it still costs one microtask tick.
+- Using microtasks to "yield" in long loops — they do not let the browser render. Use a task.
+- `setInterval` assumes callbacks finish quickly; if one runs long, the next starts late. A self-scheduling `setTimeout` is more predictable.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is the difference between microtasks and macrotasks?">
+
+Macrotasks, or tasks, are timers, I/O events and user events; the event loop takes one per turn. Microtasks are promise reactions, `await` continuations and `queueMicrotask` callbacks; after every task, the engine drains the entire microtask queue, including microtasks added while draining, before rendering or taking the next task. That is why a resolved promise's `.then` always runs before a `setTimeout` of zero, and why an infinite chain of microtasks can freeze a page while an infinite chain of `setTimeout`s cannot.
+
+<Fragment slot="deeper">
+
+- **Where does `await` resume?** As a microtask, after the awaited promise settles.
+- **How much of an async function runs synchronously?** Everything up to the first `await`.
+- **How is Node different?** `process.nextTick` has its own queue that runs before promise microtasks, and the loop has six phases.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Task (macrotask)", "A unit of work such as a timer callback or event; one runs per event-loop turn."],
+  ["Microtask", "A promise reaction, `await` continuation or `queueMicrotask` callback; all run after each task."],
+  ["Drain", "Running queued items until the queue is empty."],
+  ["Starvation", "Microtasks continually re-queueing so tasks and rendering never get a turn."],
+  ["`queueMicrotask`", "Schedules a function as a microtask directly."],
+]} />

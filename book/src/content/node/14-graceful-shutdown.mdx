@@ -1,0 +1,156 @@
+---
+title: Process signals and graceful shutdown
+part: Production
+order: 14
+level: advanced
+summary: Deploys, autoscaling and restarts stop your process dozens of times a day. Handling SIGTERM properly means none of those stops drop a request.
+demo: node-graceful-shutdown
+---
+
+Your Node process will be stopped far more often than it crashes: every deploy, every scale-down, every node rotation. Platforms like Kubernetes, ECS, Docker and systemd stop a process by sending it a **signal** — usually `SIGTERM` — and then, after a grace period, `SIGKILL`, which can't be caught. **Graceful shutdown** is what your process does in that window: stop accepting new work, finish the work in progress, release resources, and exit.
+
+<Analogy>
+  Closing a shop at the end of the day. You flip the sign to "closed" so no new customers come in, serve the people already at the till, lock the safe, turn off the lights, and leave. You don't lock the doors with customers still mid-purchase. And if the landlord's deadline arrives first, they'll cut the power anyway — so don't dawdle.
+</Analogy>
+
+## Why it matters
+
+Without graceful shutdown, every deploy fails some in-flight requests, interrupts database transactions and drops messages being processed. Interviewers ask how you'd implement zero-downtime deploys and what happens between `SIGTERM` and the process exiting.
+
+## Signals
+
+| Signal | Sent by | Can be handled? | Typical meaning |
+|---|---|---|---|
+| `SIGTERM` | orchestrators, `kill <pid>` | yes | please shut down |
+| `SIGINT` | Ctrl+C in a terminal | yes | interrupt |
+| `SIGKILL` | `kill -9`, orchestrator after grace period | **no** | stop immediately |
+| `SIGHUP` | terminal closed; sometimes "reload config" | yes | hang up / reload |
+
+<Callout type="pitfall" title="PID 1 in Docker">
+  If you start your container with `CMD npm start` or a shell script, the signal goes to `npm` or the shell, which may not forward it to Node — so your handler never runs and the process is killed after the timeout. Use `CMD ["node", "server.js"]` (exec form), or an init process like `tini` (`docker run --init`).
+</Callout>
+
+## The shutdown sequence
+
+<Diagram
+  caption="A graceful shutdown. Readiness fails first so traffic drains, the server stops accepting connections, in-flight work finishes, resources close, the process exits."
+  chart={`flowchart TB
+    S["SIGTERM received"] --> R["Mark not ready<br/>(readiness probe fails)"]
+    R --> C["server.close()<br/>stop accepting new connections"]
+    C --> IF["Let in-flight requests finish<br/>close idle keep-alive sockets"]
+    IF --> W["Stop consumers / workers<br/>finish current jobs"]
+    W --> DB["Close DB pools, Redis,<br/>flush logs and metrics"]
+    DB --> X["process exits with code 0"]
+    S --> HT["Hard timeout (e.g. 25 s)<br/>→ exit(1) if stuck"]`}
+  steps={[
+    { nodes: ["S"], text: "The orchestrator sends `SIGTERM`. The grace period starts (30 s by default in Kubernetes)." },
+    { nodes: ["S", "R"], text: "First, fail the readiness check so the load balancer stops sending new requests." },
+    { nodes: ["R", "C"], text: "`server.close()` stops accepting new connections; existing ones continue." },
+    { nodes: ["C", "IF"], text: "In-flight requests complete normally. Idle keep-alive connections are closed." },
+    { nodes: ["IF", "W", "DB"], text: "Stop message consumers, let current jobs finish, then close connection pools and flush buffered logs." },
+    { nodes: ["DB", "X"], text: "With nothing left open, exit cleanly." },
+    { nodes: ["S", "HT"], text: "In parallel, a hard timer guarantees exit before `SIGKILL` arrives, even if something hangs." },
+  ]}
+/>
+
+## Implementation
+
+```js
+const http = require('node:http');
+let shuttingDown = false;
+
+const server = http.createServer(app);
+server.listen(process.env.PORT ?? 3000);
+
+app.get('/ready', (req, res) => res.status(shuttingDown ? 503 : 200).end());
+app.get('/live', (req, res) => res.status(200).end());
+
+async function shutdown(signal) {
+  if (shuttingDown) return;                 // ignore repeated signals
+  shuttingDown = true;
+  logger.info({ signal }, 'shutting down');
+
+  const hardTimer = setTimeout(() => {
+    logger.error('shutdown timed out, forcing exit');
+    process.exit(1);
+  }, 25_000);
+  hardTimer.unref();                        // don't keep the process alive for this timer
+
+  // give the load balancer a moment to notice readiness = 503
+  await new Promise((r) => setTimeout(r, 5_000));
+
+  await new Promise((resolve) => {
+    server.close(resolve);                  // resolves when all connections are closed
+    server.closeIdleConnections();          // don't wait for idle keep-alive sockets
+  });
+
+  await queueConsumer.stop();               // finish current message, stop pulling new ones
+  await db.end();                           // close the connection pool
+  await logger.flush?.();
+
+  clearTimeout(hardTimer);
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+```
+
+<DemoLink id="node-graceful-shutdown" />
+
+### Why wait before closing?
+
+In Kubernetes, removing a pod from the load balancer happens **asynchronously** with sending `SIGTERM`. For a few seconds, new requests may still arrive. If you close immediately, they get connection errors. A short delay (or a `preStop` sleep hook) avoids this race.
+
+### Long-lived connections
+
+`server.close()` waits for **all** connections to end. WebSockets, server-sent events and long-polling never end on their own — tell clients to reconnect elsewhere (send a close frame) and close them yourself, or shutdown will hit the hard timeout.
+
+## Liveness versus readiness
+
+| Probe | Question | On failure |
+|---|---|---|
+| **Liveness** | Is the process alive and not stuck? | restart the container |
+| **Readiness** | Should it receive traffic right now? | remove from the load balancer (no restart) |
+
+Keep liveness checks cheap and local (don't check the database — a DB outage shouldn't restart every pod). Use readiness for warm-up and shutdown.
+
+## Background jobs and idempotency
+
+A job interrupted by `SIGKILL` will be retried by most queues, so jobs must be **idempotent** — safe to run twice. Acknowledge a message only after its work is committed.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- No `SIGTERM` handler at all — requests are cut off on every deploy.
+- `CMD npm start` in Docker, so the signal never reaches Node.
+- `process.exit()` immediately in the handler, skipping the drain.
+- No hard timeout, so a hung connection makes the orchestrator `SIGKILL` anyway.
+- Liveness probes that depend on the database.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you implement graceful shutdown in a Node service?">
+
+The orchestrator sends `SIGTERM` and, after a grace period, `SIGKILL`. I handle `SIGTERM` by first failing the readiness probe and waiting a few seconds so the load balancer stops routing to the instance; then `server.close()` to stop accepting connections while in-flight requests finish, closing idle keep-alive sockets; then stopping queue consumers after their current message, closing database pools and flushing logs; and finally exiting with code 0. A hard, unref'd timer forces exit before the grace period ends if anything hangs. In Docker I make sure Node is PID 1 with the exec-form command or use an init so it actually receives the signal, and I make background jobs idempotent because a kill can still interrupt them.
+
+<Fragment slot="deeper">
+
+- **Liveness vs readiness?** Liveness restarts a stuck process; readiness controls traffic routing.
+- **Why delay before `server.close()`?** Endpoint removal and `SIGTERM` happen concurrently; new requests can arrive briefly.
+- **What can't you handle?** `SIGKILL` — design jobs to be retry-safe.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Signal", "An OS notification sent to a process, such as `SIGTERM` or `SIGKILL`."],
+  ["Grace period", "The time between `SIGTERM` and `SIGKILL`."],
+  ["Graceful shutdown", "Stopping new work, finishing in-flight work, releasing resources, then exiting."],
+  ["Readiness probe", "Health check deciding whether an instance should receive traffic."],
+  ["Liveness probe", "Health check deciding whether an instance should be restarted."],
+  ["PID 1", "The first process in a container; it must forward or handle signals."],
+]} />

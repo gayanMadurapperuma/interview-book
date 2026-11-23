@@ -1,0 +1,199 @@
+---
+title: Type coercion and equality
+part: Foundations
+order: 4
+level: core
+summary: Why [] == false is true, why 0 || 3000 is a bug, and the small set of rules behind every "weird JavaScript" question.
+---
+
+**Coercion** means JavaScript converting a value from one type to another automatically — a string into a number, an object into a string, anything into a boolean. It happens whenever an operator gets types it did not expect. The results can look random, but they follow a short list of rules. Learn the rules and the "wat" examples stop being scary.
+
+<Analogy>
+  Coercion is like a helpful but over-eager translator. Ask "is `'5'` equal to `5`?" with `==` and the translator quietly rewrites `'5'` as the number 5 before answering. Sometimes that saves you effort; sometimes it changes the meaning of the question. `===` is asking the question *without* a translator.
+</Analogy>
+
+## Why it matters
+
+Equality and truthiness bugs are subtle: a config value of `0` silently replaced by a default, an `if (items.length)` that behaves differently from what you thought, a form field `'0'` treated as true. Interviewers ask "predict the output" questions on these to see whether you know the rules or are guessing.
+
+## Truthy and falsy
+
+Every value becomes `true` or `false` when used in a condition (`if`, `while`, `&&`, `||`, `!`). There are exactly **eight falsy values**. Everything else is truthy.
+
+<Diagram
+  caption="The complete list of falsy values. Anything not on the left — including empty arrays and objects — is truthy."
+  chart={`flowchart LR
+    subgraph Falsy["Falsy (only these 8)"]
+      direction TB
+      f1["false"]
+      f2["0 and -0"]
+      f3["0n"]
+      f4["'' (empty string)"]
+      f5["null"]
+      f6["undefined"]
+      f7["NaN"]
+    end
+    subgraph Truthy["Truthy (everything else)"]
+      direction TB
+      t1["[ ] empty array"]
+      t2["{ } empty object"]
+      t3["'0' and 'false'"]
+      t4["-1, Infinity"]
+      t5["functions, dates…"]
+    end`}
+/>
+
+```js
+if ([]) console.log('runs');         // empty array is truthy
+if ('0') console.log('runs');        // non-empty string is truthy
+if (0) console.log('never');         // 0 is falsy
+
+const items = [];
+if (items.length) { /* has items */ } // length 0 is falsy — this is fine
+```
+
+## `||`, `&&` and `??` return values, not booleans
+
+`||` returns the **first truthy** operand (or the last one). `&&` returns the **first falsy** operand (or the last one). `??` returns the right side only if the left side is `null` or `undefined`.
+
+```js
+'' || 'guest'          // 'guest'
+'Ada' || 'guest'       // 'Ada'
+0 || 3000              // 3000   ← a real bug if 0 was meant
+0 ?? 3000              // 0      ← nullish coalescing keeps it
+
+user && user.name      // user.name if user is truthy, else user
+```
+
+<Diagram
+  caption="|| falls back on any falsy value. ?? only falls back on null or undefined."
+  chart={`flowchart TB
+    V["left side value"] --> N{"null or<br/>undefined?"}
+    N -- yes --> BOTH["both || and ??<br/>use the right side"]
+    N -- no --> F{"other falsy?<br/>0, '', false, NaN"}
+    F -- yes --> OR["|| uses the right side<br/>?? keeps the left"]
+    F -- no --> KEEP["both keep the left side"]`}
+  steps={[
+    { nodes: ["V", "N"], text: "First question: is the value `null` or `undefined`?" },
+    { nodes: ["N", "BOTH"], text: "If so, both operators fall back to the default." },
+    { nodes: ["N", "F", "OR"], text: "If it is some *other* falsy value like `0` or `''`, they disagree: `||` throws it away, `??` keeps it." },
+    { nodes: ["F", "KEEP"], text: "Truthy values are kept by both." },
+  ]}
+/>
+
+## `==` versus `===`
+
+`===` (strict equality) never converts types: different types are simply not equal. `==` (loose equality) converts first, using these rules:
+
+1. `null == undefined` is `true`, and neither is loosely equal to anything else.
+2. If one side is a number and the other a string, the string becomes a number.
+3. If one side is a boolean, it becomes a number first (`true → 1`, `false → 0`).
+4. If one side is an object and the other a primitive, the object is converted to a primitive (via `valueOf`, then `toString`).
+
+```js
+'5' == 5          // true   '5' → 5
+true == 1         // true   true → 1
+'' == 0           // true   '' → 0
+null == undefined // true   rule 1
+null == 0         // false  rule 1: null only equals undefined
+[] == false       // true   [] → '' → 0, and false → 0
+[1] == 1          // true   [1] → '1' → 1
+NaN == NaN        // false  NaN is never equal to anything
+```
+
+<Diagram
+  caption="How [] == false becomes true, one conversion at a time."
+  chart={`flowchart LR
+    A["[ ] == false"] --> B["[ ] == 0<br/>boolean → number"]
+    B --> C["'' == 0<br/>object → primitive (toString)"]
+    C --> D["0 == 0<br/>string → number"]
+    D --> E(("true"))`}
+  steps={[
+    { nodes: ["A"], text: "We start with an array and a boolean." },
+    { nodes: ["A", "B"], text: "Rule 3: the boolean becomes a number, `false → 0`." },
+    { nodes: ["B", "C"], text: "Rule 4: the array is converted to a primitive. `[].toString()` is the empty string." },
+    { nodes: ["C", "D"], text: "Rule 2: the string becomes a number, `'' → 0`." },
+    { nodes: ["D", "E"], text: "Now it is `0 == 0`, which is `true`. Surprising, but entirely rule-based." },
+  ]}
+/>
+
+<Callout type="tip" title="Rule of thumb">
+  Always use `===` and `!==`. The one widely accepted exception is `value == null`, which is a short way to check "is it `null` or `undefined`?"
+</Callout>
+
+## The `+` operator
+
+`+` does two jobs: adding numbers and joining strings. After converting objects to primitives, **if either side is a string, it joins**; otherwise it adds. All other maths operators (`-`, `*`, `/`, `%`) always convert to numbers.
+
+```js
+1 + 2         // 3
+'1' + 2       // '12'   string wins
+1 + '2' + 3   // '123'  evaluated left to right
+1 + 2 + '3'   // '33'   1 + 2 = 3 first, then '3' joins
+'10' - 2      // 8      - only does maths
+'10' * '2'    // 20
+[] + []       // ''     both become ''
+[] + {}       // '[object Object]'
+```
+
+## Converting on purpose
+
+Implicit coercion is where bugs hide. Converting **explicitly** makes intent obvious:
+
+```js
+Number('42')        // 42
+Number('42px')      // NaN — the whole string must be numeric
+parseInt('42px', 10) // 42 — reads digits until it can't
+Number('')          // 0   ← careful with empty form fields
+String(42)          // '42'
+Boolean('false')    // true — any non-empty string is truthy
+```
+
+## `NaN` and `Object.is`
+
+`NaN` is not equal to itself, so `x === NaN` is always false. Use `Number.isNaN(x)`. Avoid the older global `isNaN`, which converts first (`isNaN('hello')` is `true`).
+
+`Object.is(a, b)` is like `===`, but with two fixes: `Object.is(NaN, NaN)` is `true`, and `Object.is(0, -0)` is `false`. React uses it to decide whether state has changed.
+
+| Comparison | `==` | `===` | `Object.is` |
+|---|---|---|---|
+| `NaN`, `NaN` | false | false | **true** |
+| `0`, `-0` | true | true | **false** |
+| `'1'`, `1` | **true** | false | false |
+| `null`, `undefined` | **true** | false | false |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `const port = config.port || 3000` — breaks when the port is configured as `0`. Use `??`.
+- Reading a number from a form (`input.value` is always a string) and doing `value + 1`.
+- Testing `if (x === NaN)` — never true. Use `Number.isNaN(x)`.
+- Assuming `Boolean('false')` is false.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is the difference between == and ===?">
+
+`===` compares without converting types, so values of different types are never equal. `==` first converts the operands to a common type using a fixed set of rules — strings and booleans become numbers, objects become primitives, and `null` only equals `undefined`. That leads to results like `'' == 0` and `[] == false` being true. I use `===` everywhere, except `x == null` as a shorthand for "null or undefined".
+
+<Fragment slot="deeper">
+
+- **List the falsy values.** `false`, `0`, `-0`, `0n`, `''`, `null`, `undefined`, `NaN`.
+- **`||` vs `??`?** `||` falls back on any falsy value; `??` only on null or undefined.
+- **Why is `[] + {}` `'[object Object]'`?** Both are converted to strings — `''` and `'[object Object]'` — and joined.
+- **How do you check for `NaN`?** `Number.isNaN(x)` or `Object.is(x, NaN)`.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Coercion", "Automatic conversion of a value from one type to another."],
+  ["Truthy / falsy", "How a value behaves in a boolean context. Only eight values are falsy."],
+  ["Loose equality (`==`)", "Compares after converting types."],
+  ["Strict equality (`===`)", "Compares without converting types."],
+  ["Nullish coalescing (`??`)", "Uses the right side only when the left is `null` or `undefined`."],
+  ["`Object.is`", "SameValue comparison: like `===` but treats `NaN` as equal to itself and `0` and `-0` as different."],
+]} />

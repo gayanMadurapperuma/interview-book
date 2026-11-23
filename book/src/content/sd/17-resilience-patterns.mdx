@@ -1,0 +1,155 @@
+---
+title: "Resilience patterns: timeouts, retries, circuit breakers, bulkheads"
+part: Performance & reliability
+order: 17
+level: core
+summary: The standard toolkit for staying up when the things you depend on are slow or broken — and how each tool can backfire if used alone.
+---
+
+Every service depends on others: databases, internal APIs, third-party providers. They **will** be slow or unavailable sometimes. **Resilience patterns** keep a dependency's problem from becoming your outage. The core four are **timeouts** (don't wait forever), **retries** (try transient failures again), **circuit breakers** (stop calling something that's clearly broken) and **bulkheads** (don't let one dependency consume all your resources). Around them sit **fallbacks**, **load shedding** and **graceful degradation**.
+
+<Analogy>
+  Ordering from a restaurant's delivery partners. You don't wait four hours for one courier (timeout). If an order fails because of a glitch, you try once more — but not fifty times in a second (retry with backoff). If one courier company has failed your last ten orders, you stop using it for a while (circuit breaker). And you never send all your orders through one company, so their bad day doesn't stop your whole kitchen (bulkhead).
+</Analogy>
+
+## Why it matters
+
+Cascading failures — one slow dependency taking down everything upstream — are among the most common causes of large outages. Interviewers expect these patterns in any design with service-to-service calls, and like to probe the subtle parts: retry storms, timeout budgets, and how a breaker recovers.
+
+## How a slow dependency cascades
+
+<Diagram
+  caption="Without timeouts and isolation, a slow dependency ties up every caller's threads and connections, and the failure spreads upstream."
+  chart={`flowchart RL
+    D["Recommendations service<br/>responding in 30 s ⚠"] --> C["Product service<br/>all workers waiting on D"]
+    C --> B["API gateway<br/>connections pile up"]
+    B --> A["Users<br/>every page times out ✗"]`}
+  steps={[
+    { nodes: ["D"], text: "One non-critical dependency becomes slow — not down, just slow." },
+    { nodes: ["D", "C"], text: "Each product request waits for it. Worker threads, sockets and DB connections are held for the whole wait. Soon the product service has nothing free." },
+    { nodes: ["C", "B"], text: "Now the product service is slow, so the gateway's connections pile up too." },
+    { nodes: ["B", "A"], text: "Users see a site-wide outage — caused by an optional recommendations widget." },
+  ]}
+/>
+
+## Timeouts
+
+Every remote call needs one. Choose it from the **latency budget**: if your endpoint must respond within 1 s and calls three things in sequence, each can't take 30 s.
+
+- Base it on the dependency's observed p99 plus headroom, not on a round number.
+- Propagate **deadlines**: pass the remaining time downstream (gRPC deadlines, a header), so deeper services don't keep working on requests that have already timed out upstream.
+- Make sure the timeout actually **cancels** the work (abort the socket), not just stops waiting.
+
+## Retries
+
+Retries fix transient failures (a dropped connection, a brief failover) — and can turn a small problem into a big one.
+
+| Rule | Why |
+|---|---|
+| Retry only **idempotent** operations (or use idempotency keys) | avoid duplicate side effects |
+| Retry only **retryable** errors (timeouts, 503, connection resets) — not 400/404 | a bad request won't get better |
+| Use **exponential backoff** with **jitter** | spread retries out so clients don't hammer in sync |
+| **Cap** attempts and total time | don't exceed the caller's deadline |
+| Retry at **one layer** only | 3 retries at each of 3 layers = up to 64× load |
+| Use a **retry budget** (e.g. retries ≤ 10% of requests) | prevents retry storms when everything fails |
+
+<Diagram
+  caption="Why jitter matters: without it, every client retries at the same moments, producing synchronised spikes that keep the service down."
+  chart={`flowchart TB
+    subgraph NJ["Backoff without jitter"]
+      direction LR
+      n1["1,000 clients retry at 100 ms"] --> n2["…all again at 200 ms"] --> n3["…all again at 400 ms"]
+    end
+    subgraph WJ["Backoff with full jitter"]
+      direction LR
+      j1["retries spread randomly<br/>over 0–100 ms, 0–200 ms, 0–400 ms…"] --> j2["smooth load the service<br/>can actually recover under"]
+    end
+    NJ ~~~ WJ`}
+/>
+
+```js
+const delay = Math.random() * Math.min(maxDelay, base * 2 ** attempt);   // "full jitter"
+```
+
+## Circuit breakers
+
+A circuit breaker wraps calls to a dependency and tracks failures. When failures cross a threshold, it **opens**: further calls fail **immediately** without touching the dependency, giving it room to recover and freeing your resources. After a cool-down it lets a few **trial** calls through (**half-open**); if they succeed, it closes again.
+
+<Diagram
+  caption="Circuit breaker states and transitions."
+  chart={`stateDiagram-v2
+    [*] --> Closed
+    Closed --> Closed: success / occasional failure
+    Closed --> Open: failure rate > threshold (e.g. 50% of last 20 calls)
+    Open --> HalfOpen: cool-down elapsed (e.g. 30 s)
+    HalfOpen --> Closed: trial calls succeed
+    HalfOpen --> Open: a trial call fails`}
+/>
+
+When open, return a **fallback**: cached data, a default ("recommendations unavailable"), a queued-for-later response, or a fast error. Breakers should be per dependency (and sometimes per endpoint or host).
+
+## Bulkheads
+
+Named after a ship's watertight compartments: isolate resources so one flood doesn't sink the ship.
+
+- Separate **connection pools / concurrency limits** per dependency: the recommendations client may use at most 20 concurrent calls; when full, fail fast.
+- Separate **thread pools or worker queues** for critical vs non-critical work.
+- Separate **infrastructure** per tenant tier or region (cells).
+
+<Diagram
+  caption="With bulkheads, the slow recommendations dependency can only exhaust its own small pool; checkout keeps its capacity."
+  chart={`flowchart LR
+    REQ["incoming requests"] --> APP["service"]
+    APP --> P1["pool: payments<br/>max 50"]
+    APP --> P2["pool: inventory<br/>max 50"]
+    APP --> P3["pool: recommendations<br/>max 10 (full ⚠ → fail fast)"]
+    P1 --> D1["payments ✓"]
+    P2 --> D2["inventory ✓"]
+    P3 --> D3["recommendations (slow)"]`}
+/>
+
+## Degradation and load shedding
+
+- **Graceful degradation**: decide in advance which features are optional. A product page without reviews is fine; without a price it isn't.
+- **Load shedding**: when overloaded, reject excess requests early (`429`/`503`) rather than serving everything slowly. Prioritise — shed analytics before checkout.
+- **Rate limiting** protects you from individual noisy clients.
+
+## Putting it together
+
+A typical outbound call stack, innermost first: **timeout** on each attempt → **retry** with backoff and jitter within the deadline → **circuit breaker** → **bulkhead** concurrency limit → **fallback**. Libraries: resilience4j (Java), Polly (.NET), cockatiel or opossum (Node); service meshes (Envoy/Istio) can apply timeouts, retries and outlier ejection at the network level.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- No timeout, or the default (often minutes or infinite).
+- Retrying everything, at every layer, without jitter.
+- A breaker that never opens (thresholds too high) or never closes (no half-open probing).
+- One shared connection pool for all dependencies.
+- No decision about which features are optional, so every dependency is effectively critical.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you prevent one failing service from taking down the others?">
+
+Slow dependencies are more dangerous than dead ones, because callers hold threads and connections while they wait, and the failure cascades upstream. So every call gets a timeout derived from the latency budget, with deadlines propagated and the work actually cancelled. Transient failures on idempotent calls get a few retries with exponential backoff and jitter, at one layer only and within a retry budget, so retries don't become a storm. A circuit breaker per dependency fails fast when the error rate is high and probes recovery in a half-open state. Bulkheads — separate concurrency limits or pools per dependency — make sure a slow non-critical service can only exhaust its own share. And I decide which features can degrade, serving fallbacks or cached data, and shed load early when overloaded.
+
+<Fragment slot="deeper">
+
+- **Why jitter?** Desynchronises retries so they don't arrive in waves.
+- **What is a retry budget?** A cap on retries as a fraction of traffic, preventing amplification.
+- **Half-open state?** The breaker lets limited trial traffic through to test recovery.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Cascading failure", "A failure spreading from one component to its callers and beyond."],
+  ["Timeout / deadline", "Maximum wait for a call; deadlines carry the remaining time downstream."],
+  ["Exponential backoff with jitter", "Increasing, randomised delays between retries."],
+  ["Circuit breaker", "Fails fast when a dependency is unhealthy, then probes for recovery."],
+  ["Bulkhead", "Isolated resource limits so one dependency can't consume everything."],
+  ["Graceful degradation", "Serving reduced functionality instead of failing entirely."],
+]} />

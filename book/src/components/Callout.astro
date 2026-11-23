@@ -1,0 +1,9 @@
+---
+interface Props { type?: 'note' | 'pitfall' | 'tip'; title?: string }
+const { type = 'note', title } = Astro.props;
+const defaults = { note: 'Note', pitfall: 'Common mistake', tip: 'Interview tip' };
+---
+<aside class={`callout callout-${type}`}>
+  <p class="callout-title">{title ?? defaults[type]}</p>
+  <div class="callout-body"><slot /></div>
+</aside>

@@ -1,0 +1,141 @@
+---
+title: "Caching: layers, eviction and invalidation"
+part: Guarantees & data flow
+order: 13
+level: core
+summary: Keep copies of expensive answers close to where they're needed. The hard part is never storing them — it's knowing when they're wrong.
+---
+
+A **cache** stores the result of an expensive operation — a database query, an API call, a rendered page — so the next request can reuse it. Caches exist at every layer, from the browser to the CPU. They work because of **locality**: a small fraction of data gets most of the requests. The two hard questions are **what to throw out** when the cache is full (eviction) and **how to avoid serving stale data** when the source changes (invalidation).
+
+<Analogy>
+  Keeping the things you use most on your desk instead of fetching them from the storeroom every time. The desk is small, so you clear off what you haven't touched in a while (eviction). And if someone updates the master copy in the storeroom, the photocopy on your desk is now wrong — you need a way to find out (invalidation).
+</Analogy>
+
+## Why it matters
+
+Caching is in almost every system design answer, and interviewers follow up on its consequences: consistency, stampedes, eviction policy, what to cache at which layer, and how hit rates translate to load. (The Databases volume covers Redis patterns in code; this chapter is the design view.)
+
+## Layers of caching
+
+<Diagram
+  caption="A request may be answered at any layer. Each layer closer to the user saves more work — and is harder to invalidate."
+  chart={`flowchart LR
+    B["Browser cache<br/>HTTP Cache-Control"] --> CDN["CDN edge"]
+    CDN --> GW["Reverse proxy /<br/>API gateway cache"]
+    GW --> APP["App: in-process<br/>memory cache"]
+    APP --> DC["Distributed cache<br/>Redis / Memcached"]
+    DC --> DB[("Database<br/>+ its buffer cache")]`}
+  steps={[
+    { nodes: ["B"], text: "The **browser** reuses responses according to `Cache-Control`. Zero network cost — but you can't purge it, so version your URLs." },
+    { nodes: ["B", "CDN"], text: "A **CDN** serves static and cacheable responses from nearby edges and absorbs huge traffic spikes." },
+    { nodes: ["CDN", "GW"], text: "A **reverse proxy** can cache whole responses in front of your app." },
+    { nodes: ["GW", "APP"], text: "An **in-process cache** (a Map/LRU in each server) is fastest but per-instance: each server has its own, possibly different, copy." },
+    { nodes: ["APP", "DC"], text: "A **distributed cache** is shared by all instances — one copy to invalidate, ~0.5 ms away." },
+    { nodes: ["DC", "DB"], text: "The **database** itself caches hot pages in memory. A miss everywhere ends here." },
+  ]}
+/>
+
+## How much does a cache help?
+
+If a cache has hit rate **h**, the backend sees only (1 − h) of the traffic. Going from 90% to 99% hits cuts backend load **10×** — tail improvements matter enormously.
+
+```text
+average latency ≈ h × cache_latency + (1 − h) × backend_latency
+10,000 req/s at h = 0.95 → 500 req/s reach the database
+```
+
+## Read patterns
+
+| Pattern | How | Notes |
+|---|---|---|
+| **Cache-aside** (lazy) | app checks cache; on miss loads from DB and fills cache | most common; only caches what's used; first request is slow |
+| **Read-through** | cache library loads from DB on a miss itself | same idea, logic inside the cache layer |
+| **Refresh-ahead** | refresh popular keys before they expire | avoids miss spikes for hot keys |
+
+## Write patterns
+
+<Diagram
+  caption="Three write strategies: invalidate, write both synchronously, or write the cache and persist later."
+  chart={`flowchart TB
+    W["write"] --> WA["Write-around + invalidate<br/>write DB, DEL cache key<br/>(next read reloads)"]
+    W --> WT["Write-through<br/>write cache and DB together<br/>(cache always warm)"]
+    W --> WB["Write-back<br/>write cache now, DB later<br/>(fast, risk of loss)"]`}
+/>
+
+- **Invalidate on write** (with cache-aside) is the usual default: update the DB, then delete the key.
+- **Write-through** keeps hot data warm but writes everything into the cache, including data nobody reads.
+- **Write-back** (write-behind) is fast and absorbs write bursts, but data can be lost if the cache dies before persisting — used for counters, metrics, or with durable caches.
+
+## Invalidation
+
+> "There are only two hard things in computer science: cache invalidation and naming things." — Phil Karlton
+
+Strategies, from simplest to most precise:
+
+1. **TTL only**: data may be stale for up to the TTL. Fine for many things (product catalogue: 5 minutes).
+2. **Delete on write**: the writer deletes the key. Race: a reader may load an old value from a replica and re-cache it just after the delete. Mitigate with a short TTL, delayed second delete, or reading from the primary on a miss.
+3. **Event-driven invalidation**: changes published via an outbox or CDC trigger deletes in all caches — needed when many services cache the same data.
+4. **Versioned keys**: include a version in the key (`user:42:v17`); bump the version on change so old entries are simply never read again.
+
+Choose based on **how stale is acceptable** for each piece of data.
+
+## Eviction policies
+
+| Policy | Evicts | Good for |
+|---|---|---|
+| **LRU** (least recently used) | the item untouched the longest | general purpose default |
+| **LFU** (least frequently used) | the item used least often | stable popularity (some items always hot) |
+| **TTL-based** | expired items | time-sensitive data |
+| **FIFO / random** | oldest inserted / random | simple; random is surprisingly decent |
+
+Redis offers `allkeys-lru`, `allkeys-lfu`, `volatile-ttl` and others. Size the cache to hold the **working set** — the data actually requested in a typical period.
+
+## Failure modes
+
+<Diagram
+  caption="What goes wrong with caches at scale, and the standard defences."
+  chart={`flowchart TB
+    S["Stampede / thundering herd<br/>hot key expires, many requests<br/>rebuild it at once"] --> S2["single-flight lock,<br/>refresh-ahead, stale-while-revalidate"]
+    P["Penetration<br/>requests for non-existent keys<br/>always miss"] --> P2["cache negative results,<br/>Bloom filter of valid keys"]
+    A["Avalanche<br/>many keys expire together<br/>or the cache cluster fails"] --> A2["jittered TTLs, replicas,<br/>circuit breaker + DB rate limit"]
+    H["Hot key<br/>one key overloads one cache node"] --> H2["local in-process cache,<br/>replicate the key"]`}
+/>
+
+Also plan for **cold start**: after a deploy or cache restart, hit rate is zero and the database takes full load. Warm critical keys or ramp traffic gradually.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Caching without a clear staleness budget per data type.
+- Caching personalised data under a shared key (data leaks between users).
+- Updating (instead of deleting) cache entries on writes, causing races.
+- Treating the cache as the source of truth.
+- Assuming the database can handle full load when the cache is down.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you add caching to a read-heavy service, and how do you keep it consistent?">
+
+I'd cache at several layers: static and public responses at the CDN with proper `Cache-Control`, and data lookups in a shared Redis with cache-aside — read the cache, on a miss load from the database and store with a TTL. The TTL is my staleness budget, chosen per data type. On writes I update the database and then delete the key so the next read reloads; for data cached by many services I publish change events through an outbox to invalidate everywhere. LRU eviction with the cache sized to the working set. For hot keys I add stampede protection — one request rebuilds while others wait or get the stale value — plus jittered TTLs to avoid mass expiry, negative caching for missing keys, and I make sure the database is protected if the cache fails.
+
+<Fragment slot="deeper">
+
+- **Write-through vs write-back?** Synchronous write to both vs cache-first with delayed persistence.
+- **Why delete instead of update on write?** Concurrent updates can leave the older value in the cache.
+- **LRU vs LFU?** Recency vs frequency; LFU suits stable popularity, LRU general use.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Hit rate", "Fraction of requests served from the cache."],
+  ["Working set", "The data actively requested during a typical period."],
+  ["Cache-aside", "Application loads from the source on a miss and populates the cache."],
+  ["Write-back", "Writes go to the cache first and are persisted later."],
+  ["Eviction policy", "Rule for removing entries when the cache is full (LRU, LFU…)."],
+  ["Cache stampede", "Many concurrent misses on one key overwhelming the backend."],
+]} />

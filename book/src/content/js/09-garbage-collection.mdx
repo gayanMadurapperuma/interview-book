@@ -1,0 +1,193 @@
+---
+title: Garbage collection and memory leaks
+part: Engine & memory
+order: 9
+level: advanced
+summary: JavaScript frees memory automatically — but only memory nothing can reach any more. A leak is simply something still reachable that you forgot about.
+demo: js-closure-leak
+---
+
+You never free memory yourself in JavaScript. A part of the engine called the **garbage collector (GC)** periodically finds objects your program can no longer use and reclaims their memory. The rule it follows is simple: **an object is kept alive as long as it is reachable** from a set of starting points called *roots*. A **memory leak** happens when something you no longer need is still reachable — usually through a reference you forgot about.
+
+<Analogy>
+  Picture a hot-air balloon festival. Every balloon is tied by strings to other balloons, and some are tied to the ground (the roots). Every so often, an inspector walks around and pulls down any balloon that is not connected — directly or through other balloons — to the ground. A leak is a balloon you meant to let go, but that is still tied by one forgotten string.
+</Analogy>
+
+## Why it matters
+
+Leaks are a classic senior-level interview topic and a real production problem: a Node service whose memory grows until it crashes every few days, or a single-page app that gets slower the longer it stays open. You need to know what keeps objects alive and how to find the culprit.
+
+## Roots and reachability
+
+**Roots** are things the engine always considers alive:
+
+- global variables (and properties of `globalThis`/`window`),
+- local variables in every function currently on the call stack,
+- things the host is holding on to: active timers, event listeners on live DOM nodes, pending promises with handlers, open sockets.
+
+Anything reachable from a root by following references is alive. Everything else is garbage.
+
+## Mark and sweep
+
+Modern engines use a **mark-and-sweep** algorithm.
+
+<Diagram
+  caption="Mark-and-sweep: starting from the roots, mark everything reachable, then free everything left unmarked. Cycles that nothing reaches are freed too."
+  chart={`flowchart LR
+    R(("roots")) --> A["user"]
+    A --> B["profile"]
+    R --> C["cache"]
+    D["old session"] --> E["old cart"]
+    E --> D
+    F["temp array"]`}
+  steps={[
+    { nodes: ["R"], text: "The collector starts from the roots: globals, the stack, host-held objects." },
+    { nodes: ["R", "A", "B"], text: "**Mark**: follow every reference. `user` is reachable, and through it `profile`." },
+    { nodes: ["R", "A", "B", "C"], text: "`cache` is reachable directly. Everything marked so far will survive." },
+    { nodes: ["D", "E", "F"], text: "**Sweep**: anything not marked is freed — including `old session` and `old cart`, even though they point at each other. A cycle does not keep itself alive." },
+  ]}
+/>
+
+V8 also splits the heap into **generations**. Most objects die young (temporary arrays, strings built in a loop), so new objects are collected often and cheaply in a small "young generation". Objects that survive a couple of collections are moved to the "old generation", which is collected less often. That is why lots of short-lived garbage is usually fine, but long-lived references are expensive.
+
+<Callout type="note" title="Why not reference counting?">
+  Very old engines counted references and freed an object when its count hit zero. That fails for cycles: two objects pointing at each other never reach zero. Mark-and-sweep only asks "can a root reach it?", so cycles are handled naturally.
+</Callout>
+
+## The usual suspects
+
+Almost every real leak is one of these.
+
+<Diagram
+  caption="Common leak sources. Each is a root holding a reference you forgot to drop."
+  chart={`flowchart TB
+    Root(("GC roots")) --> L1["Event listeners<br/>never removed"]
+    Root --> L2["Timers / intervals<br/>never cleared"]
+    Root --> L3["Global or module-level<br/>caches that only grow"]
+    Root --> L4["Closures capturing<br/>large data"]
+    Root --> L5["Detached DOM nodes<br/>still referenced in JS"]
+    L1 --> Big["Large data<br/>kept alive"]
+    L2 --> Big
+    L3 --> Big
+    L4 --> Big
+    L5 --> Big`}
+  flow
+/>
+
+### 1. Forgotten listeners and timers
+
+```js
+function startPolling() {
+  const bigResult = new Array(1e6).fill('x');
+  setInterval(() => {
+    console.log(bigResult.length);  // the closure keeps bigResult alive forever
+  }, 1000);
+}
+```
+
+Every time `startPolling` runs, another interval and another big array are kept alive for the lifetime of the page or process. The fix is to keep the handle and clean up:
+
+```js
+const id = setInterval(tick, 1000);
+// later, e.g. when a component unmounts:
+clearInterval(id);
+
+const controller = new AbortController();
+window.addEventListener('resize', onResize, { signal: controller.signal });
+// later:
+controller.abort();   // removes every listener registered with this signal
+```
+
+<DemoLink id="js-closure-leak" />
+
+### 2. Caches that only grow
+
+```js
+const cache = new Map();
+function getUser(id) {
+  if (!cache.has(id)) cache.set(id, loadUser(id));
+  return cache.get(id);
+}
+```
+
+On a server handling millions of different IDs, this `Map` grows forever. Fixes: cap the size (an LRU cache that evicts the least-recently used entry), add a time-to-live, or — when the key is an object — use a `WeakMap`.
+
+### 3. `WeakMap` and `WeakRef`
+
+A `WeakMap`'s keys are held **weakly**: if the only thing referencing a key object is the `WeakMap`, the entry can be collected.
+
+```js
+const metadata = new WeakMap();
+function tag(node) {
+  metadata.set(node, { seenAt: Date.now() });
+}
+// when node is removed from the DOM and dropped everywhere else,
+// its metadata entry disappears automatically
+```
+
+`WeakRef` and `FinalizationRegistry` give lower-level control, but their timing is unpredictable. Use them for caches, never for program logic.
+
+### 4. Closures holding more than you think
+
+A closure keeps alive the variables it uses. If a long-lived callback uses even one field of a big object, the whole object stays. Copy out the small piece you need before creating the long-lived closure.
+
+```js
+function register(report) {
+  const title = report.title;           // keep only what is needed
+  button.onclick = () => alert(title);  // closure holds a short string, not the whole report
+}
+```
+
+## Finding a leak
+
+<Diagram
+  caption="The heap-snapshot workflow used in both Chrome DevTools and Node."
+  chart={`flowchart LR
+    S1["Take snapshot 1<br/>(baseline)"] --> W["Repeat the suspect action<br/>several times"]
+    W --> S2["Take snapshot 2"]
+    S2 --> CMP["Compare:<br/>which objects grew?"]
+    CMP --> RET["Open the retainers path:<br/>what keeps them alive?"]
+    RET --> FIX["Fix the reference<br/>(remove listener, cap cache)"]`}
+/>
+
+1. Take a heap snapshot (DevTools → Memory; in Node run with `--inspect` and connect Chrome, or call `v8.writeHeapSnapshot()`).
+2. Repeat the action you suspect (open and close a dialog ten times; send a thousand requests).
+3. Take another snapshot and use the **Comparison** view sorted by size delta.
+4. Select a growing object and read its **Retainers** — the chain of references back to a root. That chain is your leak.
+
+In production Node, watch `process.memoryUsage().heapUsed` over time. A healthy service has a saw-tooth pattern (grow, collect, drop). A leaking one has a saw-tooth that keeps rising.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Thinking `obj = null` frees memory immediately. It only removes one reference; the GC frees it later, if nothing else refers to it.
+- Believing a variable going out of scope frees its object. Not if a closure, listener or cache still references it.
+- Using a plain `Map` keyed by DOM nodes or request objects without ever deleting entries.
+- Calling `global.gc()` in production code to "fix" memory.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does garbage collection work in JavaScript, and what causes memory leaks?">
+
+The engine uses mark-and-sweep: starting from roots — globals, the current call stack, and things the host holds like timers and listeners — it marks every object it can reach by following references, then frees everything unmarked. Because it is based on reachability, cycles are not a problem. V8 adds generations so short-lived objects are collected cheaply. A leak is memory that is still reachable even though you no longer need it — typically a listener or interval that was never removed, a cache that only grows, or a closure that captures a large object. I find them with heap snapshots: compare two snapshots and follow the retainer path of the objects that grew.
+
+<Fragment slot="deeper">
+
+- **What does `WeakMap` solve?** Associating data with an object without preventing that object from being collected.
+- **Does setting a variable to `null` free memory?** It removes a reference; memory is freed at the next collection if nothing else refers to it.
+- **How would you detect a leak in a Node service?** Track heap usage over time, take snapshots under load, compare them, inspect retainers.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Garbage collector", "The part of the engine that reclaims memory from unreachable objects."],
+  ["Root", "A starting point the GC always treats as alive: globals, the stack, host-held objects."],
+  ["Mark and sweep", "Mark everything reachable from roots, free the rest."],
+  ["Generational GC", "Collecting young objects often and old objects rarely, because most objects die young."],
+  ["Retainer", "An object holding a reference that keeps another object alive."],
+  ["`WeakMap`", "A map whose keys do not keep their objects alive."],
+]} />

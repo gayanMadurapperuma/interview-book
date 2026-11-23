@@ -1,0 +1,85 @@
+---
+import Base from '../../layouts/Base.astro';
+import { SCENARIOS } from '../../demos/catalog';
+import { withBase } from '../../lib/subjects';
+
+const groupsFor = (rt: 'js' | 'node') => {
+  const list = SCENARIOS.filter((s) => s.runtime === rt);
+  const names = [...new Set(list.map((s) => s.group))];
+  return names.map((g) => ({ name: g, items: list.filter((s) => s.group === g) }));
+};
+const cols = [
+  { rt: 'js' as const, title: 'JavaScript', sub: 'The engine and the browser event loop', groups: groupsFor('js') },
+  { rt: 'node' as const, title: 'Node.js', sub: 'libuv, the six phases, threads and streams', groups: groupsFor('node') },
+];
+---
+<Base title="Demo Lab" description="Step-through visualisations of the JavaScript engine and the Node.js runtime." active="demos">
+  <main id="content" class="lab">
+    <header class="lab-head">
+      <p class="caps">Demo Lab</p>
+      <h1>Watch the runtime, one step at a time.</h1>
+      <p class="lab-lede">Each demo is a small, real program. Step forwards and backwards through it and watch the call stack, the queues, the thread pool and the event loop change. Every scenario’s final output is verified by running the same code in Node.</p>
+      <div class="lab-legend">
+        <span><i class="lg lg-stack"></i>Call stack</span>
+        <span><i class="lg lg-micro"></i>Microtasks</span>
+        <span><i class="lg lg-macro"></i>Tasks / timers</span>
+        <span><i class="lg lg-pool"></i>Thread pool</span>
+      </div>
+    </header>
+
+    <div class="lab-cols">
+      {cols.map((c) => (
+        <section class="lab-col" data-subject={c.rt}>
+          <h2>{c.title}</h2>
+          <p class="lab-col-sub">{c.sub}</p>
+          {c.groups.map((g) => (
+            <div class="lab-group">
+              <h3 class="caps">{g.name}</h3>
+              <ol>
+                {g.items.map((s) => (
+                  <li>
+                    <a href={withBase(`/demos/${s.id}/`)}>
+                      <span class="li-play" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 12 12"><path d="M3 1.8v8.4L10 6z" fill="currentColor"/></svg></span>
+                      <span class="li-text"><b>{s.title}</b><span>{s.blurb}</span></span>
+                      <span class="li-meta">{s.steps.length} steps</span>
+                    </a>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ))}
+        </section>
+      ))}
+    </div>
+  </main>
+</Base>
+
+<style>
+  .lab { max-width: 1180px; margin: 0 auto; padding: 64px 32px 48px; }
+  .lab-head { max-width: 760px; margin-bottom: 48px; }
+  .lab-head .caps { color: var(--node); margin: 0 0 12px; }
+  .lab-head h1 { font-family: var(--font-read); font-size: clamp(2.2rem, 5vw, 3.2rem); font-weight: 600; letter-spacing: -0.025em; line-height: 1.08; color: var(--ink); margin: 0 0 16px; }
+  .lab-lede { font-family: var(--font-read); font-size: 18px; line-height: 1.6; color: var(--text); margin: 0 0 20px; }
+  .lab-legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
+  .lg { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  .lg-stack { background: var(--accent); } .lg-micro { background: var(--tip); } .lg-macro { background: var(--js); } .lg-pool { background: var(--db); }
+  .lab-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; }
+  .lab-col h2 { font-family: var(--font-read); font-size: 28px; font-weight: 600; color: var(--ink); margin: 0; padding-bottom: 4px; }
+  .lab-col-sub { margin: 0 0 18px; padding-bottom: 14px; border-bottom: 1.5px solid var(--ink); color: var(--muted); font-size: 14px; }
+  .lab-group { margin: 22px 0 0; }
+  .lab-group h3 { margin: 0 0 6px; color: var(--subj); }
+  .lab-group ol { list-style: none; margin: 0; padding: 0; }
+  .lab-group a {
+    display: grid; grid-template-columns: 26px 1fr auto; gap: 12px; align-items: start;
+    padding: 12px 6px; border-bottom: 1px solid var(--rule); text-decoration: none; color: var(--text);
+    transition: background-color 0.15s;
+  }
+  .lab-group a:hover { background: var(--bg-raised); }
+  .li-play { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; border: 1px solid var(--rule-strong); color: var(--subj); margin-top: 1px; transition: all 0.15s; }
+  .lab-group a:hover .li-play { background: var(--subj); color: var(--bg); border-color: var(--subj); }
+  .li-text { display: flex; flex-direction: column; gap: 2px; }
+  .li-text b { color: var(--ink); font-size: 15px; font-weight: 600; }
+  .li-text span { font-size: 13.5px; color: var(--muted); line-height: 1.45; }
+  .li-meta { font-size: 11.5px; color: var(--faint); white-space: nowrap; padding-top: 3px; font-variant-numeric: tabular-nums; }
+  @media (max-width: 860px) { .lab-cols { grid-template-columns: 1fr; } .lab { padding: 40px 20px; } }
+</style>

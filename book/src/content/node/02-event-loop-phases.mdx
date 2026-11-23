@@ -1,0 +1,184 @@
+---
+title: The Node event loop — six phases
+part: Runtime
+order: 2
+level: core
+summary: Timers, pending callbacks, poll, check, close — plus the nextTick and promise queues that run between every callback. The exact order Node runs your code in.
+demo: node-six-phases
+---
+
+Node's event loop is provided by libuv. Like the browser's, it repeatedly takes ready callbacks and runs them on the single JavaScript thread. Unlike the browser's, it is organised into **phases**, each with its own queue of callbacks, visited in a fixed order. On top of that, Node has two **micro-queues** — the `process.nextTick` queue and the promise microtask queue — that are drained **between every single callback** in every phase.
+
+<Analogy>
+  Picture a security guard doing rounds of a building in a fixed order: car park, loading dock, main lobby, side entrance, back door. At each stop they deal with everyone waiting there. But they also carry a walkie-talkie: after each person they deal with, they first handle any urgent radio calls (nextTick, then promises) before moving on to the next person.
+</Analogy>
+
+## Why it matters
+
+"Explain the Node event loop" and "what order does this print?" with `setTimeout`, `setImmediate`, `process.nextTick` and promises are among the most common Node interview questions. Knowing the phases also explains production behaviour: why a process won't exit, why timers fire late, and how to schedule work without starving I/O.
+
+## The six phases
+
+<Diagram
+  caption="One turn (tick) of the Node event loop. After every callback in any phase, the nextTick queue and then the promise queue are drained."
+  chart={`flowchart TB
+    T["1 · Timers<br/>expired setTimeout / setInterval"] --> P["2 · Pending callbacks<br/>deferred system errors"]
+    P --> I["3 · Idle / prepare<br/>internal"]
+    I --> PO["4 · Poll<br/>I/O callbacks; may wait here"]
+    PO --> C["5 · Check<br/>setImmediate"]
+    C --> CL["6 · Close callbacks<br/>socket.on('close')"]
+    CL --> T
+    MQ(("after EACH callback:<br/>nextTick queue →<br/>promise queue"))`}
+  steps={[
+    { nodes: ["T"], text: "**Timers**: run callbacks of `setTimeout`/`setInterval` whose time has passed." },
+    { nodes: ["P"], text: "**Pending callbacks**: a few system-level callbacks deferred from the previous loop, such as some TCP errors." },
+    { nodes: ["I"], text: "**Idle/prepare**: libuv internals. Nothing for your code." },
+    { nodes: ["PO"], text: "**Poll**: run callbacks for completed I/O — incoming requests, finished file reads. If there is nothing else to do, the loop **waits here** for new I/O, but never past the next due timer." },
+    { nodes: ["C"], text: "**Check**: run `setImmediate` callbacks. Always right after poll." },
+    { nodes: ["CL"], text: "**Close callbacks**: `'close'` events for sockets and handles that were destroyed." },
+    { nodes: ["MQ"], text: "Between **every** callback in **every** phase: drain the whole `nextTick` queue, then the whole promise microtask queue." },
+  ]}
+/>
+
+When there is nothing left — no timers, no open sockets or servers, no pending I/O — the loop ends and the process exits.
+
+## The two micro-queues
+
+| Queue | Filled by | Priority |
+|---|---|---|
+| `nextTick` queue | `process.nextTick(fn)` | highest — runs first |
+| Promise microtasks | `.then`, `await`, `queueMicrotask` | after the nextTick queue is empty |
+
+Both are drained completely, including items added while draining, before the loop may run the next callback or move to the next phase.
+
+## A full example
+
+```js
+const fs = require('node:fs');
+
+setTimeout(() => console.log('timeout'), 0);
+setImmediate(() => console.log('immediate'));
+process.nextTick(() => console.log('nextTick'));
+Promise.resolve().then(() => console.log('promise'));
+
+fs.readFile(__filename, () => {
+  console.log('readFile done');
+  setTimeout(() => console.log('timeout (from I/O)'), 0);
+  setImmediate(() => console.log('immediate (from I/O)'));
+});
+
+console.log('sync');
+```
+
+<Output lines={['sync', 'nextTick', 'promise', 'timeout', 'immediate', 'readFile done', 'immediate (from I/O)', 'timeout (from I/O)']} />
+
+1. The main module runs: `sync`.
+2. Before the loop starts, the micro-queues drain: `nextTick`, then `promise`.
+3. **Timers** phase: the 0 ms timer (really 1 ms) has usually expired → `timeout`.
+4. **Poll**: the file read isn't finished yet. **Check** → `immediate`.
+5. A later iteration's **poll**: the file read is done → `readFile done`. It schedules a timer and an immediate.
+6. **Check** comes right after poll → `immediate (from I/O)`. The timer waits for the next **timers** phase → `timeout (from I/O)`.
+
+<DemoLink id="node-six-phases" />
+
+## `setTimeout(0)` versus `setImmediate`
+
+- **In the main module**, the order is **not guaranteed**. `setTimeout(fn, 0)` means "at least 1 ms". If the loop starts within 1 ms, the timer isn't due yet and `setImmediate` wins; if startup took longer, the timer wins.
+- **Inside an I/O callback**, `setImmediate` **always** runs first, because check comes immediately after poll, while timers must wait for the next loop iteration.
+
+Use `setImmediate` when you want "run this after the current I/O, before anything else waits on timers". Use `setTimeout` when you need a real delay.
+
+## `process.nextTick` versus `setImmediate`
+
+The names are confusingly backwards:
+
+- `process.nextTick` runs **before** the loop continues — immediately after the current operation. It is "now-ish".
+- `setImmediate` runs on the **next** check phase — after I/O has had a chance. It is "soon".
+
+`nextTick` is useful for deferring a callback until after the current function returns but before any I/O — for example, emitting an event only after the caller has had a chance to attach listeners:
+
+```js
+function createConnection() {
+  const conn = new EventEmitter();
+  process.nextTick(() => conn.emit('ready'));   // the caller attaches .on('ready') first
+  return conn;
+}
+```
+
+But because the nextTick queue must be empty before the loop moves on, a recursive `nextTick` **starves** timers and I/O completely.
+
+<DemoLink id="node-nexttick-starvation" />
+
+## When the loop waits
+
+If nothing is ready, the loop doesn't spin; it **blocks in the poll phase**, asking the OS to wake it when any watched socket or file operation completes. The wait is limited by the nearest timer, so a `setTimeout(fn, 500)` still fires on time. If there are `setImmediate` callbacks waiting, poll doesn't wait at all.
+
+<Diagram
+  caption="The poll phase decides how long to sleep: zero if immediates are pending, otherwise until the next timer, or until I/O arrives."
+  chart={`flowchart TB
+    S["Enter poll"] --> R{"I/O callbacks ready?"}
+    R -- yes --> RUN["Run them"]
+    R -- no --> IM{"setImmediate pending?"}
+    IM -- yes --> GO["Go to check now"]
+    IM -- no --> TM{"Timers scheduled?"}
+    TM -- yes --> W1["Wait for I/O, at most<br/>until the next timer is due"]
+    TM -- no --> W2{"Anything still alive?<br/>sockets, servers…"}
+    W2 -- yes --> W3["Wait for I/O"]
+    W2 -- no --> EXIT["Loop ends, process exits"]`}
+/>
+
+## Why a process won't exit
+
+The loop keeps running while there are **ref'ed handles**: a listening server, an open socket, a `setInterval`, a file watcher. A script that never exits usually has one of these left over. You can tell a handle not to keep the process alive with `.unref()`:
+
+```js
+const interval = setInterval(sendHeartbeat, 30_000);
+interval.unref();    // don't keep the process alive just for this
+```
+
+## Timers are a minimum, not a promise
+
+`setTimeout(fn, 100)` means "not before 100 ms". If the JavaScript thread is busy, or a poll phase runs many callbacks, it fires later. A `setInterval` whose callback takes longer than the interval runs back-to-back; a self-rescheduling `setTimeout` keeps steady gaps:
+
+```js
+async function poll() {
+  await checkJobs();
+  setTimeout(poll, 5000);   // 5 s after the previous run finished
+}
+poll();
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Assuming `setTimeout(fn, 0)` runs before `setImmediate` at top level — it's a race.
+- Using `process.nextTick` for "later" — it runs before any I/O and can starve the loop.
+- Expecting `setTimeout` to be precise.
+- Leaving intervals or servers open so tests and scripts never exit.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Explain the Node.js event loop.">
+
+Node's event loop comes from libuv and runs in phases: timers for expired `setTimeout`/`setInterval` callbacks, pending callbacks, an internal idle/prepare phase, poll — where completed I/O callbacks run and where the loop waits for new I/O when idle — then check for `setImmediate`, and close callbacks. Between every individual callback in every phase, Node drains the `process.nextTick` queue and then the promise microtask queue completely. So `nextTick` runs before promises, which run before any timer or I/O callback. `setImmediate` versus `setTimeout(0)` is non-deterministic in the main module but `setImmediate` always wins inside an I/O callback, because check follows poll. The process exits when no handles remain to keep the loop alive.
+
+<Fragment slot="deeper">
+
+- **nextTick vs setImmediate?** nextTick runs before the loop continues; setImmediate in the next check phase. Recursive nextTick starves I/O.
+- **Where does the loop block?** In poll, bounded by the nearest timer, and not at all if immediates are pending.
+- **Why doesn't my script exit?** A ref'ed handle is open — use `close()` or `unref()`.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Phase", "One stage of the libuv loop with its own callback queue."],
+  ["Poll phase", "Where I/O callbacks run and where the loop waits for new events."],
+  ["Check phase", "Where `setImmediate` callbacks run, right after poll."],
+  ["`process.nextTick`", "Queues a callback to run before the loop continues, ahead of promises."],
+  ["Handle", "A long-lived libuv object (server, socket, timer) that can keep the loop alive."],
+  ["`unref()`", "Tells Node a handle should not keep the process alive on its own."],
+]} />

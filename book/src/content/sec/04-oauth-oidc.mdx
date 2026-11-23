@@ -1,0 +1,140 @@
+---
+title: OAuth 2.0 and OpenID Connect
+part: Identity
+order: 4
+level: advanced
+summary: Delegated access without sharing passwords, and the identity layer on top that powers "Sign in with Google" and enterprise single sign-on.
+---
+
+**OAuth 2.0** is a framework for **delegated authorisation**: it lets a user grant an application limited access to their resources on another service — "let this app read my Google Calendar" — without giving the app their password. The app receives an **access token** with specific **scopes**. **OpenID Connect (OIDC)** is a thin identity layer on top of OAuth 2.0: it adds an **ID token** that tells the app *who* the user is, which is what "Sign in with Google/Microsoft/GitHub" and most enterprise SSO use.
+
+<Analogy>
+  A hotel key card. At reception (the authorisation server) you prove who you are, and they give you a card (access token) that opens only your room and the gym (scopes), and only until checkout (expiry). The room door (resource server) doesn't know your name or password — it just checks the card. OpenID Connect adds a printed receipt with your name on it (ID token) so the hotel's restaurant knows who you are.
+</Analogy>
+
+## Why it matters
+
+Almost every product integrates OAuth/OIDC — social login, SSO for business customers, third-party API access, machine-to-machine auth. Interviewers ask about the roles, the authorization code flow with PKCE, the difference between ID and access tokens, and common mistakes.
+
+## The roles
+
+| Role | Who | Example |
+|---|---|---|
+| **Resource owner** | the user | Ada |
+| **Client** | the app wanting access | a scheduling app |
+| **Authorization server** | issues tokens after authenticating the user and getting consent | Google's OAuth server, Okta, Auth0, Keycloak |
+| **Resource server** | the API holding the data, accepts access tokens | Google Calendar API, your own API |
+
+## Authorization code flow with PKCE
+
+The recommended flow for web apps, single-page apps and mobile apps.
+
+<Diagram
+  sequence
+  caption="Authorization code + PKCE. The browser only ever sees a short-lived code; tokens are exchanged directly between the app and the authorisation server."
+  chart={`sequenceDiagram
+    participant U as User's browser
+    participant A as App (client)
+    participant AS as Authorization server
+    participant RS as API (resource server)
+    A->>U: redirect to AS /authorize (client_id, scope, state, code_challenge)
+    U->>AS: login + consent
+    AS-->>U: redirect back to app with ?code=…&state=…
+    U->>A: code + state
+    A->>AS: POST /token (code, code_verifier, client auth)
+    AS-->>A: access_token (+ refresh_token, id_token)
+    A->>RS: GET /calendar (Authorization: Bearer access_token)
+    RS-->>A: data (if token valid and scope allows)`}
+  notes={[
+    "The app sends the user to the authorisation server with what it wants (scopes), a random `state` (CSRF protection), and a PKCE `code_challenge` — a hash of a secret it keeps.",
+    "The user signs in at the authorisation server — the app never sees the password — and approves the requested access.",
+    "The server redirects back to the app's registered redirect URI with a one-time authorization code.",
+    "The app checks `state` matches what it sent.",
+    "The app exchanges the code at the token endpoint, proving it's the same client with the PKCE `code_verifier` (and a client secret for server-side apps).",
+    "It receives an access token, optionally a refresh token, and with OIDC an ID token.",
+    "The app calls the API with the access token.",
+    "The API validates the token (signature, expiry, audience, scopes) and returns the data.",
+  ]}
+/>
+
+**PKCE** (Proof Key for Code Exchange) stops an attacker who intercepts the authorization code from redeeming it: they don't have the `code_verifier`. It's now recommended for all clients, not just mobile.
+
+## Other grants
+
+| Grant | Use | Notes |
+|---|---|---|
+| Authorization code + PKCE | users in web, SPA, mobile apps | the default |
+| **Client credentials** | machine-to-machine (service calls another API, no user) | client authenticates with secret or certificate |
+| Device code | TVs, CLIs, devices without browsers | user approves on another device |
+| Refresh token | getting new access tokens without re-login | rotate and detect reuse |
+| ~~Implicit~~ | old SPA flow returning tokens in the URL | deprecated — insecure |
+| ~~Password (ROPC)~~ | app collects the user's password | deprecated — defeats the purpose |
+
+## Tokens: access, refresh, ID
+
+<Diagram
+  caption="Three tokens, three audiences. Don't mix them up."
+  chart={`flowchart LR
+    AT["Access token<br/>for the API (audience = API)<br/>short-lived: 5–60 min<br/>carries scopes"] --> RS["resource server"]
+    RT["Refresh token<br/>for the authorization server only<br/>long-lived, rotated, revocable"] --> AS["authorization server"]
+    IDT["ID token (OIDC)<br/>for the client app<br/>who logged in: sub, email, name<br/>signed JWT"] --> APP["client app"]`}
+/>
+
+- The **ID token** is for the client to learn the user's identity. Never send it to APIs as an access token.
+- The **access token** is for the API. It may be a JWT (self-contained) or opaque (validated via **introspection**).
+- **Refresh tokens** must be stored securely (server side, or HttpOnly cookie via a BFF), rotated on each use, and revoked if reuse is detected.
+
+## OpenID Connect in a bit more detail
+
+- Request `scope=openid profile email`.
+- Validate the ID token: signature (using the provider's published **JWKS** keys), `iss` (issuer), `aud` (your client ID), `exp`, and `nonce` (replay protection).
+- Use the stable `sub` (+ `iss`) as the user identifier — not the email, which can change.
+- **Discovery**: `/.well-known/openid-configuration` lists endpoints and keys.
+- Enterprise **SSO**: your app trusts the customer's identity provider (Okta, Entra ID) via OIDC or SAML; users log in with their company account and access is managed centrally.
+
+## Securing SPAs: the BFF pattern
+
+Storing tokens in browser JavaScript exposes them to XSS. A common recommendation: a small **backend-for-frontend** performs the OAuth flow, keeps tokens server-side, and gives the browser only an HttpOnly session cookie; the BFF attaches access tokens when proxying API calls.
+
+## Validating access tokens in your API
+
+1. Verify signature with the issuer's JWKS (cache keys; handle rotation).
+2. Check `iss`, `aud` (this API), `exp`/`nbf`.
+3. Check **scopes** for the endpoint and apply your own authorisation (scopes say what the *app* may do; your rules decide what the *user* may do with which records).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using the implicit or password grants.
+- Missing or unchecked `state` (CSRF) and no PKCE.
+- Accepting ID tokens as API access tokens, or not checking `aud`.
+- Open redirect URIs or wildcard matching — register exact redirect URIs.
+- Long-lived access tokens; refresh tokens in `localStorage`.
+- Treating OAuth scopes as full authorisation.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Explain OAuth 2.0 and OpenID Connect, and how 'Sign in with Google' works.">
+
+OAuth 2.0 is delegated authorisation: a user lets a client app access an API on their behalf without sharing their password. With the authorization code flow plus PKCE, the app redirects the user to the authorisation server with the requested scopes, a state value and a PKCE challenge; the user signs in and consents; the server redirects back with a one-time code, which the app exchanges at the token endpoint along with the PKCE verifier for a short-lived access token and usually a refresh token. The API validates the access token's signature, issuer, audience, expiry and scopes. OpenID Connect adds identity: requesting the `openid` scope also returns an ID token, a signed JWT telling the app who the user is, which it validates and maps via the stable subject ID. That's 'Sign in with Google'. For machine-to-machine calls I'd use the client credentials grant.
+
+<Fragment slot="deeper">
+
+- **What does PKCE prevent?** An intercepted authorization code being redeemed by someone else.
+- **ID token vs access token?** Identity for the client vs authorisation for the API.
+- **Why is the implicit flow deprecated?** Tokens in URLs/browser history and no code exchange protection.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["OAuth 2.0", "Framework for delegated authorisation using access tokens."],
+  ["OpenID Connect", "Identity layer on OAuth 2.0 adding ID tokens."],
+  ["Authorization code flow", "Redirect-based flow exchanging a one-time code for tokens."],
+  ["PKCE", "Proof key binding the code exchange to the client that started the flow."],
+  ["Scope", "A named permission requested by a client."],
+  ["Client credentials", "Grant for service-to-service access without a user."],
+]} />

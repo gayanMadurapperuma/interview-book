@@ -1,0 +1,129 @@
+---
+title: Load balancing and traffic distribution
+part: Architecture
+order: 22
+level: core
+summary: How traffic is spread across servers — the algorithms, health checks, and the global layer that routes users to the right region.
+---
+
+A **load balancer** sits in front of a group of servers and decides which one handles each request (or connection). It keeps load even, routes around failed servers using **health checks**, and lets you add, remove or replace servers without users noticing. The interesting decisions are **which algorithm** picks the server, **how health is judged**, and **at what level** balancing happens — inside a region, across regions, or even inside the client.
+
+<Analogy>
+  The host at a busy restaurant deciding which waiter takes each new table. Taking turns (round-robin) works if every table is similar. Giving the table to whichever waiter has the fewest tables right now (least connections) works better when some tables take much longer. And the host won't seat anyone in a section whose waiter has gone home sick (health checks).
+</Analogy>
+
+## Why it matters
+
+Every design with more than one server has a load balancer, and interviewers ask about algorithms, sticky sessions, health checks, L4 vs L7, and how to route users globally.
+
+## Algorithms
+
+| Algorithm | How it picks | Best when |
+|---|---|---|
+| **Round-robin** | next server in turn | requests cost about the same; servers equal |
+| **Weighted round-robin** | in turn, bigger servers more often | mixed server sizes; canary (5% to new version) |
+| **Least connections / least outstanding requests** | server with fewest active requests | request costs vary (some slow) |
+| **Power of two choices** | pick 2 servers at random, send to the less loaded | large fleets; near-optimal with little coordination |
+| **Least response time (EWMA)** | fastest recent responses | latency-sensitive; avoids slow (gray-failing) nodes |
+| **IP / header hash** | hash of client IP or a header | affinity without cookies |
+| **Consistent hashing** | ring by request key | caches: same key → same server, minimal reshuffling |
+
+<Diagram
+  caption="Round-robin ignores how busy servers are. Least-outstanding-requests sends new work where there's spare capacity — important when some requests are slow."
+  chart={`flowchart LR
+    subgraph RR["Round-robin"]
+      direction TB
+      r1["server A: 9 in flight (slow requests) ← next request"]
+      r2["server B: 1 in flight"]
+      r3["server C: 2 in flight"]
+    end
+    subgraph LOR["Least outstanding requests"]
+      direction TB
+      l1["server A: 9 in flight"]
+      l2["server B: 1 in flight ← next request"]
+      l3["server C: 2 in flight"]
+    end
+    RR ~~~ LOR`}
+/>
+
+"Power of two choices" is worth knowing: picking the better of two random servers gives almost the same balance as checking all servers, without every load balancer needing a global, up-to-date view.
+
+## Health checks
+
+- **Active checks**: the balancer calls `/health` every few seconds; after N failures the server is removed, after M successes it's added back.
+- **Passive checks / outlier detection**: watch real traffic; eject servers with high error rates or latency (catches gray failures a simple `/health` misses).
+- Health endpoints should check what the server needs to serve traffic (e.g. it can reach its database), but avoid making every instance unhealthy at once because of one shared dependency — that turns a partial outage into a total one.
+- **Connection draining**: when removing a server (deploy, scale-in), stop sending new requests but let in-flight ones finish.
+
+## Sticky sessions
+
+**Session affinity** pins a client to one server (via a cookie or IP hash). It's needed only when servers keep per-user state in memory — which is better avoided (see *Scalability*). Drawbacks: uneven load, lost sessions when that server dies, harder scale-in. WebSocket connections are naturally sticky for their lifetime; reconnections may land elsewhere.
+
+## Layers of load balancing
+
+<Diagram
+  caption="Traffic is balanced at several levels: globally across regions, within a region across zones and servers, and between services."
+  chart={`flowchart TB
+    U["users worldwide"] --> G["Global: GeoDNS / anycast /<br/>global LB (Route 53, Cloudflare,<br/>AWS Global Accelerator)"]
+    G --> R1["Region EU: L7 load balancer"]
+    G --> R2["Region US: L7 load balancer"]
+    R1 --> Z1["servers in AZ-a, AZ-b, AZ-c"]
+    R2 --> Z2["servers in AZ-a, AZ-b, AZ-c"]
+    Z1 -- "service-to-service" --> M["client-side LB /<br/>service mesh (Envoy)"]`}
+  steps={[
+    { nodes: ["U", "G"], text: "**Global**: DNS or anycast routes each user to a nearby healthy region, by geography or measured latency. Failover shifts traffic when a region is down." },
+    { nodes: ["G", "R1", "R2"], text: "**Regional**: an L7 load balancer per region terminates TLS and routes by host or path." },
+    { nodes: ["R1", "Z1"], text: "It spreads requests across servers in several availability zones, using health checks." },
+    { nodes: ["Z1", "M"], text: "**Internal**: calls between services are balanced by client libraries or a service mesh sidecar, often with least-request and outlier ejection." },
+  ]}
+/>
+
+- **GeoDNS / latency-based DNS** returns different IPs per user location; failover limited by DNS TTL caching.
+- **Anycast**: the same IP is announced from many locations; the network routes users to the nearest. Used by CDNs and global load balancers — fast failover.
+- **Client-side load balancing**: the caller knows all instances (via service discovery) and picks one itself — removes a hop; common with gRPC.
+
+## L4 versus L7, again
+
+L4 balancers (AWS NLB) forward TCP/UDP connections — extremely fast, preserve client IPs, good for non-HTTP protocols and millions of connections. L7 balancers (AWS ALB, nginx, Envoy) understand HTTP — route by path/host/header, terminate TLS, retry, rewrite, rate limit. Many architectures use L4 at the edge and L7 behind it.
+
+## Connection-level gotchas
+
+- **Long-lived connections** (HTTP/2, gRPC, WebSockets) are balanced **once**, at connect time. With few clients, load can be very uneven — use L7 balancing per request (HTTP/2-aware proxies) or periodically recycle connections.
+- New instances receive no load from existing long-lived connections until clients reconnect.
+- **Slow start**: ramp traffic to new instances gradually so cold caches and JIT warm up.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Round-robin with very uneven request costs.
+- Health checks that only test "process is up".
+- Health checks that fail every instance when a shared dependency hiccups.
+- Relying on sticky sessions instead of making services stateless.
+- Ignoring long-lived connection imbalance with gRPC/WebSockets.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does load balancing work, and which algorithm would you choose?">
+
+A load balancer spreads requests across a pool of servers, uses active health checks and passive outlier detection to stop sending traffic to bad instances, and drains connections when servers are removed. Round-robin is fine when requests are uniform; when costs vary, least-outstanding-requests or power-of-two-choices keeps slow servers from piling up; for caches I'd use consistent hashing so the same key hits the same node. Balancing happens at several layers: globally via latency-based DNS or anycast to pick a region, regionally with an L7 balancer across availability zones that terminates TLS and routes by path, and internally between services with client-side balancing or a mesh. I'd avoid sticky sessions by keeping services stateless, and watch for imbalance with long-lived HTTP/2 or WebSocket connections.
+
+<Fragment slot="deeper">
+
+- **What is "power of two choices"?** Sample two random servers, pick the less loaded — near-optimal with little state.
+- **Anycast vs GeoDNS?** Network-level routing to the nearest location vs DNS answers per location; anycast fails over faster.
+- **Why are gRPC connections a balancing problem?** Requests multiplex over long-lived connections chosen once.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Round-robin", "Assigning requests to servers in turn."],
+  ["Least outstanding requests", "Sending each request to the server with the fewest active requests."],
+  ["Health check", "A probe that decides whether a server should receive traffic."],
+  ["Connection draining", "Letting in-flight requests finish before removing a server."],
+  ["Anycast", "One IP announced from many locations; users reach the nearest."],
+  ["Session affinity", "Routing a client consistently to the same server."],
+]} />

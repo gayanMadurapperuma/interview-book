@@ -1,0 +1,154 @@
+---
+title: "Case study: a URL shortener"
+part: Case studies
+order: 31
+level: core
+summary: The classic warm-up design — short codes, a read-heavy redirect path, caching, and analytics without slowing anything down.
+---
+
+A URL shortener turns a long link into a short one (`sho.rt/aZ3k9Q`) and redirects anyone who visits the short link to the original. It sounds trivial, which is why it's a favourite first question: the core is simple, so the interview is about doing the fundamentals well — requirements, estimates, ID generation, a read-heavy path with caching, and handling analytics without slowing redirects.
+
+<Analogy>
+  A cloakroom. You hand over your long coat (the URL), get a small numbered ticket (the code), and anyone with the ticket can collect the coat. The cloakroom must never hand out the same ticket twice, must find coats instantly even at the busiest moment, and may want to count how often each ticket is used — without making people wait while it counts.
+</Analogy>
+
+## 1. Requirements
+
+**Functional**
+
+- Create a short link for a long URL (optionally a custom alias and an expiry).
+- Redirect a short link to its long URL.
+- Basic analytics: click counts per link (by day, country, referrer).
+- Out of scope: user accounts management UI, link editing, spam detection details (mention briefly).
+
+**Non-functional**
+
+- Redirects must be **fast** (under ~50 ms at the edge) and **highly available** — a broken short link breaks someone's website or campaign.
+- Short codes must be **unique** and **not guessable in sequence** (privacy).
+- Read-heavy: far more redirects than creations.
+- Analytics can be **eventually consistent** (minutes of delay is fine).
+
+## 2. Estimates
+
+Assume 100 million new links per month and a 100:1 read:write ratio.
+
+- Writes: 10⁸ ÷ (2.5 × 10⁶ s/month) ≈ **40/s** (peak ~200/s).
+- Reads: 100 × 40 = **4,000/s** average (peak ~20,000/s).
+- Storage: 10⁸ links/month × 12 × 5 years = 6 × 10⁹ links × ~500 bytes ≈ **3 TB** — fits one large database, or a modest key-value store.
+- Code length: base62 (a–z, A–Z, 0–9). 62⁷ ≈ 3.5 × 10¹² — **7 characters** comfortably covers 6 × 10⁹ links with room to spare.
+
+## 3. API
+
+```text
+POST /api/links         { longUrl, customAlias?, expiresAt? }  → 201 { code, shortUrl }
+GET  /{code}            → 302 Location: longUrl   (or 404 / 410 Gone)
+GET  /api/links/{code}/stats?from=&to=
+```
+
+**301 or 302?** A **301** (permanent) lets browsers cache the redirect forever — less load, but you lose analytics and can't change the target. A **302/307** (temporary) sends every visit through you. Most shorteners use 302 for analytics, with CDN caching for a short time.
+
+## 4. Data model
+
+```text
+links(code PK, long_url, owner_id, created_at, expires_at)
+clicks: append-only event stream → aggregated into click_stats(code, day, country, count)
+```
+
+Lookups are always by `code` — a perfect fit for a key-value store (DynamoDB) or a primary-key lookup in PostgreSQL.
+
+## 5. High-level design
+
+<Diagram
+  caption="Two paths: a light write path that generates codes, and a very hot read path served mostly from cache, with analytics recorded asynchronously."
+  chart={`flowchart LR
+    U["user"] --> CDN["CDN / edge"]
+    CDN --> LB["load balancer"]
+    LB --> API["link service<br/>(stateless)"]
+    API -- "create" --> IDG["code generator"]
+    API --> DB[("links store")]
+    API --> RC[("Redis cache<br/>code → longUrl")]
+    API -- "click event" --> Q["Kafka / Kinesis"]
+    Q --> AGG["stream aggregator"]
+    AGG --> ST[("click_stats")]`}
+  steps={[
+    { nodes: ["U", "CDN", "LB", "API"], text: "All traffic enters through the CDN and load balancer to stateless link servers." },
+    { nodes: ["API", "IDG", "DB"], text: "**Create**: generate a unique code, store `code → longUrl`, return the short URL." },
+    { nodes: ["API", "RC", "DB"], text: "**Redirect**: look up the code in Redis; on a miss, read the store and cache it. Then respond 302." },
+    { nodes: ["API", "Q"], text: "Each redirect emits a small click event to a stream — fire-and-forget, so it never slows the redirect." },
+    { nodes: ["Q", "AGG", "ST"], text: "A stream processor aggregates clicks per code per day/country into a stats table." },
+  ]}
+/>
+
+## 6. Deep dive: generating codes
+
+<Diagram
+  caption="Three ways to generate short codes."
+  chart={`flowchart TB
+    G{"How to make codes?"} --> H["Hash the URL<br/>base62(md5(url))[0..7]"]
+    G --> C["Counter + base62<br/>id 125 → 'cb'"]
+    G --> R["Random 7 chars<br/>check for collision"]
+    H --> H2["same URL → same code (dedup);<br/>collisions must be handled"]
+    C --> C2["no collisions; but sequential =<br/>guessable, needs distributed counter"]
+    R --> R2["unguessable; tiny collision chance<br/>→ insert-if-absent and retry"]`}
+/>
+
+| Approach | Pros | Cons |
+|---|---|---|
+| Hash of URL, truncated | idempotent: same URL gives same code | truncation causes collisions; can't have two codes for one URL |
+| Global counter → base62 | guaranteed unique, short | sequential codes are enumerable; a single counter is a bottleneck/SPOF |
+| Counter ranges per server | no coordination per request | still sequential within ranges (scramble with a reversible bijection) |
+| Random code + uniqueness check | unguessable, simple | rare collisions need a retry |
+
+A strong answer: **random 7-character base62 codes**, inserted with a conditional write (`INSERT … ON CONFLICT DO NOTHING` / DynamoDB `attribute_not_exists`); on the rare collision, generate another. With 3.5 trillion possibilities and billions used, collision probability per attempt stays well under 1%. Alternatively, pre-allocate **ID ranges** to each server from a coordination service (each grabs 1 million IDs at a time) and pass the integer through a reversible scrambling function before base62 encoding, so codes look random but are guaranteed unique.
+
+Custom aliases go through the same uniqueness check; reserve words like `api`, `admin`.
+
+## 7. Deep dive: the read path
+
+- **Cache**: the working set is skewed (popular links get most clicks). A Redis cache of the hottest ~20% of links absorbs most reads; cache-aside with a TTL, and delete on update/delete.
+- **CDN caching** of the 302 for a short time (e.g. 60 s) takes hot links off your servers entirely — at the cost of counting those clicks at the CDN (from its logs) instead.
+- **Availability**: replicate the store across zones; the cache keeps serving hot links even during a brief database failover.
+- **Expired links**: return `410 Gone`; clean up asynchronously.
+
+## 8. Analytics without slowing redirects
+
+Never update a counter row synchronously on every redirect — a viral link would turn one database row into a hot spot. Emit an event, aggregate in a stream processor (per minute, per code), and write aggregates in batches. Approximate unique visitors with HyperLogLog.
+
+## 9. Abuse and safety
+
+Rate-limit link creation per user/IP, check URLs against malware/phishing lists (asynchronously, disabling links that turn bad), and require auth for heavy users.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Sequential, guessable codes exposing every link.
+- A single global counter as the only ID source.
+- Synchronous counter updates on the redirect path.
+- Choosing 301 and then wondering why analytics are missing.
+- Skipping the estimate and over-engineering storage for what is a few terabytes.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Design a URL shortener.">
+
+It's read-heavy — around 100 reads per write — with a few thousand redirects per second and a few terabytes over five years, so storage is modest and the focus is a fast, highly available read path. Creating a link generates a random seven-character base62 code, enough for trillions of combinations, inserted with a conditional write and retried on the rare collision, so codes are unique and unguessable. The mapping lives in a key-value store or a primary-key lookup, replicated across zones. Redirects go through a CDN and stateless servers that check Redis first and fall back to the store, returning a 302 so we can count clicks. Each redirect emits a click event to Kafka or Kinesis, and a stream job aggregates counts, so analytics never slow down redirects. I'd add rate limits and malicious-URL scanning on creation.
+
+<Fragment slot="deeper">
+
+- **301 vs 302?** Permanent and cacheable vs temporary, which keeps analytics and lets you change targets.
+- **How long should codes be?** base62⁷ ≈ 3.5 trillion — plenty for billions of links.
+- **How do you handle a viral link?** Cache it (Redis/CDN) and aggregate click counts asynchronously.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Base62", "Encoding with 62 characters (a–z, A–Z, 0–9) for short, URL-safe codes."],
+  ["302 redirect", "Temporary redirect; browsers revisit the short URL each time."],
+  ["Conditional write", "Insert only if the key doesn't already exist."],
+  ["Hot spot", "A single key or row receiving disproportionate load."],
+  ["HyperLogLog", "A small probabilistic structure for approximate unique counts."],
+]} />

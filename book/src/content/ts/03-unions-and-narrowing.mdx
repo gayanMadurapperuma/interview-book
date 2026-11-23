@@ -1,0 +1,178 @@
+---
+title: Unions, intersections and narrowing
+part: Foundations
+order: 3
+level: core
+summary: 'Types that are one thing or another, types that are both at once, and how TypeScript follows your if-statements to know exactly which one you have — including exhaustive checks.'
+---
+
+A **union** type says a value is **one of** several types: `string | number`, or `'pending' | 'paid' | 'shipped'`. An **intersection** says a value is **all of** several types at once: `User & Timestamps`. Unions are everywhere in real code, and TypeScript makes them safe through **narrowing**: as you check a value with `typeof`, `in`, `===` or a type guard, the compiler follows the control flow and knows which member you're dealing with in each branch.
+
+<Analogy>
+  A parcel that could be a letter, a box or a tube (a union). Before you open it, you only know it's "a parcel". Check its shape — flat, cube, cylinder — and now you know exactly which kind it is and how to open it (narrowing). An intersection is a parcel that's both fragile *and* refrigerated: it must satisfy both sets of handling rules.
+</Analogy>
+
+## Why it matters
+
+Discriminated unions are the most powerful everyday TypeScript technique: they model states, API responses and events so that impossible combinations can't be written and forgotten cases become compile errors. Interviewers love them.
+
+## Unions
+
+```ts
+type Id = string | number;
+
+function formatId(id: Id) {
+  if (typeof id === 'number') return id.toFixed(0);   // here: number
+  return id.toUpperCase();                            // here: string
+}
+```
+
+On a union, you can only use what's common to all members until you narrow.
+
+## Narrowing techniques
+
+| Technique | Example | Narrows by |
+|---|---|---|
+| `typeof` | `typeof x === 'string'` | primitive type |
+| `instanceof` | `err instanceof HttpError` | class |
+| `in` | `'swim' in animal` | property presence |
+| equality | `status === 'paid'`, `x != null` | literal values, null/undefined |
+| truthiness | `if (user)` | removes `null`/`undefined` (and falsy values!) |
+| discriminant | `switch (event.type)` | a shared literal property |
+| custom type guard | `isUser(x)` returning `x is User` | your own logic |
+| assertion function | `assertDefined(x)` with `asserts x is T` | throws otherwise |
+
+```ts
+function isUser(v: unknown): v is User {
+  return typeof v === 'object' && v !== null && 'id' in v && 'email' in v;
+}
+
+function assertDefined<T>(v: T | null | undefined, msg: string): asserts v is T {
+  if (v == null) throw new Error(msg);
+}
+```
+
+## Discriminated unions
+
+Give each member a common property with a **literal** value — the **discriminant** (often `type`, `kind` or `status`).
+
+```ts
+type PaymentState =
+  | { status: 'idle' }
+  | { status: 'processing'; startedAt: Date }
+  | { status: 'succeeded'; receiptId: string }
+  | { status: 'failed'; error: string; retryable: boolean };
+
+function render(p: PaymentState): string {
+  switch (p.status) {
+    case 'idle':       return 'Ready';
+    case 'processing': return `Working since ${p.startedAt.toISOString()}`;
+    case 'succeeded':  return `Paid — receipt ${p.receiptId}`;   // receiptId only exists here
+    case 'failed':     return p.retryable ? `Retry: ${p.error}` : `Failed: ${p.error}`;
+  }
+}
+```
+
+<Diagram
+  caption="The compiler follows the switch: in each branch only that member's properties exist. Impossible states (a receiptId while processing) can't even be written."
+  chart={`flowchart TB
+    P["p: PaymentState"] --> SW{"switch (p.status)"}
+    SW -- "'idle'" --> I["{ status: 'idle' }"]
+    SW -- "'processing'" --> PR["{ status, startedAt }"]
+    SW -- "'succeeded'" --> S["{ status, receiptId }"]
+    SW -- "'failed'" --> F["{ status, error, retryable }"]`}
+  steps={[
+    { nodes: ["P", "SW"], text: "Before the switch, only `status` is accessible — it's the one property every member shares." },
+    { nodes: ["SW", "PR"], text: "In the `'processing'` branch, TypeScript knows `p` is that member, so `p.startedAt` is available." },
+    { nodes: ["SW", "S"], text: "In `'succeeded'`, `receiptId` is available — and nowhere else." },
+    { nodes: ["SW", "F"], text: "Compare a single type with many optional fields: nothing would stop `{ status: 'idle', receiptId: '…' }`. The union makes invalid states unrepresentable." },
+  ]}
+/>
+
+### Exhaustiveness checking
+
+Make the compiler tell you when a new member is added but not handled:
+
+```ts
+function assertNever(x: never): never {
+  throw new Error(`Unhandled case: ${JSON.stringify(x)}`);
+}
+
+function label(p: PaymentState) {
+  switch (p.status) {
+    case 'idle': return 'Ready';
+    case 'processing': return 'Working';
+    case 'succeeded': return 'Paid';
+    case 'failed': return 'Failed';
+    default: return assertNever(p);   // ✘ compile error if a new status is added and not handled
+  }
+}
+```
+
+In the `default` branch, every member has been ruled out, so `p` has type `never`. Add `{ status: 'refunded' }` to the union and this line fails to compile until you handle it.
+
+## Intersections
+
+```ts
+type Timestamps = { createdAt: Date; updatedAt: Date };
+type WithId = { id: string };
+type Order = WithId & Timestamps & { total: number };
+
+const o: Order = { id: 'o1', createdAt: new Date(), updatedAt: new Date(), total: 50 };
+```
+
+Intersections combine object types (like `extends` for interfaces). Intersecting incompatible primitives gives `never` (`string & number`).
+
+## Results instead of exceptions
+
+Discriminated unions are a clean way to model operations that can fail in expected ways:
+
+```ts
+type Result<T, E = string> = { ok: true; value: T } | { ok: false; error: E };
+
+function parsePort(s: string): Result<number> {
+  const n = Number(s);
+  return Number.isInteger(n) && n > 0 && n < 65536
+    ? { ok: true, value: n }
+    : { ok: false, error: `invalid port: ${s}` };
+}
+
+const r = parsePort(process.env.PORT ?? '');
+if (!r.ok) throw new Error(r.error);
+r.value;   // number
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- One big type with many optional fields instead of a discriminated union.
+- Truthiness narrowing that accidentally excludes `0` or `''`.
+- Forgetting exhaustiveness checks, so new cases silently fall through.
+- Writing type guards that don't actually check what they claim (the compiler trusts them).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What are discriminated unions and why are they useful?">
+
+A discriminated union is a union of object types that share a literal property — a discriminant such as `status` or `type`. When you switch or branch on that property, TypeScript narrows the value to the matching member, so each branch can safely use only that member's fields. It models states and events precisely — a payment that's processing has a start time, a succeeded one has a receipt ID — so invalid combinations can't be represented, unlike one type full of optional fields. Adding a `never`-typed default branch makes the switch exhaustive: if someone adds a new member later, compilation fails until it's handled. I also use the same idea for result types instead of throwing for expected failures.
+
+<Fragment slot="deeper">
+
+- **What is narrowing?** The compiler refining a union type based on control-flow checks.
+- **What is a type guard?** A function returning `x is T` that narrows when it returns true.
+- **Union vs intersection?** One of the types vs all of the types at once.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Union type", "A value that is one of several types: `A | B`."],
+  ["Intersection type", "A value that satisfies several types at once: `A & B`."],
+  ["Narrowing", "Refining a type within a branch based on checks."],
+  ["Discriminant", "A shared literal property identifying a union member."],
+  ["Type guard", "A function or check that narrows a type (`x is T`)."],
+  ["Exhaustiveness check", "Using `never` to make unhandled union members a compile error."],
+]} />

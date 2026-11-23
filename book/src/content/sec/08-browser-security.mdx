@@ -1,0 +1,165 @@
+---
+title: "Browser security: same-origin policy, CORS, CSP and cookies"
+part: Web security
+order: 8
+level: core
+summary: The rules browsers enforce to keep websites apart, how CORS deliberately relaxes them, and the headers and cookie flags every web app should set.
+---
+
+Browsers run code from many websites side by side, so they enforce strict rules to stop one site from reading another's data. The foundation is the **same-origin policy**. **CORS** (Cross-Origin Resource Sharing) is a controlled way for a server to say "this other origin may read my responses". **Content-Security-Policy** restricts what scripts and resources a page may load, limiting XSS. **Cookie attributes** decide when cookies are sent and who can read them. Together with a few other headers, they form the browser half of your security.
+
+<Analogy>
+  Embassies in a city. Each embassy (origin) can only open its own mail; it can't read a neighbour's, even if a courier delivers it by mistake (same-origin policy). CORS is a signed letter from one embassy saying "the embassy at this address may read these documents of ours". CSP is the embassy's list of approved suppliers — anyone not on the list doesn't get through the gate.
+</Analogy>
+
+## Why it matters
+
+CORS errors are among the most common frustrations for web developers, and misconfigured CORS is a real vulnerability. Interviewers ask what CORS protects, how preflights work, how CSP mitigates XSS, and which cookie flags to set.
+
+## Origins and the same-origin policy
+
+An **origin** is **scheme + host + port**: `https://app.example.com:443`. Two URLs are same-origin only if all three match.
+
+| URL | Same origin as `https://app.example.com`? |
+|---|---|
+| `https://app.example.com/orders` | yes |
+| `http://app.example.com` | no (scheme) |
+| `https://api.example.com` | no (host) |
+| `https://app.example.com:8443` | no (port) |
+
+The same-origin policy lets a page **send** requests to other origins (forms, images, scripts have always worked) but blocks JavaScript from **reading** cross-origin responses — unless the other server opts in with CORS.
+
+## CORS
+
+<Diagram
+  sequence
+  caption="A non-simple cross-origin request: the browser first sends a preflight OPTIONS request to ask permission."
+  chart={`sequenceDiagram
+    participant B as Browser (app.example.com)
+    participant API as api.example.com
+    B->>API: OPTIONS /orders (Origin, Access-Control-Request-Method: PUT, -Headers: authorization)
+    API-->>B: 204 (Allow-Origin: https://app.example.com, Allow-Methods: PUT, Allow-Headers: authorization, Max-Age: 600)
+    B->>API: PUT /orders/1 (Origin: https://app.example.com)
+    API-->>B: 200 (Access-Control-Allow-Origin: https://app.example.com)
+    B->>B: response exposed to JavaScript`}
+  notes={[
+    "The page wants to send a PUT with an Authorization header to another origin, so the browser first asks permission with a preflight.",
+    "The API answers which origins, methods and headers it allows, and how long the browser may cache that answer.",
+    "Permission granted, the browser sends the real request.",
+    "The response also carries the allow-origin header.",
+    "Only then can the page's JavaScript read the response. Without the headers, the browser blocks the read — the request may still have reached the server.",
+  ]}
+/>
+
+- **Simple requests** (GET/POST with basic headers and form content types) skip the preflight but still need `Access-Control-Allow-Origin` to be readable.
+- **Credentials** (cookies) cross-origin require `Access-Control-Allow-Credentials: true` **and** an exact origin (not `*`).
+- CORS is enforced by **browsers**. It does not protect your API from curl, scripts or other servers — that's authentication's job.
+
+Secure configuration:
+
+```js
+const allowed = new Set(['https://app.example.com', 'https://admin.example.com']);
+app.use(cors({
+  origin: (origin, cb) => cb(null, !origin || allowed.has(origin)),  // explicit allow-list
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  maxAge: 600,
+}));
+```
+
+Never reflect any request's `Origin` back with credentials enabled — that lets any website make authenticated requests and read the results.
+
+## Content-Security-Policy
+
+CSP tells the browser which sources of scripts, styles, images, frames and connections are allowed. Even if an attacker injects markup, a strict CSP stops their script from running.
+
+```http
+Content-Security-Policy:
+  default-src 'self';
+  script-src 'self' 'nonce-r4nd0m' 'strict-dynamic';
+  style-src 'self';
+  img-src 'self' data: https://cdn.example.com;
+  connect-src 'self' https://api.example.com;
+  frame-ancestors 'none';
+  base-uri 'none';
+  object-src 'none'
+```
+
+- Avoid `'unsafe-inline'` and `'unsafe-eval'`; use **nonces** or hashes for the inline scripts you need.
+- `frame-ancestors 'none'` prevents **clickjacking** (your page being framed invisibly).
+- Roll out with `Content-Security-Policy-Report-Only` first and collect violation reports.
+
+## Cookies
+
+```http
+Set-Cookie: sid=8f3…; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=28800
+Set-Cookie: __Host-csrf=…; Path=/; Secure; SameSite=Strict
+```
+
+<Diagram
+  caption="What each cookie attribute protects against."
+  chart={`flowchart LR
+    C["session cookie"] --> S1["Secure<br/>only over HTTPS<br/>→ no sniffing on Wi-Fi"]
+    C --> S2["HttpOnly<br/>not readable by JavaScript<br/>→ XSS can't steal it"]
+    C --> S3["SameSite=Lax/Strict<br/>not sent on cross-site requests<br/>→ CSRF protection"]
+    C --> S4["__Host- prefix, no Domain<br/>locked to exact host<br/>→ subdomains can't overwrite it"]
+    C --> S5["short Max-Age / expiry<br/>→ limits stolen-cookie window"]`}
+/>
+
+| `SameSite` | Sent on cross-site requests? | Use |
+|---|---|---|
+| `Strict` | never | high-security apps (user must navigate in again) |
+| `Lax` (browser default) | only top-level GET navigations | most session cookies |
+| `None` (+ `Secure`) | always | embedded/third-party contexts that genuinely need it |
+
+## Other headers worth setting
+
+| Header | Purpose |
+|---|---|
+| `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload` | always use HTTPS (HSTS) |
+| `X-Content-Type-Options: nosniff` | stop MIME-type sniffing |
+| `Referrer-Policy: strict-origin-when-cross-origin` | limit leaked URLs |
+| `Permissions-Policy: camera=(), geolocation=()` | disable powerful features you don't use |
+| `Cross-Origin-Opener-Policy: same-origin` | isolate your window from cross-origin popups |
+
+In Node, `helmet` sets sensible defaults for most of these.
+
+## Third-party scripts
+
+Every analytics or chat widget runs with your origin's privileges. Load as few as possible, use **Subresource Integrity** (`integrity="sha384-…"`) for static CDN scripts, and restrict them with CSP.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Thinking CORS protects the API from attackers (it only governs browsers reading responses).
+- `Access-Control-Allow-Origin: *` with credentials, or reflecting any origin.
+- CSP with `'unsafe-inline'`, making it nearly useless against XSS.
+- Session cookies without `HttpOnly`, `Secure` or `SameSite`.
+- Disabling CORS checks in development and shipping that config.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is CORS and what does it protect against?">
+
+Browsers enforce the same-origin policy: a page can send requests to other origins — scheme, host and port — but its JavaScript can't read the responses. CORS lets a server opt specific origins in: it returns `Access-Control-Allow-Origin` and related headers, and for non-simple requests, like a PUT with an Authorization header, the browser first sends an OPTIONS preflight to ask which origins, methods and headers are allowed. Credentialed requests need an exact origin and allow-credentials. CORS protects users' data in their browser from other websites; it doesn't protect the API from scripts or servers, so authentication and authorisation still do that. I configure an explicit allow-list, never reflect arbitrary origins with credentials, and pair it with a strict CSP, HSTS, and HttpOnly, Secure, SameSite cookies.
+
+<Fragment slot="deeper">
+
+- **What triggers a preflight?** Non-simple methods, custom headers or non-form content types.
+- **How does CSP mitigate XSS?** It blocks scripts not from allowed sources or without the right nonce.
+- **SameSite Lax vs Strict?** Lax allows top-level GET navigations; Strict never sends cross-site.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Origin", "Scheme + host + port of a URL."],
+  ["Same-origin policy", "Browser rule preventing scripts from reading cross-origin responses."],
+  ["CORS", "Headers letting servers allow specific cross-origin reads."],
+  ["Preflight", "OPTIONS request the browser sends to check CORS permission."],
+  ["CSP", "Content-Security-Policy: allow-list for scripts and other resources."],
+  ["SameSite", "Cookie attribute controlling cross-site sending."],
+]} />

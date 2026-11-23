@@ -1,0 +1,15 @@
+---
+interface Props { question: string }
+const { question } = Astro.props;
+---
+<section class="interview">
+  <p class="iv-label">If the interviewer asks</p>
+  <p class="iv-q">“{question}”</p>
+  <div class="iv-a"><slot /></div>
+  {Astro.slots.has('deeper') && (
+    <details class="iv-deeper">
+      <summary>Likely follow-up questions</summary>
+      <div><slot name="deeper" /></div>
+    </details>
+  )}
+</section>

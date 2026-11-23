@@ -1,0 +1,140 @@
+---
+title: "Authentication: passwords, MFA and passkeys"
+part: Identity
+order: 3
+level: core
+summary: Proving who a user is — storing passwords safely, adding second factors, the passwordless future, and defending login against automated attacks.
+---
+
+**Authentication** answers "who are you?". Users prove their identity with one or more **factors**: something they **know** (a password), something they **have** (a phone, a security key) or something they **are** (a fingerprint). After a successful login the system issues a **session** or **token** so the user doesn't have to authenticate on every request. Getting authentication right means storing credentials safely, offering stronger factors, and resisting the automated attacks every login page faces.
+
+<Analogy>
+  Entering a secure building. Saying a password at the door is one factor. Also showing a badge is two-factor. Passkeys are like a badge that only works for *this* building and can't be photocopied — so a fake building next door can't trick you into handing it over.
+</Analogy>
+
+## Why it matters
+
+Account takeover is one of the most common and damaging attacks. Interviewers ask how to store passwords, how MFA works, what passkeys are, how to design login and reset flows, and how to stop credential stuffing.
+
+## Passwords, done properly
+
+- **Never store** passwords or reversible encryptions of them. Store a **slow, salted hash**: argon2id (preferred), scrypt or bcrypt (see the Node *Crypto* chapter for code).
+- Accept long passwords and passphrases (64+ characters), all characters; don't force arbitrary complexity rules or periodic rotation (current NIST guidance).
+- Check new passwords against lists of **breached passwords** (e.g. Have I Been Pwned's k-anonymity API).
+- Compare in constant time; return the **same error** for "unknown user" and "wrong password".
+
+## Attacks on login
+
+<Diagram
+  caption="Automated attacks against login and the layered defences."
+  chart={`flowchart TB
+    A1["Credential stuffing<br/>leaked email/password pairs from other sites"] --> D["defences"]
+    A2["Brute force / password spraying<br/>common passwords across many accounts"] --> D
+    A3["Phishing<br/>fake login page captures credentials"] --> D
+    D --> D1["MFA / passkeys"]
+    D --> D2["rate limits per IP, account and device;<br/>progressive delays, CAPTCHA on risk"]
+    D --> D3["breached-password checks"]
+    D --> D4["anomaly detection: new device/location<br/>→ step-up verification, alerts to user"]`}
+/>
+
+Avoid hard account lockout after N failures — attackers can use it to lock out real users. Prefer progressive delays, risk-based challenges and notifications.
+
+## Multi-factor authentication
+
+| Factor | How | Strength |
+|---|---|---|
+| SMS / email code | one-time code sent to phone/email | weak: SIM swapping, interception, phishable |
+| TOTP app | 6-digit code from a shared secret + time (Google Authenticator) | good; still phishable in real time |
+| Push approval | approve on a trusted device | good; watch for "MFA fatigue" spam — use number matching |
+| **Security key / passkey (WebAuthn)** | cryptographic challenge bound to the site's origin | strongest: **phishing-resistant** |
+
+### How TOTP works
+
+The server and the user's authenticator app share a secret (set up via QR code). Both compute `HMAC(secret, current 30-second window)` and truncate it to 6 digits; the server accepts the current (and maybe adjacent) window. Store the secret encrypted, and issue **recovery codes** (hashed) at setup.
+
+## Passkeys (WebAuthn / FIDO2)
+
+Passkeys replace passwords with **public-key cryptography**. The user's device creates a key pair **per website**; the server stores only the public key.
+
+<Diagram
+  sequence
+  caption="Passkey sign-in: the device signs a server challenge with a private key that never leaves it, and the browser binds the signature to the real site's origin."
+  chart={`sequenceDiagram
+    participant U as User + device
+    participant B as Browser
+    participant S as Server
+    B->>S: start login
+    S-->>B: random challenge
+    B->>U: unlock passkey (Face ID / PIN)
+    U-->>B: signature over challenge + origin
+    B->>S: assertion (signature, credential id)
+    S->>S: verify with stored public key → session`}
+  notes={[
+    "The user starts signing in.",
+    "The server sends a fresh random challenge.",
+    "The browser asks the device's authenticator; the user unlocks it locally with biometrics or a PIN.",
+    "The device signs the challenge together with the website's origin, using the private key for this site.",
+    "The browser sends the signed assertion.",
+    "The server checks it with the stored public key. A look-alike phishing site would have a different origin, so its signature can't be replayed here.",
+  ]}
+/>
+
+Benefits: nothing secret on the server to steal, no passwords to reuse or phish, and synced passkeys (iCloud Keychain, Google Password Manager) make them usable across devices.
+
+## Sessions after login
+
+After authentication, issue a session: an opaque session ID in an `HttpOnly; Secure; SameSite` cookie (for browsers), or tokens (for APIs and mobile). The *JWT and sessions* chapter compares them. Always:
+
+- **Rotate** the session ID at login and privilege changes (prevents session fixation).
+- Set **idle and absolute timeouts**; let users see and revoke active sessions.
+- Require **re-authentication** (step-up) for sensitive actions: changing email/password, adding payees, viewing secrets.
+
+## Account recovery
+
+Recovery is often the weakest link — attackers bypass strong login through a weak reset flow.
+
+- Reset tokens: long random values, stored **hashed**, single-use, expire in minutes, sent only to the verified email.
+- Don't reveal whether an email is registered ("if an account exists, we've sent a link").
+- After reset: invalidate all sessions, notify the user, keep MFA required.
+- Avoid security questions.
+
+## Outsourcing it
+
+Authentication is easy to get subtly wrong. Identity providers — Auth0/Okta, AWS Cognito, Microsoft Entra ID, Keycloak, Clerk — handle passwords, MFA, passkeys, social login and enterprise SSO via **OAuth 2.0/OpenID Connect** (next chapter). Many teams should use one.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Fast or unsalted password hashes.
+- Different error messages that reveal which emails are registered.
+- SMS as the only second factor for high-value accounts.
+- Reset tokens stored in plain text, long-lived or reusable.
+- Not rotating session IDs at login.
+- No rate limiting on login, reset and MFA verification endpoints.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you design secure user authentication?">
+
+I'd probably start from a managed identity provider, but the principles are the same. Passwords are stored only as salted argon2id hashes, checked against breached-password lists, with generic error messages. Login, reset and MFA endpoints are rate-limited per IP, account and device, with risk-based challenges rather than hard lockouts, to resist credential stuffing and spraying. I'd offer MFA — TOTP or, better, passkeys via WebAuthn, which are phishing-resistant because signatures are bound to the site's origin and the server stores only public keys. After login the session ID is rotated and stored in an HttpOnly, Secure, SameSite cookie, with idle and absolute timeouts and step-up re-authentication for sensitive actions. Reset tokens are random, hashed, single-use and short-lived, and a reset revokes all sessions and notifies the user.
+
+<Fragment slot="deeper">
+
+- **Why are passkeys phishing-resistant?** The signature includes the origin; a fake site's origin doesn't match.
+- **What is credential stuffing?** Trying leaked username/password pairs from other breaches.
+- **Why rotate session IDs at login?** To prevent session fixation.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Authentication", "Verifying who a user or service is."],
+  ["MFA", "Multi-factor authentication: two or more independent factors."],
+  ["TOTP", "Time-based one-time password from a shared secret."],
+  ["Passkey / WebAuthn", "Phishing-resistant public-key login bound to a site's origin."],
+  ["Credential stuffing", "Automated logins using credentials leaked elsewhere."],
+  ["Session fixation", "Attack forcing a known session ID on a victim before login."],
+]} />

@@ -1,0 +1,139 @@
+---
+title: Enums, literal types and as const
+part: Foundations
+order: 5
+level: core
+summary: Three ways to represent a fixed set of values — and why modern TypeScript code often prefers literal unions and as const objects over enums.
+---
+
+Many values come from a small, fixed set: order statuses, roles, log levels, colours. TypeScript offers **enums** — a named set of constants that also exist at runtime — and **literal types**, where the type is an exact value such as `'admin'`. Combined with **`as const`**, literal types give you fixed sets that are simple, tree-shakeable and work naturally with JSON and APIs. Knowing the trade-offs is a frequent interview topic.
+
+<Analogy>
+  A fixed set of values is like the sizes on a coffee menu. An enum is a laminated menu card printed by the café: it has its own codes (`SIZE_1`, `SIZE_2`) and exists as a physical object. A literal union is just agreeing that the only valid words are "small", "medium" and "large" — no extra card needed, and the words mean the same thing when a customer writes them on a form.
+</Analogy>
+
+## Why it matters
+
+Enums are one of the few TypeScript features that generate runtime code, and they have surprising behaviours. Interviewers ask about numeric vs string enums, `const enum`, and why many teams prefer union types.
+
+## Literal types and unions
+
+```ts
+type Status = 'pending' | 'paid' | 'shipped' | 'cancelled';
+
+function setStatus(s: Status) {}
+setStatus('paid');        // ✓
+setStatus('payed');       // ✘ compile error — typo caught
+```
+
+Literal unions are erased completely, are just strings at runtime (so they match JSON from APIs and databases), and narrow beautifully in `switch` statements.
+
+## `as const`
+
+To have both a **runtime list** of values (for validation, dropdowns, iteration) and a **type**, declare the values once with `as const` and derive the type:
+
+```ts
+export const STATUSES = ['pending', 'paid', 'shipped', 'cancelled'] as const;
+export type Status = (typeof STATUSES)[number];     // 'pending' | 'paid' | 'shipped' | 'cancelled'
+
+STATUSES.includes(input as Status);                 // runtime check
+
+export const HttpStatus = {
+  Ok: 200,
+  NotFound: 404,
+  Conflict: 409,
+} as const;
+export type HttpStatusCode = (typeof HttpStatus)[keyof typeof HttpStatus];   // 200 | 404 | 409
+```
+
+<Diagram
+  caption="Define values once; derive the type. The runtime array and the compile-time type can never drift apart."
+  chart={`flowchart LR
+    V["const STATUSES = [ 'pending', 'paid', … ] as const"] --> RT["runtime: an array you can loop,<br/>validate against, render in a dropdown"]
+    V --> TY["typeof STATUSES[number]<br/>→ 'pending' | 'paid' | …"]
+    TY --> USE["function params, API types,<br/>exhaustive switches"]`}
+/>
+
+`as const` makes object and array literals **deeply `readonly`** and keeps literal types instead of widening them to `string`/`number`.
+
+## Enums
+
+```ts
+enum Role { Admin, Editor, Viewer }        // numeric: Admin = 0, Editor = 1, Viewer = 2
+enum Color { Red = 'RED', Green = 'GREEN' } // string enum
+
+Role.Admin;            // 0
+Role[0];               // 'Admin' — numeric enums get a reverse mapping
+```
+
+The emitted JavaScript for the numeric enum:
+
+```js
+var Role;
+(function (Role) {
+  Role[Role["Admin"] = 0] = "Admin";
+  Role[Role["Editor"] = 1] = "Editor";
+  Role[Role["Viewer"] = 2] = "Viewer";
+})(Role || (Role = {}));
+```
+
+### Pitfalls of enums
+
+- **Numeric enums are loosely typed**: older TypeScript versions let any number be assigned (`const r: Role = 42`); and storing `0`/`1` in databases or JSON makes data unreadable and fragile if members are reordered.
+- **String enums are nominal**: you can't pass the string `'RED'` where a `Color` is expected — friction when values come from JSON.
+- They generate runtime code, which **type-stripping** tools (Node's built-in TS support, `--erasableSyntaxOnly`) can't handle.
+- `const enum` inlines values but breaks with isolated per-file compilation (Babel, esbuild, swc) and across package boundaries.
+
+<Diagram
+  caption="Choosing a representation for a fixed set of values."
+  chart={`flowchart TB
+    Q{"Need runtime values too?"} -- "no" --> U["literal union type<br/>type Status = 'a' | 'b'"]
+    Q -- "yes" --> AC["as const array/object<br/>+ derived union type"]
+    Q -- "existing codebase uses enums,<br/>or need namespaced constants" --> SE["string enum<br/>(avoid numeric)"]`}
+/>
+
+## Template literal types (preview)
+
+Literal types compose:
+
+```ts
+type Method = 'GET' | 'POST';
+type Route = `/api/${'orders' | 'users'}`;
+type Endpoint = `${Method} ${Route}`;   // 'GET /api/orders' | 'GET /api/users' | 'POST /api/orders' | …
+```
+
+The *Template literal types* chapter goes further.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Numeric enums persisted to databases or sent over APIs.
+- Duplicating a list of values in a type and in a runtime array (they drift).
+- `const enum` with Babel/esbuild/isolated modules.
+- Forgetting `as const`, so a config object's values widen to `string`.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Enums or union types — which do you prefer and why?">
+
+For a fixed set of values I usually prefer a union of string literals, because it's erased at runtime, matches the plain strings in JSON and databases, narrows cleanly in switches, and works with type-stripping tools. When I also need the values at runtime — for validation or a dropdown — I declare them once as an `as const` array or object and derive the union type from it, so the two can't drift. Enums generate runtime objects; numeric enums are loosely typed and persist meaningless numbers, string enums are nominal so you can't pass a plain string, and `const enum` breaks with per-file transpilers. If a codebase already uses enums, string enums are the safer variety.
+
+<Fragment slot="deeper">
+
+- **What does `as const` do?** Keeps literal types and makes the value deeply readonly.
+- **What's a reverse mapping?** Numeric enums map values back to names: `Role[0] === 'Admin'`.
+- **Why do type-stripping tools reject enums?** Enums emit runtime code, not just erasable syntax.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Literal type", "A type with exactly one value, like `'paid'`."],
+  ["Union of literals", "A closed set of allowed values: `'a' | 'b'`."],
+  ["`as const`", "Assertion keeping literal types and making values readonly."],
+  ["Enum", "A named set of constants that also exists at runtime."],
+  ["`const enum`", "An enum inlined at compile time; problematic with isolated transpilers."],
+]} />

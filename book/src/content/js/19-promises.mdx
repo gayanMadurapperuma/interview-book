@@ -1,0 +1,197 @@
+---
+title: Promises
+part: Asynchrony
+order: 19
+level: core
+summary: A promise is an object standing in for a value that will arrive later. Chaining, error propagation and timing all follow from a few simple rules.
+demo: js-promise-chain
+---
+
+A **promise** is an object that represents the eventual result of an asynchronous operation — a network response, a file read, a timer. It starts **pending**, and later becomes either **fulfilled** (with a value) or **rejected** (with an error). Once it settles, it never changes again. You attach reactions with `.then`, `.catch` and `.finally`, and each of those returns a **new** promise, which is what makes chaining possible.
+
+<Analogy>
+  A promise is like the buzzer a café gives you when you order. You don't stand at the counter waiting; you go and sit down. The buzzer is "pending". When it buzzes, your order is either ready (fulfilled — collect your coffee) or there's a problem (rejected — they're out of oat milk). Either way, it only buzzes once.
+</Analogy>
+
+## Why it matters
+
+Promises are the foundation of all modern asynchronous JavaScript — `fetch`, database drivers, file APIs and `async/await` are all built on them. Interviewers test chaining, error handling, and the subtle timing of `.then` callbacks, and often ask you to promisify a callback API or implement a combinator.
+
+## Three states
+
+<Diagram
+  caption="A promise settles exactly once. After that it is immutable — calling resolve or reject again does nothing."
+  chart={`stateDiagram-v2
+    [*] --> Pending
+    Pending --> Fulfilled: resolve(value)
+    Pending --> Rejected: reject(error) or throw
+    Fulfilled --> [*]
+    Rejected --> [*]`}
+/>
+
+## Creating a promise
+
+Most of the time you receive promises from APIs. When you need to wrap a callback-based API, you create one:
+
+```js
+function delay(ms, value) {
+  return new Promise((resolve) => {
+    setTimeout(() => resolve(value), ms);
+  });
+}
+
+function readJson(path) {
+  return new Promise((resolve, reject) => {
+    fs.readFile(path, 'utf8', (err, text) => {
+      if (err) return reject(err);
+      try { resolve(JSON.parse(text)); }
+      catch (parseErr) { reject(parseErr); }
+    });
+  });
+}
+```
+
+The function you pass to `new Promise` (the *executor*) runs **immediately and synchronously**. If it throws, the promise is rejected.
+
+<Callout type="tip">
+  Node has `util.promisify` and promise versions of core modules (`node:fs/promises`), so you rarely need to wrap things by hand there.
+</Callout>
+
+## Chaining
+
+`.then(onFulfilled, onRejected)` returns a **new** promise. What that new promise becomes depends on what your handler does:
+
+| Your handler… | The new promise… |
+|---|---|
+| returns a value `v` | fulfils with `v` |
+| returns a promise `p` | follows `p` (waits for it and copies its result) |
+| throws an error `e` | rejects with `e` |
+| is missing (e.g. no reject handler) | passes the previous result through unchanged |
+
+```js
+fetch('/api/user/1')
+  .then((res) => res.json())               // returns a promise → the chain waits for it
+  .then((user) => fetch(`/api/orders?user=${user.id}`))
+  .then((res) => res.json())
+  .then((orders) => console.log(orders.length))
+  .catch((err) => console.error('something failed', err));
+```
+
+<Diagram
+  caption="Each .then returns a new promise. Values flow down the success path; a throw jumps to the next .catch, skipping the .then handlers in between."
+  chart={`flowchart TB
+    P0["Promise.resolve(1)"] --> T1[".then: log, then throw"]
+    T1 -- "rejects" --> T2[".then: skipped"]
+    T2 -- "rejection passes through" --> C[".catch: handle, return 'recovered'"]
+    C -- "fulfils" --> T4[".then: receives 'recovered'"]
+    T4 --> F[".finally: always runs"]`}
+  steps={[
+    { nodes: ["P0", "T1"], text: "The first handler receives `1` and then throws an error." },
+    { nodes: ["T1", "T2"], text: "The promise returned by that `.then` is now **rejected**. The next `.then` has no reject handler, so its callback is skipped." },
+    { nodes: ["T2", "C"], text: "The rejection reaches `.catch`, which handles it." },
+    { nodes: ["C", "T4"], text: "Because `.catch` returned a value, its promise **fulfils** — the chain is back on the success path." },
+    { nodes: ["T4", "F"], text: "`.finally` runs whatever happened, receives no arguments, and passes the result through." },
+  ]}
+/>
+
+<DemoLink id="js-promise-chain" />
+
+### Returning matters
+
+Forgetting `return` inside a `.then` is the most common promise bug. The next step will not wait for the inner promise, and its errors will not reach your `.catch`.
+
+```js
+// broken: the save runs, but the chain does not wait for it
+getUser().then((user) => { saveAudit(user); }).then(() => console.log('done'));
+
+// correct
+getUser().then((user) => saveAudit(user)).then(() => console.log('done'));
+```
+
+## Error handling
+
+- A `.catch(fn)` is just `.then(undefined, fn)`.
+- Put **one** `.catch` near the end of a chain to handle any failure above it.
+- `.then(success, failure)` is **not** the same as `.then(success).catch(failure)`: in the first form, an error thrown *inside* `success` is not caught by `failure`.
+
+```js
+p.then(handle, onError);         // onError does NOT see errors thrown in handle
+p.then(handle).catch(onError);   // onError sees both
+```
+
+### Unhandled rejections
+
+If a promise rejects and nothing ever handles it, browsers log an "Uncaught (in promise)" error and fire an `unhandledrejection` event. Node goes further: since Node 15, an unhandled rejection **crashes the process** by default. Always end chains with `.catch` or `await` inside `try/catch`.
+
+## Timing: handlers are always asynchronous
+
+Even when a promise is already resolved, `.then` callbacks never run immediately. They are queued as **microtasks** and run after the current code finishes.
+
+```js
+const p = Promise.resolve('ready');
+p.then((v) => console.log('2:', v));
+console.log('1: sync');
+```
+
+<Output lines={['1: sync', '2: ready']} />
+
+This guarantee — handlers are *always* async — makes promise code predictable. A function that sometimes calls its callback synchronously and sometimes asynchronously (sometimes called "releasing Zalgo") causes subtle ordering bugs; promises rule that out.
+
+## Useful static helpers
+
+```js
+Promise.resolve(42);                 // already-fulfilled promise
+Promise.reject(new Error('nope'));   // already-rejected promise
+
+const { promise, resolve, reject } = Promise.withResolvers();
+// resolve or reject later, from elsewhere (handy for events and queues)
+```
+
+The combinators `Promise.all`, `allSettled`, `race` and `any` get their own chapter.
+
+## Promises are eager, and cannot be cancelled
+
+A promise represents work that has **already started**. Creating it starts the work; attaching `.then` only decides what happens with the result. There is no `promise.cancel()`. To stop the underlying work, the operation itself must support cancellation — for `fetch` and most modern APIs that means passing an `AbortSignal`:
+
+```js
+const controller = new AbortController();
+const req = fetch('/api/search?q=js', { signal: controller.signal });
+controller.abort();   // req rejects with an AbortError, and the HTTP request is cancelled
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Forgetting to `return` a promise inside `.then`.
+- Nesting `.then` inside `.then` instead of returning and chaining ("promise hell").
+- Missing a final `.catch`, causing unhandled rejections.
+- Wrapping something that already returns a promise in `new Promise` (the "explicit construction anti-pattern").
+- Expecting `.then` on a resolved promise to run synchronously.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is a promise and how does chaining work?">
+
+A promise is an object representing a future result. It starts pending and settles once, either fulfilled with a value or rejected with a reason. `.then`, `.catch` and `.finally` register reactions and each returns a new promise: if the handler returns a value, the new promise fulfils with it; if it returns a promise, the new one follows it; if it throws, the new one rejects. That lets you write a flat chain where values flow down and an error skips ahead to the nearest `.catch`. Handlers always run asynchronously as microtasks, even for an already-settled promise.
+
+<Fragment slot="deeper">
+
+- **`.then(a, b)` vs `.then(a).catch(b)`?** In the first, `b` does not catch errors thrown by `a`.
+- **What happens with an unhandled rejection?** Browsers log it; Node 15+ crashes the process by default.
+- **Can you cancel a promise?** No — cancel the underlying operation with an `AbortSignal`.
+- **What runs synchronously in `new Promise(executor)`?** The executor itself.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Pending / fulfilled / rejected", "The three states of a promise. Fulfilled and rejected are both \"settled\"."],
+  ["Executor", "The function passed to `new Promise`; it runs synchronously and receives `resolve` and `reject`."],
+  ["Chaining", "Building sequences with `.then`, since each call returns a new promise."],
+  ["Rejection propagation", "An error skipping success handlers until it reaches a rejection handler."],
+  ["Unhandled rejection", "A rejected promise with no handler attached."],
+  ["`AbortController`", "The standard way to cancel the work behind a promise, such as a `fetch`."],
+]} />

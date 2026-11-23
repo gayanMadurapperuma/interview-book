@@ -1,0 +1,149 @@
+---
+title: What Node.js actually is
+part: Runtime
+order: 1
+level: foundation
+summary: Node is not a language or a framework. It is V8 plus libuv plus a standard library — a way to run JavaScript outside the browser, built around non-blocking I/O.
+---
+
+**Node.js** is a **runtime**: a program that runs JavaScript outside the browser. It takes Google's **V8** engine (the same one inside Chrome), which knows how to execute JavaScript, and adds the things a server needs that a browser doesn't provide: access to files, network sockets, processes and the operating system. The piece that makes Node special is **libuv**, a C library that gives Node its event loop and lets it wait for many slow operations at once without needing a thread for each one.
+
+<Analogy>
+  A restaurant with one very fast waiter. Instead of standing at a table while the kitchen cooks (blocking), the waiter takes an order, passes it to the kitchen, and immediately goes to the next table. When a dish is ready, the kitchen rings a bell and the waiter delivers it. One waiter can serve a full restaurant — as long as no single task makes them stop and cook themselves.
+</Analogy>
+
+## Why it matters
+
+"What is Node and why is it fast?" opens most Node interviews. The honest answer — single-threaded JavaScript, non-blocking I/O delegated to the OS and a thread pool — tells the interviewer you know both its strength (handling many concurrent connections cheaply) and its weakness (CPU-heavy work blocks everyone).
+
+## The layers
+
+<Diagram
+  caption="Your code sits on Node's JavaScript library, which talks through C++ bindings to V8 (to run JS) and libuv (to do I/O)."
+  chart={`flowchart TB
+    APP["Your application code<br/>Express, Fastify, NestJS…"] --> LIB["Node core library (JS)<br/>fs · http · net · crypto · stream · events"]
+    LIB --> BIND["C++ bindings"]
+    BIND --> V8["V8<br/>runs JavaScript, JIT compiles, garbage-collects"]
+    BIND --> UV["libuv<br/>event loop · thread pool · async OS I/O"]
+    UV --> OS["Operating system<br/>epoll (Linux) · kqueue (macOS) · IOCP (Windows)"]
+    BIND --> OTHER["Other C libraries<br/>OpenSSL · zlib · llhttp · c-ares"]`}
+  steps={[
+    { nodes: ["APP", "LIB"], text: "You call something like `fs.readFile` or `http.createServer` — part of Node's JavaScript library." },
+    { nodes: ["LIB", "BIND"], text: "The library calls down into C++ bindings, the bridge between JavaScript and native code." },
+    { nodes: ["BIND", "V8"], text: "**V8** executes all the JavaScript — yours and Node's — on a single main thread." },
+    { nodes: ["BIND", "UV", "OS"], text: "**libuv** handles I/O: it asks the OS to watch sockets, or uses a small thread pool for things the OS can only do in a blocking way (like file reads)." },
+    { nodes: ["BIND", "OTHER"], text: "Other native libraries handle TLS, compression, HTTP parsing and DNS." },
+  ]}
+/>
+
+| Part | Job |
+|---|---|
+| **V8** | Parses, compiles and runs JavaScript; manages the heap and garbage collection. |
+| **libuv** | The event loop; non-blocking network I/O via the OS; a thread pool (4 threads by default) for blocking work like file system calls and some crypto. |
+| **Bindings** | C++ glue exposing native functionality to JavaScript. |
+| **Core modules** | `fs`, `http`, `net`, `stream`, `events`, `crypto`, `worker_threads`… |
+| **npm** | The package manager shipped with Node (not part of the runtime itself). |
+
+## Single-threaded, but not only one thread
+
+People say "Node is single-threaded". More precisely: **your JavaScript runs on one thread**. Node itself uses several threads — libuv's thread pool, V8's garbage-collection threads — and the operating system does networking in the kernel. You simply never have two pieces of your JavaScript running at the same time (unless you use worker threads explicitly).
+
+That has two big consequences:
+
+- **No locks needed.** Two callbacks can never modify the same object at the same moment, so whole classes of threading bugs disappear.
+- **Blocking is fatal.** If one request handler spends 200 ms computing something, every other request waits 200 ms.
+
+## Non-blocking I/O
+
+Most of a web server's time is spent **waiting** — for the database, another API, the disk. A traditional thread-per-request server uses one OS thread per connection; each thread sits idle while it waits, and threads are expensive (memory for their stacks, context switching). Node instead starts the I/O, registers a callback, and moves on.
+
+<Diagram
+  caption="Thread-per-request servers park a thread on every waiting request. Node parks nothing — the single thread only runs code when there is code to run."
+  chart={`flowchart LR
+    subgraph TPR["Thread per request"]
+      direction TB
+      t1["thread 1: waiting on DB…"]
+      t2["thread 2: waiting on API…"]
+      t3["thread 3: waiting on disk…"]
+      t4["thread 4…10,000"]
+    end
+    subgraph NODE["Node"]
+      direction TB
+      js["1 JS thread: runs short callbacks"]
+      k["OS kernel: watches 10,000 sockets"]
+      p["4 pool threads: file and crypto work"]
+    end`}
+/>
+
+```js
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+
+createServer(async (req, res) => {
+  const page = await readFile('./index.html');  // JS thread is free while the file is read
+  res.end(page);
+}).listen(3000);
+```
+
+## Where Node shines, and where it doesn't
+
+| Good fit | Poor fit (without care) |
+|---|---|
+| APIs and web servers doing lots of I/O | Heavy computation: video encoding, ML, large image processing |
+| Real-time apps: chat, live updates, WebSockets | Long CPU-bound loops in request handlers |
+| Proxies, gateways, BFFs (backend-for-frontend) | Workloads needing shared-memory parallelism everywhere |
+| Tooling: bundlers, linters, CLIs | |
+| Streaming data (files, uploads, logs) | |
+
+CPU-heavy work is still possible: move it to `worker_threads`, a child process, or a separate service. Later chapters cover each.
+
+## Node versus the browser
+
+Both run JavaScript on an event loop, but the environment differs:
+
+| | Browser | Node |
+|---|---|---|
+| Global object | `window` (also `globalThis`) | `globalThis` (`global`) |
+| DOM, `document` | yes | no |
+| File system, processes, raw sockets | no (sandboxed) | yes |
+| Module systems | ES modules | ES modules and CommonJS |
+| Event loop | HTML spec: tasks, microtasks, rendering | libuv: six phases plus `nextTick` and microtasks |
+| Shared web APIs | `fetch`, `URL`, `AbortController`, `TextEncoder`, `structuredClone`, Web Streams | the same — Node implements them too |
+
+## Alternatives
+
+**Deno** and **Bun** are newer runtimes. Deno (by Node's original author) emphasises security permissions and built-in TypeScript; Bun uses the JavaScriptCore engine and focuses on speed and an all-in-one toolkit. Both aim for Node compatibility. Interviews still centre on Node, but knowing they exist is useful.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Saying Node is a language or a framework. It is a runtime; Express and NestJS are frameworks.
+- Saying "Node is single-threaded, so it can't use multiple cores". It can — with clustering, worker threads or multiple processes.
+- Doing CPU-heavy work directly in request handlers.
+- Using synchronous APIs (`readFileSync`) inside request handlers.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is Node.js and why is it good at handling many connections?">
+
+Node is a JavaScript runtime built from V8, which executes JavaScript, and libuv, which provides the event loop and asynchronous I/O. Our JavaScript runs on a single thread, but I/O never blocks it: network sockets are watched by the operating system with mechanisms like epoll, and blocking operations such as file access run on libuv's small thread pool. When an operation completes, its callback is queued and run on the main thread. Because waiting costs nothing, one process can hold tens of thousands of concurrent connections without a thread per connection. The trade-off is that CPU-heavy work blocks everyone, so it belongs in worker threads or another service.
+
+<Fragment slot="deeper">
+
+- **Is Node really single-threaded?** JavaScript execution is; libuv's thread pool, V8's GC threads and the kernel do work in parallel.
+- **What does libuv do?** The event loop, cross-platform async I/O, timers, and the thread pool.
+- **When would you not choose Node?** CPU-bound services — unless the heavy work is offloaded.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Runtime", "A program that executes code and provides its environment and APIs."],
+  ["V8", "Google's JavaScript engine: compiles and runs JS, manages memory."],
+  ["libuv", "C library providing Node's event loop, async I/O and thread pool."],
+  ["Non-blocking I/O", "Starting an I/O operation and continuing without waiting for it to finish."],
+  ["Thread pool", "A fixed set of background threads libuv uses for blocking operations."],
+]} />

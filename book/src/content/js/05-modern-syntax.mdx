@@ -1,0 +1,218 @@
+---
+title: Strict mode and modern syntax
+part: Foundations
+order: 5
+level: foundation
+summary: The features added since 2015 that every interviewer expects you to read and write fluently — and the safety switch that makes old mistakes into errors.
+---
+
+JavaScript changed a great deal in 2015 (the "ES6" release) and has added features every year since. Modern code relies on them everywhere: template strings, destructuring, spread, classes, modules, optional chaining. This chapter is a guided tour of the features you will see most, plus **strict mode**, the switch that turns several silent mistakes into loud errors.
+
+<Analogy>
+  Strict mode is like turning on the spell-checker. Without it, JavaScript lets you misspell a variable name and quietly creates a new global variable. With it, the editor underlines the mistake immediately.
+</Analogy>
+
+## Why it matters
+
+Interviewers expect modern syntax by default; writing `var` and `function() {}.bind(this)` everywhere signals out-of-date habits. Strict mode also explains why `this` is `undefined` in some places, and why some old code examples behave differently in modules.
+
+## Strict mode
+
+Strict mode is enabled by writing `'use strict';` at the top of a file or function. More importantly, it is **automatically on** inside ES modules (`import`/`export` files) and inside `class` bodies — so most modern code is strict without saying so.
+
+What it changes:
+
+| Sloppy mode | Strict mode |
+|---|---|
+| Assigning to an undeclared name creates a global | `ReferenceError` |
+| `this` in a plain function call is the global object | `this` is `undefined` |
+| Writing to a read-only property fails silently | `TypeError` |
+| Duplicate parameter names allowed | `SyntaxError` |
+| `with` statement allowed | `SyntaxError` |
+
+```js
+'use strict';
+function setup() {
+  conut = 1;   // typo! ReferenceError: conut is not defined
+}
+```
+
+<Diagram
+  caption="Where strict mode is on. Most modern code never needs the 'use strict' line."
+  chart={`flowchart TB
+    F["Your file"] --> M{"Uses import / export?<br/>(ES module)"}
+    M -- yes --> S1["Strict automatically"]
+    M -- no --> U{"Starts with<br/>'use strict'?"}
+    U -- yes --> S2["Strict"]
+    U -- no --> C{"Code inside<br/>a class body?"}
+    C -- yes --> S3["Strict inside the class"]
+    C -- no --> SL["Sloppy mode"]`}
+/>
+
+## Template literals
+
+Backtick strings can span multiple lines and embed expressions with `${ }`:
+
+```js
+const name = 'Ada';
+const msg = `Hello ${name}, you have ${3 * 2} new messages.`;
+const html = `
+  <li class="user">
+    ${name}
+  </li>
+`;
+```
+
+Tagged templates — a function name written directly before the backticks, as in ``sql`SELECT * FROM users WHERE id = ${id}` `` — pass the pieces to that function. Libraries use this for safe SQL parameters and HTML escaping.
+
+## Destructuring and spread (quick reference)
+
+```js
+// objects
+const { id, profile: { email }, role = 'viewer' } = user;
+
+// arrays
+const [head, ...tail] = [1, 2, 3];      // head = 1, tail = [2, 3]
+let a = 1, b = 2;
+[a, b] = [b, a];                         // swap
+
+// spread into calls, arrays and objects
+Math.max(...[3, 9, 4]);                  // 9
+const copy = [...list];
+const merged = { ...defaults, ...overrides };
+```
+
+## Shorthand properties and computed keys
+
+```js
+const name = 'Ada';
+const age = 36;
+const user = { name, age };                 // same as { name: name, age: age }
+
+const field = 'email';
+const update = { [field]: 'a@b.com' };      // { email: 'a@b.com' }
+
+const api = {
+  fetchUser(id) { /* method shorthand */ },
+};
+```
+
+## Optional chaining, nullish coalescing, logical assignment
+
+```js
+const city = order?.customer?.address?.city;    // undefined instead of a crash
+const first = list?.[0];                         // works with brackets
+callback?.();                                    // call only if defined
+
+const limit = options.limit ?? 20;               // default only for null/undefined
+
+settings.theme ??= 'light';      // assign only if null/undefined
+counter.hits ||= 0;              // assign if falsy
+user.isAdmin &&= checkAdmin();   // assign only if truthy
+```
+
+## Loops: `for…of` versus `for…in`
+
+<Diagram
+  caption="for...of walks values of anything iterable. for...in walks property names (keys) of an object — including inherited ones."
+  chart={`flowchart LR
+    A["['a', 'b', 'c']"] -- "for...of" --> V["'a' · 'b' · 'c'<br/>values"]
+    A -- "for...in" --> K["'0' · '1' · '2'<br/>keys, as strings"]
+    O["{ x: 1, y: 2 }"] -- "for...in" --> OK["'x' · 'y'"]
+    O -. "for...of ✗<br/>not iterable" .-> E["TypeError"]`}
+/>
+
+```js
+for (const value of ['a', 'b']) {}          // arrays, strings, Maps, Sets
+for (const [key, val] of Object.entries(obj)) {}  // the clean way for objects
+for (const key in obj) {}                   // keys — avoid for arrays
+```
+
+## Classes
+
+`class` is a clearer syntax over JavaScript's prototype system (covered in the *Prototypes and classes* chapter).
+
+```js
+class Account {
+  #balance = 0;               // truly private field
+  static count = 0;           // shared by the class itself
+
+  constructor(owner) {
+    this.owner = owner;
+    Account.count++;
+  }
+
+  deposit(amount) {
+    if (amount <= 0) throw new RangeError('amount must be positive');
+    this.#balance += amount;
+    return this;              // allows chaining
+  }
+
+  get balance() { return this.#balance; }
+}
+
+const acc = new Account('Ada').deposit(50);
+acc.balance;   // 50
+acc.#balance;  // SyntaxError — private
+```
+
+## Modules
+
+```js
+// math.js
+export const PI = 3.14159;
+export default function area(r) { return PI * r * r; }
+
+// app.js
+import area, { PI } from './math.js';
+const { readFile } = await import('node:fs/promises');   // dynamic, loaded on demand
+```
+
+Modules have their own scope (no accidental globals), are strict, and run once no matter how many files import them. The *Modules* chapter goes deeper.
+
+## Newer additions worth knowing
+
+| Feature | Example | Year |
+|---|---|---|
+| `Array.prototype.at` | `list.at(-1)` → last item | 2022 |
+| `Object.hasOwn` | `Object.hasOwn(obj, 'id')` | 2022 |
+| Top-level `await` | `const cfg = await loadConfig();` in a module | 2022 |
+| `structuredClone` | deep copy of data | 2022 |
+| `toSorted`, `toReversed`, `with` | non-mutating array updates | 2023 |
+| `Object.groupBy`, `Map.groupBy` | group items by a key | 2024 |
+| `Promise.withResolvers` | create a promise plus its resolve/reject | 2024 |
+| New `Set` methods | `a.union(b)`, `a.intersection(b)` | 2025 |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using `for...in` on arrays — keys are strings, order is not guaranteed for unusual keys, and inherited properties can appear.
+- Writing `obj?.method()` when `obj` exists but `method` might not — you need `obj.method?.()`.
+- Using `||=` when `0` or `''` are valid values; use `??=`.
+- Assuming a non-module script is strict.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What does strict mode do, and when is it enabled?">
+
+Strict mode turns silent mistakes into errors: assigning to an undeclared variable throws instead of creating a global, `this` is `undefined` in a plain function call instead of the global object, and writing to read-only properties throws. It is enabled with `'use strict'`, but it is automatically on in ES modules and class bodies, so most modern code is already strict.
+
+<Fragment slot="deeper">
+
+- **`for...of` vs `for...in`?** `of` iterates values of iterables; `in` iterates enumerable keys of an object, including inherited ones.
+- **What is optional chaining?** `a?.b` stops and returns `undefined` if `a` is null or undefined.
+- **What makes `#private` fields different from `_underscore`?** `#` is enforced by the language; underscores are only a naming convention.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Strict mode", "A restricted variant of JavaScript that throws on common mistakes. Default in modules and classes."],
+  ["Template literal", "A backtick string that supports `${expressions}` and multiple lines."],
+  ["Computed property", "An object key written as `[expression]`, evaluated at runtime."],
+  ["Logical assignment", "`??=`, `||=`, `&&=` — assign only under a condition."],
+  ["Private field", "A class field starting with `#`, inaccessible from outside the class."],
+]} />

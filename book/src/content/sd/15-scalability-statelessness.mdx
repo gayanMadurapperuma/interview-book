@@ -1,0 +1,140 @@
+---
+title: Scalability, statelessness and the laws of scaling
+part: Performance & reliability
+order: 15
+level: core
+summary: Vertical versus horizontal scaling, why stateless services scale easily, and why adding machines eventually stops helping.
+---
+
+**Scalability** is a system's ability to handle more load by adding resources. You can scale **vertically** (a bigger machine) or **horizontally** (more machines). Horizontal scaling works best when servers are **stateless** — any server can handle any request, because nothing about a user's session lives only in one server's memory. But scaling is never perfectly linear: **Amdahl's Law** and the **Universal Scalability Law** explain why adding the hundredth server helps far less than the second — and sometimes makes things worse.
+
+<Analogy>
+  A pizza restaurant getting busier. Vertical scaling is buying a bigger oven. Horizontal scaling is opening more identical kitchens. That only works if any kitchen can make any order — the recipes aren't in one chef's head (statelessness). And no matter how many kitchens you open, if every order must be approved by the one manager on the phone, that manager becomes the limit.
+</Analogy>
+
+## Why it matters
+
+"How would you scale this?" is in every system design interview. A good answer separates stateless tiers (scale out freely) from stateful ones (databases, caches — harder), and recognises shared bottlenecks.
+
+## Vertical versus horizontal
+
+| | Vertical (scale up) | Horizontal (scale out) |
+|---|---|---|
+| How | more CPU/RAM/disk on one machine | more machines behind a load balancer |
+| Pros | simple; no code changes; no distribution problems | near-unlimited ceiling; redundancy; incremental |
+| Cons | hard ceiling; expensive at the top end; single point of failure | needs statelessness or partitioning; distributed-systems complexity |
+| Typical for | databases (first), caches | web/API tiers, workers |
+
+Vertical scaling is underrated: modern machines have hundreds of cores and terabytes of RAM. Start there for stateful components and scale out when you must.
+
+## Statelessness
+
+A **stateless** service keeps no per-client data in memory between requests. Everything needed comes with the request (a token) or from shared storage (database, cache).
+
+<Diagram
+  caption="Stateful servers pin users to one machine. Stateless servers share state externally, so any server can handle any request — and can be added or killed freely."
+  chart={`flowchart TB
+    subgraph SF["Stateful"]
+      direction LR
+      U1["user A"] -- "must return to" --> S1["server 1<br/>session A in memory"]
+      U2["user B"] -- "must return to" --> S2["server 2<br/>session B in memory"]
+    end
+    subgraph SL["Stateless"]
+      direction LR
+      U3["any user"] --> LB["load balancer"]
+      LB --> X1["server 1"]
+      LB --> X2["server 2"]
+      LB --> X3["server N"]
+      X1 --> R[("Redis / DB<br/>sessions, state")]
+      X2 --> R
+      X3 --> R
+    end`}
+  steps={[
+    { nodes: ["U1", "S1", "U2", "S2"], text: "**Stateful**: user A's session lives in server 1's memory. If server 1 dies, A is logged out; A can't be moved to server 2 for load balancing." },
+    { nodes: ["U3", "LB", "X1", "X2", "X3"], text: "**Stateless**: the load balancer can send any request anywhere." },
+    { nodes: ["X1", "X2", "X3", "R"], text: "State lives in a shared store. Servers become interchangeable: autoscale, deploy, or lose one without users noticing." },
+  ]}
+/>
+
+Making a service stateless:
+
+- Sessions in Redis or signed tokens (JWT) instead of server memory.
+- Uploaded files to object storage, not local disk.
+- Scheduled jobs coordinated with a lock or a dedicated scheduler, not "whichever server runs cron".
+- In-memory caches are fine as optimisations, as long as correctness doesn't depend on them.
+
+**Sticky sessions** (the load balancer pins a user to a server) are a workaround, not a solution: uneven load, and sessions lost when the server goes.
+
+## Where scaling gets hard
+
+Stateless tiers scale almost linearly. The limits are the **shared, stateful** parts: the database primary, a global counter, a lock, a single queue partition. Scaling those requires **partitioning** (each node owns part of the data), **replication** (for reads), or **caching** — and redesigning hotspots such as global counters.
+
+## Amdahl's Law
+
+If a fraction **s** of the work is serial (can't be parallelised), the maximum speed-up with N processors is:
+
+> speed-up = 1 ÷ (s + (1 − s) ÷ N)
+
+With just 5% serial work, the speed-up can **never** exceed 20×, however many machines you add.
+
+## The Universal Scalability Law
+
+Real systems are worse than Amdahl: nodes also spend time **coordinating** with each other (cache coherence, locks, consensus, cross-node chatter). Neil Gunther's USL adds a **coherency** term that grows with the number of nodes — so throughput rises, flattens, and then **falls**.
+
+<Diagram
+  caption="Teal: ideal linear scaling. Ochre: Amdahl (5% serial work caps it). Red: USL (coordination makes throughput fall past a point)."
+  chart={`xychart-beta
+    title "Throughput vs number of nodes"
+    x-axis "nodes" [1, 2, 4, 8, 16, 32, 64]
+    y-axis "relative throughput" 0 --> 64
+    line [1, 2, 4, 8, 16, 32, 64]
+    line [1, 1.9, 3.5, 5.9, 9.1, 12.5, 15.4]
+    line [1, 1.9, 3.4, 5.4, 7.2, 7.4, 5.9]`}
+/>
+
+Lessons:
+
+- Minimise **serial** sections: global locks, single-threaded coordinators, one hot row.
+- Minimise **coordination**: avoid designs where every node talks to every other, or every request needs a distributed lock.
+- **Partition** so nodes work independently ("shared-nothing").
+- **Measure** scaling under load; past a point, more nodes can reduce throughput.
+
+## Autoscaling
+
+Scale stateless tiers automatically on a metric that reflects load: CPU (target ~60–70%), requests per instance, queue depth for workers, or event-loop delay for Node services. Account for warm-up time (new instances take time to start and fill caches), and scale **down** conservatively to avoid flapping. Ensure dependent stateful systems (database connections!) can absorb the extra instances.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Storing sessions or uploads on local servers, then adding a load balancer.
+- Scaling the web tier while the database is the bottleneck.
+- Global counters or locks on every request.
+- Assuming doubling servers doubles throughput.
+- Autoscaling app servers without checking the database's connection limit.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you scale a web application?">
+
+I'd make the application tier stateless — sessions in Redis or signed tokens, files in object storage — so I can run many identical instances behind a load balancer and autoscale on CPU or request rate, aiming for around 60–70% utilisation. The data tier is the hard part: I'd scale it vertically first, add read replicas and caching for read-heavy load, and partition by a good key when writes or storage outgrow one machine. Throughout, I'd watch for serial bottlenecks — global locks, single hot rows, a single queue partition — because Amdahl's Law caps speed-up by the serial fraction, and coordination between nodes can even make throughput fall as you add nodes, as the Universal Scalability Law shows.
+
+<Fragment slot="deeper">
+
+- **Why are stateless services easy to scale?** Any instance can serve any request, so instances are interchangeable.
+- **Sticky sessions — good or bad?** A workaround; uneven load and lost sessions on failure.
+- **What limits horizontal scaling?** Shared state, serial sections and coordination overhead.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Vertical scaling", "Adding resources to a single machine."],
+  ["Horizontal scaling", "Adding more machines."],
+  ["Stateless service", "A service that keeps no per-client state between requests."],
+  ["Amdahl's Law", "Speed-up is limited by the serial fraction of work."],
+  ["Universal Scalability Law", "Adds coordination costs; throughput can decline as nodes are added."],
+  ["Autoscaling", "Automatically adjusting instance count based on load metrics."],
+]} />

@@ -1,0 +1,159 @@
+---
+title: "Case study: a distributed rate limiter"
+part: Case studies
+order: 32
+level: core
+summary: Designing rate limiting as a shared service for many APIs — accuracy, latency, Redis atomicity, multi-region and failure behaviour.
+---
+
+The *API design* chapter introduced rate-limiting algorithms. This case study designs a **rate-limiting service** for a company with many APIs and many instances of each: rules defined centrally ("free tier: 100 requests/minute per API key"), enforced consistently across every server, adding almost no latency, and degrading safely when parts of it fail.
+
+<Analogy>
+  A nightclub chain with a "max 5 visits per week per member" rule across all its venues. Each door needs to check the shared count instantly; a quick phone call to head office for every guest would make queues unbearable, so doors carry a recent copy and settle up often. And if the phones go down, the chain has to decide: let members in anyway, or turn everyone away?
+</Analogy>
+
+## 1. Requirements
+
+**Functional**
+
+- Limit requests per **key** (API key, user, IP, tenant), per **rule** (endpoint, tier), over a time window.
+- Rules are configurable without redeploying services.
+- Clients receive `429` with `Retry-After` and limit headers.
+
+**Non-functional**
+
+- **Low latency**: under ~1–2 ms added per request.
+- **Highly available**: the limiter must never become the reason the API is down.
+- **Accurate enough**: small overshoot (a few %) is acceptable for most limits; login/security limits must be strict.
+- **Scalable**: e.g. 1 million requests/s across the fleet.
+
+## 2. Estimates
+
+- 1M req/s, each needing a limit check → 1M counter operations/s.
+- One Redis node handles ~100k simple ops/s → **10+ shards** (Redis Cluster), or reduce calls with local batching.
+- Memory: 10 million active keys × ~100 bytes ≈ 1 GB — small.
+
+## 3. Where to enforce
+
+<Diagram
+  caption="Options for where the check runs. A library or sidecar with a shared store is the common choice; the gateway handles coarse, edge-level limits."
+  chart={`flowchart LR
+    C["clients"] --> EDGE["Edge / WAF<br/>coarse per-IP limits"]
+    EDGE --> GW["API gateway<br/>per API key / tier"]
+    GW --> SVC["Service instances<br/>+ limiter library / sidecar<br/>business-aware limits"]
+    SVC --> RS[("Redis Cluster<br/>counters / buckets")]
+    CFG["Rules config service"] -.-> GW
+    CFG -.-> SVC`}
+/>
+
+- **Edge/WAF**: cheap, blocks floods before they reach you; coarse rules only.
+- **API gateway**: one place for per-key and per-plan limits.
+- **In-service library or sidecar**: limits that depend on business context (per tenant per operation).
+- A separate **rate-limit microservice** called over the network adds a hop; usually the library talks to Redis directly instead.
+
+## 4. Algorithm
+
+Use a **token bucket** (allows short bursts, enforces an average) or a **sliding window counter** (simple "N per window" semantics). Both need only a couple of numbers per key.
+
+## 5. Atomic, low-latency checks
+
+Each check must read, update and decide **atomically**, or two servers checking at the same moment both see the last token. In Redis, run the whole check as a **Lua script** (executed atomically) — one round trip.
+
+<Diagram
+  sequence
+  caption="A limit check: one atomic Redis call per request. The response tells the service whether to proceed and what headers to return."
+  chart={`sequenceDiagram
+    participant Cl as Client
+    participant S as API instance
+    participant R as Redis (shard for key)
+    Cl->>S: GET /search (api-key: k1)
+    S->>R: EVALSHA token_bucket(rl:k1:search, rate, cap, now)
+    R-->>S: allowed = 1, remaining = 37
+    S-->>Cl: 200 + RateLimit-Remaining: 37
+    Cl->>S: …burst of requests
+    S->>R: EVALSHA token_bucket(…)
+    R-->>S: allowed = 0, retry in 400 ms
+    S-->>Cl: 429 + Retry-After: 1`}
+  notes={[
+    "A request arrives with an API key.",
+    "The service runs the token-bucket script on the Redis shard that owns this key. Refill, check and decrement happen atomically.",
+    "Redis says it's allowed, with 37 tokens left.",
+    "The request proceeds; headers tell the client its remaining budget.",
+    "The client bursts.",
+    "Each request runs the same atomic check.",
+    "The bucket is empty.",
+    "The service rejects quickly with 429 and when to retry.",
+  ]}
+/>
+
+Use the server's or Redis's time consistently (pass `now` from the service but tolerate small skew, or use Redis `TIME`), set a TTL on every key so idle keys disappear, and hash-tag keys so all of a key's data lives on one cluster shard.
+
+## 6. Reducing load and latency further
+
+For very high traffic, a Redis call per request may be too much:
+
+- **Local token buckets with periodic sync**: each instance gets a share of the budget (limit ÷ instances) or leases batches of tokens from Redis (take 100 at a time). Fewer calls, slight overshoot or undershoot.
+- **Local pre-check**: an in-memory limiter rejects obviously abusive clients before touching Redis.
+- **Async counting** for non-critical limits: count locally, flush every 100 ms; accept approximate results.
+
+## 7. Failure behaviour
+
+<Diagram
+  caption="If the shared store is unreachable, decide per rule whether to fail open (allow) or closed (deny)."
+  chart={`flowchart TB
+    CHK["limit check"] --> T{"Redis reachable<br/>within 5 ms?"}
+    T -- yes --> D["decide normally"]
+    T -- no --> RULE{"rule type"}
+    RULE -- "general API quota" --> OPEN["fail open: allow<br/>(fall back to local limiter)"]
+    RULE -- "security: login, OTP" --> CLOSED["fail closed: deny"]`}
+/>
+
+- Use a **tight timeout** on the Redis call (a few ms) and a **circuit breaker**, so a sick Redis doesn't slow every request.
+- **Fail open** with a local in-memory limiter as a fallback for normal quotas — availability beats perfect accuracy.
+- **Fail closed** for brute-force protection.
+- Replicate Redis; a lost shard means a brief window of reset counters, which is usually acceptable.
+
+## 8. Multi-region
+
+Options: **per-region limits** (each region enforces limit ÷ regions; simple, slightly unfair if traffic is uneven), or **local counting with async cross-region sync** (approximately global). Truly global, exact limits require cross-region coordination on every request — too slow for most cases.
+
+## 9. Configuration and observability
+
+- Rules stored centrally (database or config service), cached in each instance and refreshed every few seconds; versioned and auditable.
+- Metrics: allowed vs rejected per rule and key, Redis latency, fail-open events. Alert on sudden spikes in rejections (bad rule or attack).
+- **Shadow mode** for new rules: log what would be rejected before enforcing.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Separate GET and SET calls (race conditions); not atomic.
+- A remote rate-limit service in the hot path with no timeout or fallback.
+- Keys without TTLs accumulating forever.
+- Global exact limits across regions, adding cross-ocean latency to every request.
+- Enforcing brand-new rules without a shadow period.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Design a distributed rate limiter for a large API platform.">
+
+I'd enforce coarse per-IP limits at the edge and per-key or per-tenant rules in a gateway or a small library in each service, with rules held in a central config service and cached locally. State lives in Redis Cluster, sharded by key: each request runs a token-bucket Lua script that refills, checks and decrements atomically in one round trip, with TTLs so idle keys expire. Responses carry rate-limit headers, and rejections are 429 with Retry-After. To protect latency and availability, the Redis call has a few-millisecond timeout and a circuit breaker; general quotas fail open to a local in-memory limiter, while security limits like login fail closed. At very high volume, instances lease batches of tokens to cut Redis calls, accepting slight inaccuracy, and across regions I'd use per-region limits rather than global coordination. New rules run in shadow mode first.
+
+<Fragment slot="deeper">
+
+- **Why Lua in Redis?** Executes the read–modify–write atomically, avoiding races between servers.
+- **Fail open or closed?** Open for general quotas (availability), closed for security limits.
+- **How do you scale beyond one Redis?** Redis Cluster sharding by key; local token leasing.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Token bucket", "Bucket refills at a steady rate; requests spend tokens; bursts up to capacity."],
+  ["Atomic script", "A Redis Lua script executed without interleaving other commands."],
+  ["Fail open / fail closed", "Allowing or denying requests when the limiter itself is unavailable."],
+  ["Token leasing", "Instances take batches of tokens to reduce calls to the shared store."],
+  ["Shadow mode", "Evaluating a rule and logging outcomes without enforcing it."],
+]} />

@@ -1,0 +1,57 @@
+---
+import { SUBJECTS, subjectByKey, withBase, type SubjectKey } from '../lib/subjects';
+import { chaptersFor, groupByPart, slugOf } from '../lib/chapters';
+
+interface Props { subject: SubjectKey; currentId?: string }
+const { subject, currentId } = Astro.props;
+const s = subjectByKey[subject];
+const list = await chaptersFor(subject);
+const groups = groupByPart(subject, list);
+let n = 0;
+---
+<nav class="toc" aria-label={`${s.name} contents`} data-pagefind-ignore>
+  <div class="mobile-vols">
+    {SUBJECTS.map((x) => <a href={withBase(`/${x.key}/`)}>{x.name}</a>)}
+    <a href={withBase('/demos/')}>Demo Lab</a>
+  </div>
+  <a class="toc-vol" href={withBase(`/${subject}/`)}>
+    <span class="caps">Volume {s.volume}</span>
+    <strong>{s.name}</strong>
+  </a>
+  {groups.map((g) => (
+    <section class="toc-part">
+      <span class="caps">{g.part}</span>
+      <ol>
+        {g.chapters.map((c) => {
+          n += 1;
+          const href = withBase(`/${subject}/${slugOf(c)}/`);
+          return (
+            <li>
+              <a href={href} data-read-key={c.id} aria-current={c.id === currentId ? 'page' : undefined}>
+                <span class="n">{n}</span>
+                <span>{c.data.title}</span>
+                <span class="read-mark" aria-hidden="true"></span>
+              </a>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  ))}
+  {(subject === 'js' || subject === 'node') && (
+    <div class="toc-foot"><a href={withBase('/demos/')}>Open the Demo Lab →</a></div>
+  )}
+</nav>
+
+<script>
+  try {
+    const read: Record<string, number> = JSON.parse(localStorage.getItem('book:read') || '{}');
+    document.querySelectorAll<HTMLElement>('[data-read-key]').forEach((a) => {
+      if (read[a.dataset.readKey!]) a.classList.add('is-read');
+    });
+  } catch {}
+  // keep the current chapter visible inside the sidebar without scrolling the page
+  const toc = document.querySelector<HTMLElement>('.toc');
+  const cur = toc?.querySelector<HTMLElement>('[aria-current="page"]');
+  if (toc && cur) toc.scrollTop = cur.offsetTop - toc.clientHeight / 2;
+</script>

@@ -1,0 +1,137 @@
+---
+title: JWTs versus server-side sessions
+part: Identity
+order: 5
+level: core
+summary: How a user stays logged in after authenticating — opaque session IDs, self-contained JSON Web Tokens, and the trade-offs around revocation, storage and size.
+---
+
+After a user logs in, every later request must carry proof of who they are. There are two main approaches. A **server-side session** gives the client a random, meaningless **session ID** (usually in a cookie); the server looks up the session data in a store. A **JSON Web Token (JWT)** is **self-contained**: the user's ID, roles and expiry are inside the token, signed by the server, so any service can verify it without a lookup. Each has strengths, and the choice affects revocation, scalability and security.
+
+<Analogy>
+  A cloakroom ticket versus a passport. A cloakroom ticket (session ID) means nothing by itself — the attendant looks it up — and the cloakroom can cancel it any time. A passport (JWT) carries your details and an official stamp anyone can check without phoning the issuing office — convenient, but if it's stolen, it's valid until it expires unless everyone checks a "cancelled passports" list.
+</Analogy>
+
+## Why it matters
+
+"Sessions or JWTs?" is a classic interview question, often followed by "how do you log someone out with JWTs?" and "where do you store the token in the browser?". Wrong answers here lead to tokens that can't be revoked or that XSS can steal.
+
+## Server-side sessions
+
+<Diagram
+  sequence
+  caption="Session-based auth: the cookie carries only a random ID; the session data lives on the server."
+  chart={`sequenceDiagram
+    participant B as Browser
+    participant S as Server
+    participant R as Session store (Redis)
+    B->>S: POST /login (credentials)
+    S->>R: create session sid=8f3… → { userId: 7, roles }
+    S-->>B: Set-Cookie sid=8f3… (HttpOnly, Secure, SameSite=Lax)
+    B->>S: GET /orders (Cookie: sid=8f3…)
+    S->>R: look up sid → user 7
+    S-->>B: orders for user 7`}
+  notes={[
+    "The user logs in.",
+    "The server stores session data under a long random ID.",
+    "Only the ID goes to the browser, in a cookie JavaScript can't read.",
+    "The browser sends the cookie automatically with each request.",
+    "The server looks up the session — one fast Redis read.",
+    "Logout or revocation is just deleting the session record.",
+  ]}
+/>
+
+Pros: instant **revocation** (delete the record), small cookies, server controls everything, easy to see active sessions. Cons: a lookup per request (cheap with Redis), and a shared store needed across instances.
+
+## JSON Web Tokens
+
+A JWT is three base64url parts: `header.payload.signature`.
+
+```text
+eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0 . eyJzdWIiOiI3Iiwicm9sZSI6ImFkbWluIiwiZXhwIjoxNzY0MDAwMDAwfQ . MEUCIQ…
+{ "alg": "ES256", "kid": "k1" }        { "sub": "7", "role": "admin", "exp": 1764000000,
+                                         "iss": "https://auth.example.com", "aud": "orders-api" }
+```
+
+<Diagram
+  caption="Anyone can read a JWT's payload — it's encoded, not encrypted. The signature only proves it wasn't changed and who issued it."
+  chart={`flowchart LR
+    H["header<br/>alg, kid"] --> SIGN["signature = sign(header.payload,<br/>private key / secret)"]
+    P["payload (claims)<br/>sub, roles, exp, iss, aud"] --> SIGN
+    SIGN --> T["token = header.payload.signature"]
+    T --> V["any service: verify signature<br/>+ exp, iss, aud — no DB lookup"]`}
+  flow
+/>
+
+Pros: **stateless** verification — great across many services and for third-party APIs; contains claims without extra calls. Cons: **revocation is hard** (a stolen token works until `exp`), tokens are larger, claims can go stale (role removed but token still says admin), and many implementation pitfalls.
+
+### JWT rules
+
+- Use asymmetric algorithms (**RS256/ES256/EdDSA**) when many services verify tokens; only the auth service holds the private key. Publish keys via JWKS and rotate them (`kid`).
+- **Pin the algorithm** when verifying; reject `alg: none` and algorithm confusion.
+- Always check `exp`, `iss`, `aud`; keep access tokens **short-lived** (5–15 minutes).
+- **Never put secrets** or sensitive personal data in the payload.
+- Keep tokens small (they ride on every request).
+
+### Revocation with JWTs
+
+- Short access-token lifetime + **refresh tokens** (stored server-side or HttpOnly cookie, rotated on every use, reuse detection → revoke the whole family).
+- A **deny-list** of revoked token IDs (`jti`) checked per request — which reintroduces a lookup, but only for a small set.
+- A per-user **token version** in the database for "log out everywhere".
+
+## Where to store tokens in the browser
+
+| Storage | XSS can steal it? | Sent automatically? | Notes |
+|---|---|---|---|
+| `localStorage` / `sessionStorage` | **yes** | no | avoid for long-lived tokens |
+| JS memory | yes, while page is open | no | lost on refresh; OK for short access tokens |
+| **HttpOnly, Secure, SameSite cookie** | **no** | yes (to same site) | best default; needs CSRF consideration |
+
+For browser apps, the strongest pattern is a session (or tokens held by a BFF) in an **HttpOnly cookie** with `SameSite=Lax` or `Strict`, plus CSRF protection for unsafe methods. Mobile apps store tokens in the platform keychain.
+
+## Choosing
+
+<Diagram
+  caption="A practical rule of thumb."
+  chart={`flowchart TB
+    Q{"Who verifies the credential?"} --> ONE["One web app<br/>(or a BFF)"] --> SESS["Server-side session<br/>in HttpOnly cookie"]
+    Q --> MANY["Many services / APIs,<br/>mobile and third parties"] --> JWT["Short-lived JWT access tokens<br/>+ rotated refresh tokens"]
+    SESS --> MIX["Common hybrid: browser ↔ BFF with session cookie;<br/>BFF ↔ services with short JWTs"]
+    JWT --> MIX`}
+/>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Long-lived JWTs (days) with no revocation.
+- JWTs in `localStorage`.
+- Not validating `aud`/`iss`, or accepting whatever `alg` the header says.
+- Putting personal or secret data in the payload, believing it's encrypted.
+- Using JWTs as "stateless sessions" and then adding a database lookup on every request anyway — just use sessions.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Should you use JWTs or server-side sessions?">
+
+With server-side sessions the browser holds an opaque random ID in an HttpOnly, Secure, SameSite cookie and the server looks up the session in a store like Redis — one cheap lookup, and logout or revocation is instant. JWTs are signed, self-contained tokens: any service can verify them without a lookup, which suits many microservices, mobile clients and third-party APIs, but a stolen token stays valid until it expires and claims can go stale. So for a browser app I usually prefer sessions — or a BFF holding tokens server-side — and for APIs short-lived JWT access tokens of a few minutes, signed asymmetrically with rotated keys, plus refresh tokens that are rotated on each use with reuse detection. I'd always validate signature, algorithm, issuer, audience and expiry, never store tokens in localStorage, and never put sensitive data in the payload, since it's only encoded.
+
+<Fragment slot="deeper">
+
+- **How do you log out a JWT user?** Short expiry plus revoking the refresh token; deny-list `jti` or bump a token version for immediate effect.
+- **HS256 vs RS256?** Shared secret vs key pair — RS/ES lets many verifiers exist without signing power.
+- **Do HttpOnly cookies need CSRF protection?** Yes for state-changing requests — SameSite helps; add tokens or custom headers.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Session ID", "Random opaque identifier referencing server-side session data."],
+  ["JWT", "Signed, self-contained token: header.payload.signature."],
+  ["Claims", "Statements inside a JWT payload (`sub`, `exp`, `aud`, roles…)."],
+  ["Refresh token", "Long-lived credential used to obtain new short-lived access tokens."],
+  ["JWKS", "Published set of public keys used to verify tokens."],
+  ["Token revocation", "Invalidating a credential before its natural expiry."],
+]} />

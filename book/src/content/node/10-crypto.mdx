@@ -1,0 +1,187 @@
+---
+title: "Crypto: hashing, HMAC, passwords and tokens"
+part: Core APIs
+order: 10
+level: core
+summary: The handful of cryptographic tools every backend developer needs — and the mistakes that turn them into vulnerabilities.
+---
+
+Node's `crypto` module (built on OpenSSL) gives you everything a typical backend needs: **hashes** to fingerprint data, **HMACs** to sign it, slow **password hashing** to store credentials, secure **random values** for tokens and IDs, and **encryption**. You don't need to understand the mathematics, but you do need to pick the right tool for each job and avoid a few classic mistakes.
+
+<Analogy>
+  A hash is a fingerprint: easy to take, impossible to turn back into the person, and two different people practically never share one. An HMAC is a wax seal stamped with a ring only you and your partner own — anyone can see the letter, but only the ring holders could have sealed it. A password hash is a fingerprint taken in slow motion, deliberately, so that trying a billion guesses takes years.
+</Analogy>
+
+## Why it matters
+
+Security questions are standard in backend interviews: how do you store passwords? How do you verify a webhook? How are JWTs signed? What's wrong with `Math.random()` for tokens? Getting these wrong leads to real breaches.
+
+## Choosing the right tool
+
+<Diagram
+  caption="Different jobs need different primitives. Using a fast hash for passwords is the most common mistake."
+  chart={`flowchart TB
+    Q{"What do you need?"} --> F["Fingerprint data<br/>(ETag, file checksum, dedupe)"] --> H["Hash: SHA-256"]
+    Q --> S["Prove a message came from<br/>someone with the shared secret"] --> M["HMAC-SHA256"]
+    Q --> P["Store passwords"] --> PW["Slow KDF: argon2id,<br/>scrypt or bcrypt"]
+    Q --> R["Unguessable token / ID"] --> RB["crypto.randomBytes,<br/>randomUUID"]
+    Q --> E["Hide data, reversibly"] --> AE["AES-256-GCM<br/>(authenticated encryption)"]`}
+/>
+
+## Hashing
+
+A hash function turns any input into a fixed-size fingerprint. It's one-way, and any change to the input changes the output completely.
+
+```js
+const crypto = require('node:crypto');
+
+crypto.createHash('sha256').update('hello').digest('hex');
+// '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
+
+// hashing a large file without loading it into memory
+const { pipeline } = require('node:stream/promises');
+const hash = crypto.createHash('sha256');
+await pipeline(fs.createReadStream('video.mp4'), hash);
+const checksum = hash.digest('hex');
+```
+
+Uses: ETags, cache keys, integrity checks, deduplication. Avoid MD5 and SHA-1 for anything security-related — they have known collisions.
+
+## HMAC: signing with a shared secret
+
+An HMAC combines a hash with a secret key. Only someone who knows the key can produce a valid signature. Webhook providers (Stripe, GitHub, Slack) sign their requests this way.
+
+```js
+function verifyWebhook(rawBody, signatureHex, secret) {
+  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest();
+  const received = Buffer.from(signatureHex, 'hex');
+  // constant-time comparison: never use === for secrets
+  return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+}
+```
+
+<Diagram
+  sequence
+  caption="Webhook verification. Only the sender and you know the secret, so a matching HMAC proves the request is genuine and unmodified."
+  chart={`sequenceDiagram
+    participant S as Sender (e.g. Stripe)
+    participant Y as Your server
+    S->>S: sig = HMAC(secret, body)
+    S->>Y: POST body + header signature
+    Y->>Y: expected = HMAC(secret, raw body)
+    Y->>Y: timingSafeEqual(sig, expected)
+    Y-->>S: 200 if equal, 401 otherwise`}
+  notes={[
+    "The sender computes a signature over the exact request body with the shared secret.",
+    "It sends the body plus the signature in a header.",
+    "You recompute the HMAC over the **raw** body bytes — before any JSON parsing changes them.",
+    "Compare in constant time, so an attacker can't learn the signature byte by byte from timing.",
+    "Accept only on a match. Also check a timestamp in the payload to block replays.",
+  ]}
+/>
+
+Two details matter: compute the HMAC over the **raw** request bytes (re-serialised JSON may differ), and compare with **`timingSafeEqual`** — a normal comparison stops at the first different byte, leaking timing information.
+
+## Storing passwords
+
+Never store passwords, and never store a plain fast hash of them. Fast hashes (SHA-256) can be computed billions of times per second on a GPU, so leaked hashes are cracked quickly. Use a **slow, salted key-derivation function**:
+
+- **argon2id** — current best practice (via the `argon2` package).
+- **scrypt** — built into Node.
+- **bcrypt** — older but still acceptable.
+
+```js
+const { scrypt, randomBytes, timingSafeEqual } = require('node:crypto');
+const { promisify } = require('node:util');
+const scryptAsync = promisify(scrypt);
+
+async function hashPassword(password) {
+  const salt = randomBytes(16);                        // unique per user
+  const key = await scryptAsync(password, salt, 64);   // deliberately slow, runs on the thread pool
+  return `${salt.toString('hex')}:${key.toString('hex')}`;
+}
+
+async function verifyPassword(password, stored) {
+  const [saltHex, keyHex] = stored.split(':');
+  const key = await scryptAsync(password, Buffer.from(saltHex, 'hex'), 64);
+  return timingSafeEqual(key, Buffer.from(keyHex, 'hex'));
+}
+```
+
+A **salt** is random data stored with each hash; it makes identical passwords hash differently and defeats precomputed tables. Use the **async** versions: `scryptSync` in a login handler blocks the event loop. Even async, these jobs occupy the libuv thread pool (see *The libuv thread pool*).
+
+## Random values
+
+`Math.random()` is **not** cryptographically secure — its output can be predicted. For anything an attacker shouldn't guess (session IDs, reset tokens, API keys) use `crypto`:
+
+```js
+crypto.randomUUID();                         // 'b3f1…' — v4 UUID
+crypto.randomBytes(32).toString('base64url'); // 256-bit token, URL-safe
+crypto.randomInt(100000, 1000000);           // 6-digit one-time code
+```
+
+Store only a **hash** of long-lived tokens (password reset, API keys) in the database, so a database leak doesn't hand out working tokens.
+
+## JWTs, briefly
+
+A JSON Web Token is `header.payload.signature`, each part base64url-encoded. The signature is either an **HMAC** (HS256 — one shared secret signs and verifies) or an **asymmetric** signature (RS256/ES256 — a private key signs, a public key verifies, so many services can verify without being able to issue tokens).
+
+```js
+const jwt = require('jsonwebtoken');
+const token = jwt.sign({ sub: user.id, role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '15m' });
+const claims = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+```
+
+The payload is **encoded, not encrypted** — anyone can read it. Always pin the allowed algorithms when verifying, keep tokens short-lived, and plan for revocation (short expiry plus refresh tokens, or a deny-list).
+
+## Encryption
+
+When you need to read data back (e.g. storing a third-party API token), use **authenticated encryption** — AES-256-GCM — which detects tampering as well as hiding content:
+
+```js
+function encrypt(plaintext, key) {             // key: 32 random bytes from a secrets manager
+  const iv = crypto.randomBytes(12);           // unique per message — never reuse with the same key
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const data = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), data]).toString('base64');
+}
+```
+
+In practice, prefer a managed key service (AWS KMS, GCP KMS) or a well-reviewed library over hand-rolled crypto.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Storing passwords with SHA-256 or MD5, or without a per-user salt.
+- Comparing signatures or tokens with `===` instead of `timingSafeEqual`.
+- `Math.random()` for tokens.
+- Verifying webhooks against re-serialised JSON instead of the raw body.
+- Putting secrets in JWT payloads, or accepting any algorithm in `jwt.verify`.
+- `pbkdf2Sync`/`scryptSync` in request handlers.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you store user passwords securely?">
+
+I'd never store the password itself or a fast hash of it. I'd use a deliberately slow, salted key-derivation function — argon2id ideally, or scrypt or bcrypt — with a unique random salt per user, stored alongside the hash, and tune its cost so a single hash takes tens of milliseconds. To verify, I recompute with the stored salt and compare in constant time with `timingSafeEqual`. I'd use the async API so hashing runs on the thread pool rather than blocking the event loop, and add rate limiting on the login endpoint, since the hash only protects passwords after a breach.
+
+<Fragment slot="deeper">
+
+- **Hash vs HMAC vs encryption?** Hash: one-way fingerprint. HMAC: keyed signature for integrity and authenticity. Encryption: reversible with a key.
+- **Why `timingSafeEqual`?** Normal comparison returns early on the first mismatch, leaking information through timing.
+- **HS256 vs RS256?** Shared secret versus private/public key pair; RS256 lets many services verify without being able to sign.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Hash", "A one-way, fixed-size fingerprint of data (e.g. SHA-256)."],
+  ["HMAC", "A hash keyed with a secret; proves integrity and authenticity."],
+  ["Salt", "Random per-user data mixed into a password hash."],
+  ["Key-derivation function", "A deliberately slow function for hashing passwords (argon2, scrypt, bcrypt)."],
+  ["Timing attack", "Learning secrets by measuring how long comparisons take."],
+  ["AES-GCM", "Authenticated symmetric encryption that also detects tampering."],
+]} />

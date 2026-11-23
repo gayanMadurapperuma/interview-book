@@ -1,0 +1,156 @@
+---
+title: The OWASP Top 10 and injection attacks
+part: Web security
+order: 7
+level: core
+summary: The most common web application vulnerabilities — injection, XSS, broken access control, SSRF and more — how each attack works and how to prevent it.
+---
+
+The **OWASP Top 10** is a regularly updated list of the most critical web application security risks, compiled by the Open Worldwide Application Security Project from real breach data. It's the shared vocabulary of application security: interviewers, auditors and security teams all refer to it. Most items boil down to a few root causes — **trusting input**, **missing checks**, and **unsafe defaults**.
+
+<Analogy>
+  A list of the ten most common ways burglars get into houses: unlocked back doors, keys under the mat, windows that don't latch. You don't need to be a locksmith to fix most of them — you need to know the list and check every door.
+</Analogy>
+
+## Why it matters
+
+"Explain SQL injection / XSS / CSRF and how to prevent them" are some of the most frequent security interview questions for any backend or full-stack role. Knowing the list lets you review designs and code systematically.
+
+## The list (2021 edition, still the reference)
+
+| # | Risk | In one line |
+|---|---|---|
+| A01 | **Broken access control** | users act outside their permissions (IDOR, missing checks) |
+| A02 | **Cryptographic failures** | sensitive data unencrypted, weak algorithms, bad key handling |
+| A03 | **Injection** | untrusted input interpreted as code: SQL, NoSQL, OS command, LDAP — and XSS |
+| A04 | **Insecure design** | missing security controls by design (no rate limits, no threat model) |
+| A05 | **Security misconfiguration** | defaults, verbose errors, open buckets, unnecessary features |
+| A06 | **Vulnerable and outdated components** | known-vulnerable libraries and frameworks |
+| A07 | **Identification and authentication failures** | weak passwords, credential stuffing, session issues |
+| A08 | **Software and data integrity failures** | unsigned updates, insecure deserialisation, compromised CI/CD |
+| A09 | **Security logging and monitoring failures** | attacks go unnoticed |
+| A10 | **Server-side request forgery (SSRF)** | server fetches attacker-chosen URLs, reaching internal systems |
+
+Access control (A01) and authentication (A07) are covered in the Identity chapters; here we focus on the attacks you're most likely to be asked to explain.
+
+## Injection
+
+Injection happens when **data** is mixed into **code** — a query, a command, a template — so that specially crafted data changes what the code does.
+
+<Diagram
+  caption="SQL injection: the input closes the intended string and adds its own SQL. Parameterised queries send data separately, so it can never become code."
+  chart={`flowchart TB
+    IN["input: ' OR '1'='1"] --> CONCAT["string concatenation<br/>SELECT * FROM users WHERE email = '' OR '1'='1'"]
+    CONCAT --> BAD["returns every user ✗"]
+    IN --> PARAM["parameterised query<br/>SELECT * FROM users WHERE email = $1<br/>params: [ the raw input as data ]"]
+    PARAM --> GOOD["searches for that literal email ✓"]`}
+  steps={[
+    { nodes: ["IN"], text: "An attacker types a crafted value into a login or search form." },
+    { nodes: ["IN", "CONCAT", "BAD"], text: "Concatenated into SQL, the quote ends the string and `OR '1'='1'` becomes part of the query: the condition is always true." },
+    { nodes: ["IN", "PARAM", "GOOD"], text: "With a parameterised query, the driver sends the SQL and the value separately. The value is only ever data — at worst, an odd-looking email that matches nothing." },
+  ]}
+/>
+
+| Injection | Example | Prevention |
+|---|---|---|
+| SQL | string-built queries | parameterised queries / ORM; least-privilege DB user |
+| NoSQL | `{ "password": { "$ne": null } }` in MongoDB | validate types; sanitise operators |
+| OS command | `exec('convert ' + filename)` | avoid shells; `execFile` with argument arrays; allow-lists |
+| Template (SSTI) | user input rendered as a server template | never compile user input as a template |
+| Log injection | newlines in logged input forge entries | structured (JSON) logging |
+
+## Cross-site scripting (XSS)
+
+XSS is injection into **HTML/JavaScript**: the attacker gets their script to run in other users' browsers, inside your site's origin — where it can read the page, act as the user, and steal non-HttpOnly tokens.
+
+<Diagram
+  sequence
+  caption="Stored XSS: malicious script saved in a comment runs in every viewer's browser with the site's privileges."
+  chart={`sequenceDiagram
+    participant At as Attacker
+    participant S as Site
+    participant V as Victim's browser
+    At->>S: post comment containing a script tag
+    S->>S: stores it unescaped
+    V->>S: views the page
+    S-->>V: HTML with the attacker's script
+    V->>V: script runs as the site: reads data, calls APIs`}
+  notes={[
+    "The attacker submits a comment containing a script tag.",
+    "The site saves it without sanitising.",
+    "A normal user opens the page.",
+    "The server sends the comment as raw HTML.",
+    "The browser can't tell it apart from the site's own code, so it runs with the user's session.",
+  ]}
+/>
+
+Types: **stored** (saved, then served to others), **reflected** (echoed from the URL into the response), **DOM-based** (client-side JS writes untrusted data into the page).
+
+Prevention:
+
+- **Output encoding by context** — frameworks like React, Vue and Angular escape text by default. Danger zones: `dangerouslySetInnerHTML`, `v-html`, `innerHTML`, `eval`, building URLs from input (`javascript:` links).
+- **Sanitise** user-supplied HTML (rich text) with a vetted library (DOMPurify) and an allow-list of tags.
+- **Content-Security-Policy** to block inline and third-party scripts (next chapter).
+- **HttpOnly cookies** so scripts can't read session cookies.
+
+## Cross-site request forgery (CSRF)
+
+The attacker's site makes the victim's browser send a request to your site; the browser attaches your cookies automatically, so the request is "authenticated".
+
+```html
+<!-- on evil.example: auto-submits a transfer using the victim's bank cookies -->
+<form action="https://bank.example/transfer" method="POST">
+  <input name="to" value="attacker"><input name="amount" value="1000">
+</form><script>document.forms[0].submit()</script>
+```
+
+Prevention: **`SameSite=Lax/Strict` cookies** (browsers won't send them on most cross-site requests), **CSRF tokens** for cookie-authenticated forms, require a custom header or JSON content type for APIs, never change state with GET. APIs authenticated purely by `Authorization: Bearer` headers aren't vulnerable to classic CSRF (the browser doesn't add them automatically).
+
+## Server-side request forgery (SSRF)
+
+Your server fetches a URL supplied by the user (link previews, webhooks, "import from URL"); the attacker supplies an **internal** address — the cloud metadata service (`http://169.254.169.254/`), an admin panel, a database. Prevention: allow-list destinations; resolve DNS and block private/loopback/link-local ranges (re-check after redirects); use cloud metadata protections (AWS IMDSv2); run fetchers in an isolated network segment.
+
+## Other important items
+
+- **Insecure deserialisation (A08)**: deserialising untrusted data with formats that can instantiate objects (Java serialization, Python pickle, PHP `unserialize`) can lead to remote code execution. Use plain JSON with schema validation.
+- **Security misconfiguration (A05)**: debug mode in production, default credentials, directory listing, public S3 buckets, permissive CORS, stack traces to users. Automate configuration and scan it.
+- **Vulnerable components (A06)**: dependency scanning (npm audit, Dependabot, Snyk), timely updates, SBOMs.
+- **Logging and monitoring (A09)**: log authentication events, access-control failures and admin actions — without secrets — and alert on anomalies.
+- **Path traversal**: `../../etc/passwd` in file names — resolve and verify paths stay inside the allowed directory.
+- **Open redirects**: `?next=https://evil.example` after login — allow-list redirect targets.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Building SQL, shell commands or HTML with string concatenation.
+- Assuming the framework escapes everything (it doesn't in `innerHTML`, attributes, URLs).
+- GET requests that change state.
+- Fetching arbitrary user-supplied URLs from the server.
+- Returning stack traces and framework versions to clients.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Explain SQL injection, XSS and CSRF, and how you prevent each.">
+
+All three come from trusting input or the browser's automatic behaviour. SQL injection is untrusted input concatenated into a query so it changes the query's logic; I prevent it with parameterised queries or an ORM, never string building, plus a least-privilege database user. XSS is untrusted input rendered into a page so the attacker's script runs in other users' browsers with the site's privileges; I prevent it by relying on framework auto-escaping, avoiding raw HTML insertion, sanitising rich text with an allow-list library, a strict Content-Security-Policy, and HttpOnly cookies. CSRF is another site making the user's browser send a state-changing request with their cookies; SameSite cookies stop most of it, and I add CSRF tokens or require custom headers for cookie-authenticated endpoints, and never change state with GET.
+
+<Fragment slot="deeper">
+
+- **Stored vs reflected vs DOM XSS?** Persisted on the server; echoed from the request; created by client-side code.
+- **Are bearer-token APIs vulnerable to CSRF?** Not classically, since browsers don't attach the header automatically.
+- **What is SSRF?** Tricking a server into requesting internal URLs on the attacker's behalf.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["OWASP Top 10", "Industry list of the most critical web application security risks."],
+  ["Injection", "Untrusted input interpreted as code or commands."],
+  ["XSS", "Cross-site scripting: attacker script running in a victim's browser on your origin."],
+  ["CSRF", "Cross-site request forgery: forged requests using the victim's ambient cookies."],
+  ["SSRF", "Server-side request forgery: server fetching attacker-chosen internal URLs."],
+  ["Output encoding", "Escaping data for the context where it's rendered."],
+]} />

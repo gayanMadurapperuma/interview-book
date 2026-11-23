@@ -1,0 +1,158 @@
+---
+title: Replication topologies and conflict resolution
+part: Distributed fundamentals
+order: 9
+level: advanced
+summary: Single-leader, multi-leader and leaderless replication — and what to do when two copies of the same data are changed at the same time.
+---
+
+Replicating data means deciding **who can accept writes**. With a **single leader**, only one node does, so writes never conflict. With **multiple leaders** (for example one per region) or **no leader at all**, different nodes can accept changes to the same data at the same time — and those **conflicts** must be resolved somehow. The options range from simple and lossy (last write wins) to clever and automatic (CRDTs).
+
+<Analogy>
+  A shared shopping list. With a single leader, only one person is allowed to write on the list; everyone else reads a photocopy. With multiple leaders, two people each have their own copy and write on it while out of contact — when they meet up, they must merge: did one of them cross off the milk while the other added more milk?
+</Analogy>
+
+## Why it matters
+
+Multi-region systems, offline-first mobile apps and collaborative editors all face write conflicts. Interviewers ask about the topologies, their trade-offs, and conflict-resolution strategies — especially why last-write-wins loses data.
+
+## Three topologies
+
+<Diagram
+  caption="Single-leader, multi-leader and leaderless replication."
+  chart={`flowchart TB
+    subgraph SL["Single leader"]
+      direction LR
+      L1[("leader")] --> F1[("follower")]
+      L1 --> F2[("follower")]
+    end
+    subgraph ML["Multi-leader"]
+      direction LR
+      EU[("leader EU")] <--> US[("leader US")]
+      US <--> AP[("leader APAC")]
+      AP <--> EU
+    end
+    subgraph LL["Leaderless"]
+      direction LR
+      CL["client"] --> R1[("replica")]
+      CL --> R2[("replica")]
+      CL --> R3[("replica")]
+    end`}
+/>
+
+| | Single leader | Multi-leader | Leaderless |
+|---|---|---|---|
+| Who accepts writes | one node | one per region / device | any replica (quorum) |
+| Write conflicts | none | yes | yes |
+| Write latency for distant users | high (go to the leader) | low (local leader) | low-ish |
+| Survives leader/region loss | after failover | yes | yes |
+| Examples | PostgreSQL, MySQL, MongoDB | multi-region active-active, offline apps, CouchDB | Cassandra, DynamoDB internals, Riak |
+
+Single leader is the default for good reason: no conflicts. Choose the others only when latency or availability across regions or devices demands it.
+
+## How conflicts happen
+
+<Diagram
+  sequence
+  caption="Two regions accept edits to the same record before they hear about each other. When replication catches up, they disagree."
+  chart={`sequenceDiagram
+    participant UE as User (EU)
+    participant EU as Leader EU
+    participant US as Leader US
+    participant UU as User (US)
+    UE->>EU: title = "Quarterly report"
+    UU->>US: title = "Q3 report"
+    EU->>US: replicate "Quarterly report"
+    US->>EU: replicate "Q3 report"
+    Note over EU,US: both received a concurrent change → conflict`}
+  notes={[
+    "A user in Europe edits the document title at their local leader.",
+    "At almost the same moment, a user in the US edits the same title.",
+    "Europe's change replicates to the US…",
+    "…and the US change replicates to Europe. Each leader now holds a different 'latest' value — which one wins?",
+  ]}
+/>
+
+## Resolution strategies
+
+### 1. Avoid conflicts
+
+The best conflict is one that can't happen: route all writes for a given record to **one** leader (its "home" region — e.g. a user's data lives in their region). Conflicts then only occur during failover.
+
+### 2. Last write wins (LWW)
+
+Keep the write with the highest timestamp; discard the others. Simple and used widely (Cassandra's default) — but it **silently loses data**, and with clock skew may keep the *older* write (see *Time and clocks*). Acceptable for data where losing a concurrent update is harmless (a "last seen" time, a cache).
+
+### 3. Keep both (siblings) and merge in the application
+
+Store all concurrent versions (detected with version vectors) and let the application merge them on read — like Amazon's shopping cart, which takes the union of both carts. Correct, but pushes complexity into application code.
+
+### 4. CRDTs: data types that merge automatically
+
+**Conflict-free replicated data types** are designed so that concurrent updates can always be merged, in any order, to the same result — no coordination required.
+
+<Diagram
+  caption="A grow-only counter (G-counter): each replica only increments its own slot; merging takes the max of each slot; the value is the sum. Concurrent increments are never lost."
+  chart={`flowchart LR
+    A["replica A<br/>{A: 3, B: 0}"] --> M["merge: max per slot<br/>{A: 3, B: 2}"]
+    B["replica B<br/>{A: 1, B: 2}"] --> M
+    M --> V["value = 3 + 2 = 5 ✓"]`}
+  steps={[
+    { nodes: ["A"], text: "Replica A has counted 3 likes locally (and has an old view of B)." },
+    { nodes: ["B"], text: "Replica B counted 2 likes locally (and saw 1 from A earlier)." },
+    { nodes: ["A", "B", "M"], text: "Merging takes the maximum of each replica's own slot — never double-counting, never losing increments." },
+    { nodes: ["M", "V"], text: "The total is 5, the same no matter which order replicas merge in." },
+  ]}
+/>
+
+Common CRDTs: counters (G-counter, PN-counter for increments and decrements), sets (OR-set: add and remove safely), registers (LWW-register, multi-value register), maps, and sequence CRDTs for collaborative text (used by Yjs and Automerge). Redis Enterprise and Riak offer CRDT-backed types.
+
+### 5. Operational transformation
+
+Google Docs-style collaborative editors historically used **OT**: transform concurrent edit operations against each other (if you insert at position 5 and I delete position 2, your insert shifts to 4). It needs a central server to order operations; CRDTs are the newer, decentralised alternative.
+
+## Choosing
+
+| Data | Strategy |
+|---|---|
+| Money, stock, uniqueness | single leader per record — avoid conflicts entirely |
+| Likes, views, counters | CRDT counters |
+| Tags, membership, shopping cart | OR-set CRDT or application merge |
+| "Last updated" timestamps, presence | LWW is fine |
+| Collaborative documents | sequence CRDTs (Yjs, Automerge) or OT |
+| Arbitrary records edited in multiple regions | home-region routing; otherwise siblings + merge |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Choosing active-active multi-region writes without a conflict strategy.
+- LWW for data where losing an update matters.
+- Assuming timestamps from different regions are comparable.
+- Forgetting that offline-capable mobile apps are multi-leader systems.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you handle write conflicts in a multi-region system?">
+
+First I'd try to avoid them: single-leader replication, or giving each record a home region so all its writes go to one leader, with async replication elsewhere. If records really must be writable in several places, conflicts are inevitable, and the strategy depends on the data. Last-write-wins is simple but silently drops concurrent updates and depends on clocks, so I'd only use it for things like presence. For counters and sets I'd use CRDTs, which merge deterministically without losing updates. For shopping carts or documents, either keep concurrent versions detected with version vectors and merge them in the application, or use sequence CRDTs or operational transformation for collaborative editing. Anything with strict invariants like balances stays single-leader.
+
+<Fragment slot="deeper">
+
+- **What is a CRDT?** A data type whose replicas can be updated independently and always merge to the same result.
+- **Why does LWW lose data?** It discards every concurrent write but one, and clock skew can pick the wrong one.
+- **Why is an offline mobile app multi-leader?** Each device accepts writes while disconnected and syncs later.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Single-leader replication", "One node accepts writes; others follow."],
+  ["Multi-leader replication", "Several nodes accept writes and replicate to each other."],
+  ["Leaderless replication", "Any replica accepts writes, coordinated by quorums."],
+  ["Last write wins", "Resolving conflicts by keeping the write with the latest timestamp."],
+  ["CRDT", "Conflict-free replicated data type: merges concurrent updates automatically."],
+  ["Operational transformation", "Adjusting concurrent edit operations so they can be applied in any order."],
+]} />

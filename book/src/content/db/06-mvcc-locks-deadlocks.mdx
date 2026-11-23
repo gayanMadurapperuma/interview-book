@@ -1,0 +1,171 @@
+---
+title: MVCC, locks, deadlocks and vacuum
+part: Transactions
+order: 6
+level: advanced
+summary: How a database lets readers and writers work at the same time without blocking each other — and the locks, deadlocks and clean-up work that come with it.
+---
+
+If every reader had to wait for every writer, busy databases would grind to a halt. Most modern databases (PostgreSQL, MySQL InnoDB, Oracle) use **MVCC — multi-version concurrency control**: instead of overwriting a row in place, an update creates a **new version** of it. Each transaction sees the versions that were committed when its snapshot was taken. Readers never block writers, and writers never block readers. Writers that touch the **same row** still need **locks**, which brings the possibility of **deadlocks**. And old versions pile up, needing **clean-up** (PostgreSQL's VACUUM).
+
+<Analogy>
+  A shared wiki where every edit creates a new revision instead of erasing the old text. Someone who opened the page earlier keeps reading the revision they started with; nobody has to wait. Two people editing the *same paragraph* still have to take turns. And every so often, a librarian deletes old revisions nobody can see any more, or the archive fills the building.
+</Analogy>
+
+## Why it matters
+
+MVCC explains why long-running transactions hurt the whole database, why tables "bloat", why `SELECT` doesn't block `UPDATE`, and how deadlocks arise. Interviewers ask about deadlocks in particular: what they are, how databases detect them, and how to prevent them.
+
+## How MVCC works
+
+In PostgreSQL every row version carries two hidden fields: `xmin` (the transaction that created it) and `xmax` (the transaction that deleted or replaced it).
+
+<Diagram
+  caption="An UPDATE writes a new row version and marks the old one as replaced. Each transaction picks the version visible to its snapshot."
+  chart={`flowchart LR
+    V1["version 1<br/>balance = 100<br/>xmin 50 · xmax 80"] --> V2["version 2<br/>balance = 60<br/>xmin 80 · xmax —"]
+    T1(("old transaction<br/>snapshot before 80")) -. "sees" .-> V1
+    T2(("new transaction<br/>snapshot after 80")) -. "sees" .-> V2
+    VAC["VACUUM"] -. "removes once no<br/>snapshot needs it" .-> V1`}
+  steps={[
+    { nodes: ["V1"], text: "Transaction 50 inserted the row with balance 100." },
+    { nodes: ["V1", "V2"], text: "Transaction 80 updates it to 60: a **new version** is written, and the old one is stamped `xmax = 80`. Nothing is overwritten." },
+    { nodes: ["T1", "V1"], text: "A transaction whose snapshot predates 80 still sees balance 100 — consistently, without waiting for anyone." },
+    { nodes: ["T2", "V2"], text: "Newer transactions see 60." },
+    { nodes: ["VAC", "V1"], text: "Once no running transaction could need version 1, VACUUM reclaims its space." },
+  ]}
+/>
+
+Consequences:
+
+- **Reads don't take row locks** and don't block writes (and vice versa).
+- An `UPDATE` is internally an insert of a new version plus marking the old one dead — so update-heavy tables accumulate **dead tuples**.
+- A **long-running transaction** (or one left "idle in transaction") pins old versions: VACUUM can't remove anything newer than its snapshot, so tables and indexes bloat everywhere.
+
+## VACUUM and bloat
+
+PostgreSQL's **autovacuum** removes dead versions, updates planner statistics and prevents **transaction ID wraparound** (IDs are 32-bit and must be "frozen" periodically). Symptoms of trouble: tables much larger than their live data, slowing queries, warnings about wraparound. Fixes: kill long idle-in-transaction sessions (`idle_in_transaction_session_timeout`), tune autovacuum for hot tables, avoid huge updates in one transaction.
+
+MySQL InnoDB stores old versions in an **undo log** instead of the table; long transactions grow the undo history ("history list length") similarly.
+
+## Locks
+
+Writers still need to coordinate when they touch the **same** row.
+
+| Lock | Taken by | Blocks |
+|---|---|---|
+| Row exclusive (write) lock | `UPDATE`, `DELETE`, `SELECT … FOR UPDATE` | other writers and `FOR UPDATE` on that row, until commit |
+| Row share lock | `SELECT … FOR SHARE` | writers of that row |
+| Table locks | DDL like `ALTER TABLE` (strong) | can block **all** queries on the table |
+| Advisory locks | `pg_advisory_lock(key)` | others asking for the same key (app-defined) |
+
+Useful variants:
+
+```sql
+-- job queue: grab the next unclaimed job without waiting on rows others hold
+SELECT id FROM jobs
+WHERE status = 'queued'
+ORDER BY created_at
+FOR UPDATE SKIP LOCKED
+LIMIT 1;
+
+-- fail immediately instead of waiting
+SELECT * FROM accounts WHERE id = 1 FOR UPDATE NOWAIT;
+```
+
+`SKIP LOCKED` lets many workers pull jobs from one table concurrently — a simple, reliable queue on PostgreSQL.
+
+<Callout type="pitfall" title="Migrations and lock queues">
+  `ALTER TABLE` needs a strong table lock. If a long query is running, the `ALTER` waits — and every new query on that table queues **behind** the `ALTER`. One slow report plus one migration can take an API down. Set `lock_timeout` for migrations and retry.
+</Callout>
+
+## Deadlocks
+
+A **deadlock** is two (or more) transactions each holding a lock the other needs. Neither can proceed.
+
+<Diagram
+  sequence
+  caption="Two transfers in opposite directions lock rows in opposite order. Each waits for the other forever — until the database detects it and aborts one."
+  chart={`sequenceDiagram
+    participant T1 as Transfer A→B
+    participant RA as row A
+    participant RB as row B
+    participant T2 as Transfer B→A
+    T1->>RA: lock A (update)
+    T2->>RB: lock B (update)
+    T1->>RB: wants B… waits for T2
+    T2->>RA: wants A… waits for T1
+    RA-->>T2: deadlock detected → T2 aborted
+    RB-->>T1: T1 gets B, commits`}
+  notes={[
+    "Transfer 1 updates account A first, locking it.",
+    "Simultaneously, transfer 2 updates account B first, locking it.",
+    "Transfer 1 now needs B, held by transfer 2. It waits.",
+    "Transfer 2 needs A, held by transfer 1. A cycle: neither can ever proceed.",
+    "The database's deadlock detector (after about 1 s in PostgreSQL) aborts one victim with an error.",
+    "The survivor continues. The application must retry the aborted transaction.",
+  ]}
+/>
+
+### Preventing deadlocks
+
+- **Lock in a consistent order.** Always update accounts in ascending ID order, whatever the transfer direction:
+
+```js
+const [first, second] = fromId < toId ? [fromId, toId] : [toId, fromId];
+await client.query('SELECT id FROM accounts WHERE id IN ($1, $2) ORDER BY id FOR UPDATE', [first, second]);
+```
+
+- **Keep transactions short** so locks are held briefly.
+- **Touch fewer rows**; use conditional updates instead of read-then-write.
+- **Retry** on deadlock errors (PostgreSQL `40P01`) — like serialisation failures, they're expected under contention.
+
+## Optimistic versus pessimistic concurrency
+
+| | Pessimistic | Optimistic |
+|---|---|---|
+| How | lock first (`FOR UPDATE`), then change | change with a condition: `WHERE version = 3`; retry if 0 rows |
+| Best when | conflicts are common, transactions short | conflicts are rare, or across user think-time |
+| Risk | waiting, deadlocks | retries under contention |
+
+```sql
+UPDATE documents
+SET body = $1, version = version + 1
+WHERE id = $2 AND version = $3;      -- 0 rows affected → someone else saved first
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Leaving transactions open while waiting for HTTP calls or user input.
+- Locking rows in inconsistent orders across code paths.
+- Not retrying on deadlock or serialisation errors.
+- Running large DDL on busy tables without `lock_timeout`.
+- Ignoring table bloat and autovacuum on update-heavy tables.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is MVCC, and how do deadlocks happen?">
+
+With MVCC, an update doesn't overwrite a row; it creates a new version, and each transaction reads the versions visible to its snapshot. So readers never block writers and vice versa, which is why databases like PostgreSQL handle mixed workloads well. The cost is that old versions accumulate and must be cleaned up — VACUUM in PostgreSQL — and long-running transactions prevent that clean-up, causing bloat. Writers to the same row still take locks until commit. A deadlock happens when two transactions each hold a lock the other needs — classically two transfers locking accounts in opposite order. The database detects the cycle and aborts one, so I prevent them by locking rows in a consistent order and keeping transactions short, and I retry on deadlock errors.
+
+<Fragment slot="deeper">
+
+- **Why do long transactions hurt everyone?** They pin old row versions, so vacuum can't reclaim space, and they hold locks.
+- **What does `SKIP LOCKED` do?** Skips rows locked by others — ideal for job queues.
+- **Optimistic vs pessimistic locking?** Version check at write vs lock up front.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["MVCC", "Multi-version concurrency control: updates create new row versions read by snapshot."],
+  ["Dead tuple", "An old row version no transaction can see any more."],
+  ["VACUUM", "PostgreSQL process that reclaims dead tuples and updates statistics."],
+  ["Row lock", "A lock on a specific row held by a writer until commit."],
+  ["Deadlock", "Transactions waiting on each other's locks in a cycle."],
+  ["`SKIP LOCKED`", "Skip rows locked by others instead of waiting."],
+]} />

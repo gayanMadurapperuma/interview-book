@@ -1,0 +1,148 @@
+---
+title: Back-of-the-envelope estimation
+part: The interview
+order: 2
+level: foundation
+summary: Turning "100 million users" into requests per second, gigabytes per day and number of machines — with round numbers you can do in your head.
+---
+
+**Back-of-the-envelope estimation** means quickly calculating the rough size of a system: how many requests per second, how much storage per year, how much bandwidth, how many servers. The goal is the right **order of magnitude** — is it 10, 1,000 or 1,000,000 per second? — because that decides the architecture. Precision doesn't matter; clear, quick reasoning does.
+
+<Analogy>
+  Planning a party. You don't need to know that exactly 47 guests will eat 3.2 slices of pizza each. You need to know whether it's "two pizzas", "twenty pizzas" or "call a caterer". Estimation is deciding which of those you're in.
+</Analogy>
+
+## Why it matters
+
+Interviewers expect a quick estimate early in any design, and they watch whether you use it — "so one database is fine" or "so we need to shard". It's also how real teams decide whether a design will survive launch day.
+
+## Numbers worth memorising
+
+### Time
+
+| Unit | Seconds (rounded) |
+|---|---|
+| 1 day | 86,400 ≈ **10⁵** (100k) |
+| 1 month | ≈ 2.5 × 10⁶ |
+| 1 year | ≈ 3 × 10⁷ |
+
+So: **1 million requests per day ≈ 12 per second**. That conversion alone answers half of all estimates.
+
+### Sizes
+
+| Thing | Approx. size |
+|---|---|
+| A UUID / ID | 16 bytes (8 for a bigint) |
+| A short text field / URL | 100 bytes |
+| A typical JSON row / tweet with metadata | 1 KB |
+| A compressed photo | 200 KB – 2 MB |
+| A minute of compressed video (HD) | ~10–50 MB |
+
+Powers of two: KB = 10³, MB = 10⁶, GB = 10⁹, TB = 10¹², PB = 10¹⁵ bytes.
+
+### Latency (orders of magnitude)
+
+<Diagram
+  caption="Rough latencies. Memory is ~1,000× faster than SSD; a cross-continent round trip is ~1,000× slower than a datacentre round trip."
+  chart={`flowchart LR
+    M["Memory read<br/>~100 ns"] --> S["SSD random read<br/>~100 µs"]
+    S --> DC["Round trip in a datacentre<br/>~0.5 ms"]
+    DC --> D["Disk seek (HDD)<br/>~10 ms"]
+    D --> X["Round trip<br/>Europe ↔ US<br/>~80–150 ms"]`}
+/>
+
+### Capacity rules of thumb
+
+| Component | Ballpark |
+|---|---|
+| One stateless app server (simple API) | 1,000–10,000 req/s |
+| One PostgreSQL/MySQL primary | ~10k simple writes/s, more reads; 1–10 TB comfortable |
+| One Redis instance | ~100k ops/s |
+| One Kafka partition | ~10 MB/s |
+| A typical server | 32–128 GB RAM, 10 Gbps network |
+
+These are assumptions to state, not facts to defend: "assuming a server handles ~5k requests per second…".
+
+## The method
+
+<Diagram
+  caption="From users to machines, in four steps."
+  chart={`flowchart LR
+    U["Users<br/>DAU × actions/user"] --> Q["Traffic<br/>requests/day → /s<br/>× peak factor"]
+    Q --> ST["Storage<br/>writes/day × size<br/>× retention × replication"]
+    ST --> BW["Bandwidth<br/>req/s × payload"]
+    BW --> M["Machines / shards<br/>÷ per-node capacity"]`}
+  steps={[
+    { nodes: ["U"], text: "Start from users: daily active users × actions per user per day." },
+    { nodes: ["U", "Q"], text: "Convert to per second (divide by ~10⁵) and multiply by a peak factor (2–5×)." },
+    { nodes: ["Q", "ST"], text: "Storage: writes per day × size per write × days of retention, × 3 for replication." },
+    { nodes: ["ST", "BW"], text: "Bandwidth: requests per second × response size." },
+    { nodes: ["BW", "M"], text: "Divide by what one machine can do to get servers, shards or cache size." },
+  ]}
+/>
+
+## Worked example: a photo-sharing app
+
+Assumptions (say them aloud): 50 million DAU; each user views 50 photos and uploads 0.2 photos per day; average photo 500 KB; keep photos forever.
+
+**Traffic**
+
+- Views: 50M × 50 = 2.5 × 10⁹ per day ÷ 10⁵ ≈ **25,000 reads/s**; peak ×3 ≈ **75,000/s**.
+- Uploads: 50M × 0.2 = 10⁷ per day ÷ 10⁵ ≈ **100 writes/s**; peak ≈ 300/s.
+- Read:write ratio ≈ 250:1 → **read-heavy**: caching and a CDN matter most.
+
+**Storage**
+
+- Photos: 10⁷ × 500 KB = 5 × 10¹² = **5 TB per day** → ~1.8 PB per year → **object storage** (S3), not a database.
+- Metadata: 10⁷ × 1 KB = 10 GB/day → ~3.6 TB/year → a database is fine, sharding later.
+
+**Bandwidth**
+
+- 25,000 views/s × 500 KB ≈ 12.5 GB/s average egress → must be served by a **CDN**; no origin server fleet should carry that.
+
+**Conclusions** — the real point:
+
+1. Photos in object storage behind a CDN.
+2. Metadata in a relational DB with read replicas and a cache; plan sharding by user ID within a year or two.
+3. Uploads go directly to object storage via pre-signed URLs, keeping API servers light.
+
+## Other quick calculations
+
+- **Cache size**: cache the hottest 20% of daily reads. 2.5 × 10⁹ views/day → ~5 × 10⁸ distinct items × 1 KB metadata × 20% ≈ 100 GB → a small Redis cluster.
+- **ID space**: 10⁷ new items/day × 365 × 10 years ≈ 3.65 × 10¹⁰ → needs more than 32 bits (4 × 10⁹); use 64-bit IDs. A 7-character base62 code gives 62⁷ ≈ 3.5 × 10¹² combinations.
+- **Little's Law** for concurrency: in-flight requests = arrival rate × latency. 2,000 req/s × 0.05 s = **100 concurrent requests** (see *Queueing theory*).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Spending ten minutes on arithmetic precision.
+- Forgetting peak traffic (×2–5) or replication (×3) for storage.
+- Calculating numbers and never using them to make a decision.
+- Mixing up bits and bytes for bandwidth (network speeds are usually in bits).
+- Not stating assumptions, so the interviewer can't follow or correct you.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Estimate the storage and traffic for a service with 50 million daily users uploading photos.">
+
+I'd state assumptions first — say each user uploads 0.2 photos and views 50 per day, at about 500 KB per photo. Uploads are 10 million a day; dividing by roughly 100,000 seconds gives about 100 per second, maybe 300 at peak. Views are 2.5 billion a day, about 25,000 per second average. Storage is 10 million times 500 KB, so roughly 5 terabytes a day, nearly 2 petabytes a year — clearly object storage. Serving views is around 12 GB per second of egress, so a CDN is essential. Metadata is only about 10 GB a day, so a relational database with replicas and caching handles it for a long while. The 250-to-1 read ratio tells me to optimise reads.
+
+<Fragment slot="deeper">
+
+- **How many seconds in a day?** ~86,400 ≈ 10⁵; 1M/day ≈ 12/s.
+- **Why multiply storage by 3?** Replication for durability (and backups on top).
+- **How do estimates change the design?** They decide caching, CDNs, sharding, and whether data belongs in a DB or object storage.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["DAU", "Daily active users."],
+  ["QPS / RPS", "Queries or requests per second."],
+  ["Peak factor", "Multiplier from average to peak traffic, typically 2–5×."],
+  ["Read:write ratio", "How read-heavy a workload is; drives caching decisions."],
+  ["Egress", "Data sent out from your servers to clients."],
+]} />

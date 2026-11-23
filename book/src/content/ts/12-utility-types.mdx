@@ -1,0 +1,146 @@
+---
+title: Utility types
+part: Type-level programming
+order: 12
+level: core
+summary: The built-in toolbox for deriving new types from existing ones — Partial, Pick, Omit, Record, ReturnType and friends — so types stay in sync with a single source of truth.
+---
+
+**Utility types** are generic types built into TypeScript that transform other types: make all properties optional (`Partial`), choose some (`Pick`), drop some (`Omit`), build a dictionary (`Record`), extract a function's return type (`ReturnType`), unwrap a promise (`Awaited`) and more. Their main value is **deriving** types from one source of truth instead of copying fields around, so a change in one place flows everywhere.
+
+<Analogy>
+  A master recipe and its variations. Instead of writing out a separate "vegan version" and "half-portion version" by hand (and forgetting to update them when the master changes), you write the master once and apply transformations: "remove the dairy", "halve everything". Utility types are those transformations for types.
+</Analogy>
+
+## Why it matters
+
+Interviewers often ask you to type an update DTO, a dictionary, or "the return type of this function". Using utility types well is a strong signal of TypeScript fluency — and they're the building blocks for the mapped and conditional types in the next chapter.
+
+## The essentials
+
+```ts
+interface User {
+  id: string;
+  email: string;
+  name: string;
+  role: 'admin' | 'member';
+  passwordHash: string;
+  createdAt: Date;
+}
+```
+
+| Utility | Result | Typical use |
+|---|---|---|
+| `Partial<User>` | every property optional | PATCH payloads, defaults merging |
+| `Required<T>` | every property required | after defaults are applied |
+| `Readonly<User>` | every property readonly | immutable config/state |
+| `Pick<User, 'id' \| 'name'>` | only those properties | public views, list items |
+| `Omit<User, 'passwordHash'>` | all except those | safe API responses |
+| `Record<'admin' \| 'member', string[]>` | object with those keys and value type | lookup tables, dictionaries |
+| `Exclude<'a' \| 'b' \| 'c', 'a'>` | `'b' \| 'c'` | remove union members |
+| `Extract<T, U>` | members of T assignable to U | filter unions |
+| `NonNullable<string \| null>` | `string` | strip null/undefined |
+| `ReturnType<typeof fn>` | fn's return type | types from existing functions |
+| `Parameters<typeof fn>` | tuple of fn's parameters | wrappers, decorators |
+| `Awaited<Promise<User>>` | `User` | unwrap promises |
+| `InstanceType<typeof Cls>` | instance type of a class | factories |
+| `NoInfer<T>` | blocks inference from this position | control which argument drives inference |
+
+## Deriving DTOs from one model
+
+<Diagram
+  caption="One source type, many derived types. Add a field to User and every derived type updates automatically."
+  chart={`flowchart TB
+    U["User<br/>(source of truth)"] --> PUB["PublicUser = Omit of User, 'passwordHash'"]
+    U --> CR["CreateUserInput = Pick of User, 'email' | 'name'<br/>& { password: string }"]
+    U --> UP["UpdateUserInput = Partial of Pick of User, 'name' | 'role'"]
+    U --> LI["UserListItem = Pick of User, 'id' | 'name'"]
+    U --> BY["UsersByRole = Record of User role, User[]"]`}
+  steps={[
+    { nodes: ["U"], text: "The domain model is defined once." },
+    { nodes: ["U", "PUB"], text: "The API response type removes the secret field — it can never accidentally be included if you type responses with it." },
+    { nodes: ["U", "CR", "UP"], text: "Input types pick the writable fields; updates make them optional." },
+    { nodes: ["U", "LI", "BY"], text: "List items and lookups derive too. Rename `name` to `displayName` and the compiler shows every affected place." },
+  ]}
+/>
+
+```ts
+type PublicUser = Omit<User, 'passwordHash'>;
+type CreateUserInput = Pick<User, 'email' | 'name'> & { password: string };
+type UpdateUserInput = Partial<Pick<User, 'name' | 'role'>>;
+type UsersByRole = Record<User['role'], User[]>;
+```
+
+## Types from values and functions
+
+Often the source of truth is **code**, not a type:
+
+```ts
+export function createStore(initial: { count: number }) {
+  return { state: initial, increment() { /* … */ } };
+}
+export type Store = ReturnType<typeof createStore>;
+
+async function fetchOrders(customerId: string, opts?: { limit: number }) { /* … */ return [] as Order[]; }
+type FetchOrdersArgs = Parameters<typeof fetchOrders>;      // [customerId: string, opts?: { limit: number }]
+type Orders = Awaited<ReturnType<typeof fetchOrders>>;     // Order[]
+
+const ROLE_LABELS = { admin: 'Administrator', member: 'Member' } as const;
+type Role = keyof typeof ROLE_LABELS;                     // 'admin' | 'member'
+```
+
+## `Record` and exhaustive maps
+
+`Record<Union, V>` requires a value for **every** member — a compile-time exhaustiveness check for lookup tables:
+
+```ts
+type Status = 'pending' | 'paid' | 'shipped';
+const labels: Record<Status, string> = {
+  pending: 'Awaiting payment',
+  paid: 'Paid',
+  shipped: 'On its way',            // remove one → compile error; add a status → compile error here
+};
+```
+
+For dictionaries with arbitrary keys, `Record<string, V>` claims every key exists; with `noUncheckedIndexedAccess` on, reads are typed `V | undefined`, which is more honest.
+
+## Partial pitfalls
+
+- `Partial` is **shallow**: nested objects stay required inside. Write a `DeepPartial` (next chapter) if needed.
+- `Partial<User>` for PATCH also allows `{}` and doesn't distinguish "not provided" from `undefined` — validate at runtime anyway.
+- `Omit` doesn't check that the keys exist (`Omit<User, 'pasword'>` silently does nothing) — a strict variant is easy to write.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Copy-pasting fields into new interfaces instead of deriving them.
+- Typing API responses with the full model and leaking secrets.
+- Forgetting `typeof` when deriving from values (`ReturnType<createStore>` is an error).
+- Assuming `Partial`/`Readonly` are deep.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you avoid duplicating types for create, update and response DTOs?">
+
+I keep one source type — the domain model, or a zod schema I infer it from — and derive the rest with utility types. The public response is `Omit<User, 'passwordHash'>`, so secrets can't slip in; the create input is `Pick` of the writable fields plus anything extra like a password; the update input is `Partial` of the editable fields; lookup tables use `Record<Role, …>`, which also forces every member to be handled. When the source of truth is code, I derive types from it with `ReturnType`, `Parameters`, `Awaited` and `keyof typeof`. Changing the model then updates every derived type and the compiler shows what else must change. I remember that `Partial` and `Readonly` are shallow and that compile-time types don't replace runtime validation of input.
+
+<Fragment slot="deeper">
+
+- **`Pick` vs `Omit`?** Choose properties to keep vs to remove.
+- **`Exclude` vs `Omit`?** `Exclude` filters union members; `Omit` removes object properties.
+- **What does `Awaited` handle?** Nested promises and thenables, recursively.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Utility type", "Built-in generic that transforms a type."],
+  ["`Partial` / `Required`", "Make all properties optional / required (shallow)."],
+  ["`Pick` / `Omit`", "Keep / remove listed properties."],
+  ["`Record<K, V>`", "Object type with keys K and values V."],
+  ["`ReturnType` / `Parameters`", "Extract a function's return / parameter types."],
+  ["`typeof` (type position)", "Gets the type of a value for use in type expressions."],
+]} />

@@ -1,0 +1,258 @@
+---
+title: Iterators and generators
+part: Asynchrony
+order: 22
+level: advanced
+summary: The protocol behind for...of and spread, and functions that can pause halfway and resume later — the machinery underneath async/await.
+demo: js-generators
+---
+
+An **iterator** is an object that hands out values one at a time when you call its `next()` method. Anything that can produce an iterator is **iterable** — arrays, strings, `Map`, `Set` and many more. That is what `for...of`, spread (`...`) and destructuring use under the hood. A **generator** is a special function that makes writing iterators easy: it can **pause** at each `yield` and **resume** later from exactly the same spot.
+
+<Analogy>
+  An iterator is like a ticket dispenser at a deli counter: each pull gives you the next number, and it knows when it has run out. A generator is like a storyteller who stops at a cliffhanger each evening (`yield`) and picks up from the same sentence the next night (`next()`), remembering everything that happened so far.
+</Analogy>
+
+## Why it matters
+
+These features power `for...of`, lazy data pipelines, paginated API clients and streams. Generators are also how `async/await` was first implemented, so understanding them shows you really know how suspension works. Async iterators (`for await...of`) are the modern way to consume streams in Node.
+
+## The iteration protocol
+
+Two small contracts:
+
+- **Iterable:** an object with a `[Symbol.iterator]()` method that returns an iterator.
+- **Iterator:** an object with a `next()` method returning `{ value, done }`.
+
+```js
+const it = ['a', 'b'][Symbol.iterator]();
+it.next();  // { value: 'a', done: false }
+it.next();  // { value: 'b', done: false }
+it.next();  // { value: undefined, done: true }
+```
+
+<Diagram
+  sequence
+  caption="for...of asks the iterable for an iterator, then calls next() until done is true."
+  chart={`sequenceDiagram
+    participant L as for...of
+    participant A as iterable
+    participant I as iterator
+    L->>A: [Symbol.iterator]()
+    A-->>L: iterator
+    L->>I: next()
+    I-->>L: { value: 'a', done: false }
+    L->>I: next()
+    I-->>L: { value: 'b', done: false }
+    L->>I: next()
+    I-->>L: { done: true } → loop ends`}
+  notes={[
+    "The loop first asks the object for an iterator.",
+    "It gets back an object with a `next` method.",
+    "First pull…",
+    "…gives `'a'`. The loop body runs with it.",
+    "Second pull…",
+    "…gives `'b'`.",
+    "Third pull…",
+    "…reports `done: true`, and the loop stops.",
+  ]}
+/>
+
+### Making your own object iterable
+
+```js
+class Range {
+  constructor(from, to) { this.from = from; this.to = to; }
+  [Symbol.iterator]() {
+    let current = this.from;
+    const last = this.to;
+    return {
+      next: () => current <= last
+        ? { value: current++, done: false }
+        : { value: undefined, done: true },
+    };
+  }
+}
+
+for (const n of new Range(1, 3)) console.log(n);  // 1, 2, 3
+[...new Range(1, 5)];                              // [1, 2, 3, 4, 5]
+```
+
+## Generators
+
+A generator function is written with `function*`. Calling it **does not run the body**. It returns a generator object (which is both an iterator and an iterable). Each `next()` runs the body until the next `yield`, then pauses.
+
+```js
+function* range(from, to) {
+  for (let i = from; i <= to; i++) {
+    yield i;           // hand out i and pause here
+  }
+}
+
+const gen = range(1, 3);
+gen.next();   // { value: 1, done: false }
+[...gen];     // [2, 3] — continues from where it paused
+```
+
+The `Range` class above shrinks to:
+
+```js
+class Range {
+  constructor(from, to) { this.from = from; this.to = to; }
+  *[Symbol.iterator]() {
+    for (let i = this.from; i <= this.to; i++) yield i;
+  }
+}
+```
+
+<Diagram
+  caption="A generator moves between these states. While suspended, its local variables are kept alive on the heap."
+  chart={`stateDiagram-v2
+    [*] --> SuspendedStart: call gen()
+    SuspendedStart --> Running: next()
+    Running --> SuspendedYield: yield value
+    SuspendedYield --> Running: next(v)
+    Running --> Completed: return / end of body
+    Running --> Completed: throw
+    Completed --> Completed: next() → done: true`}
+/>
+
+### Two-way communication
+
+The value you pass to `next(v)` becomes the **result of the paused `yield` expression** inside the generator.
+
+```js
+function* dialogue() {
+  const a = yield 'first question';
+  const b = yield `got ${a}, second question`;
+  return a + b;
+}
+const d = dialogue();
+d.next();        // { value: 'first question', done: false }   — runs to the first yield
+d.next(10);      // { value: 'got 10, second question', done: false } — a = 10
+d.next(20);      // { value: 30, done: true }                   — b = 20
+```
+
+<DemoLink id="js-generators" />
+
+That pause-and-resume ability, plus feeding values back in, is exactly what `async/await` needs: pause at `await`, and when the promise resolves, call `next(result)`. Before native `async` functions, libraries like `co` did precisely this with generators.
+
+## Laziness
+
+Generators only compute values when asked, so they can describe huge or even infinite sequences cheaply.
+
+```js
+function* naturals() {
+  let n = 1;
+  while (true) yield n++;     // infinite, but only runs on demand
+}
+
+function* take(iter, count) {
+  for (const x of iter) {
+    if (count-- <= 0) return;
+    yield x;
+  }
+}
+
+function* filter(iter, pred) {
+  for (const x of iter) if (pred(x)) yield x;
+}
+
+[...take(filter(naturals(), (n) => n % 7 === 0), 3)];   // [7, 14, 21]
+```
+
+<Diagram
+  caption="A lazy pipeline pulls one value at a time through each stage. Nothing is computed until the consumer asks."
+  chart={`flowchart RL
+    C["consumer [...]"] -- "next()" --> T["take(3)"]
+    T -- "next()" --> F["filter(n % 7)"]
+    F -- "next() × 7" --> N["naturals()"]
+    N -. "1…7" .-> F
+    F -. "7" .-> T
+    T -. "7" .-> C`}
+  flow
+/>
+
+New built-in **iterator helpers** (`.map`, `.filter`, `.take`, `.toArray` directly on iterators) bring this style without writing generators: `naturals().filter((n) => n % 7 === 0).take(3).toArray()`.
+
+## Async iterators and `for await`
+
+An **async iterator**'s `next()` returns a **promise** of `{ value, done }`. `for await...of` consumes them, awaiting each step. Async generators (`async function*`) can both `await` and `yield`.
+
+```js
+async function* fetchAllPages(url) {
+  let next = url;
+  while (next) {
+    const res = await fetch(next);
+    const { items, nextPage } = await res.json();
+    yield* items;              // hand out each item of this page
+    next = nextPage;
+  }
+}
+
+for await (const order of fetchAllPages('/api/orders')) {
+  process(order);              // pages are fetched only as you consume them
+}
+```
+
+Node streams are async iterable, which is the simplest way to read them line by line:
+
+```js
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
+
+const lines = createInterface({ input: createReadStream('big.log') });
+for await (const line of lines) {
+  if (line.includes('ERROR')) console.log(line);
+}
+```
+
+## Early exit and cleanup
+
+If a `for...of` loop exits early (`break`, `return` or an error), it calls the iterator's `return()` method. In a generator, that runs any `finally` block — perfect for releasing resources.
+
+```js
+function* readRows(db) {
+  const cursor = db.open();
+  try {
+    while (cursor.hasNext()) yield cursor.next();
+  } finally {
+    cursor.close();            // runs even if the consumer breaks early
+  }
+}
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Expecting code before the first `yield` to run when the generator is created. It runs on the first `next()`.
+- Iterating the same generator twice — it is single-use. Make the class iterable (`*[Symbol.iterator]`) to get a fresh one each time.
+- Using `for...of` on a plain object — objects are not iterable. Use `Object.entries(obj)`.
+- Forgetting that `for await` processes items one at a time — fine for streams, slow for independent requests.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What are generators, and how do they relate to async/await?">
+
+A generator is a function declared with `function*` that can pause at `yield` and later resume. Calling it runs nothing; it returns an iterator, and each `next()` runs the body to the next `yield`, handing out a value. The argument to `next(v)` becomes the result of the paused `yield`, so data flows both ways, and local variables survive between calls. That is exactly what `async/await` needs: an async function is like a generator that yields promises, with a driver calling `next(result)` when each promise resolves. Generators are also great for lazy sequences and custom iterables, and async generators with `for await` are the clean way to consume paginated APIs and Node streams.
+
+<Fragment slot="deeper">
+
+- **What makes an object iterable?** A `[Symbol.iterator]` method returning an object with `next()`.
+- **What does `return()` on an iterator do?** Signals early exit; in a generator it runs `finally` blocks.
+- **Why are generators single-use?** They hold their own position; once completed, they stay completed.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Iterator", "An object with `next()` returning `{ value, done }`."],
+  ["Iterable", "An object with `[Symbol.iterator]()` that returns an iterator."],
+  ["Generator", "A `function*` that can pause at `yield` and resume later."],
+  ["`yield`", "Hands out a value and pauses; evaluates to whatever the next `next(v)` passes in."],
+  ["Async iterator", "An iterator whose `next()` returns a promise; consumed with `for await...of`."],
+  ["Lazy evaluation", "Computing values only when they are requested."],
+]} />

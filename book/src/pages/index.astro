@@ -1,0 +1,125 @@
+---
+import Base from '../layouts/Base.astro';
+import { SUBJECTS, withBase } from '../lib/subjects';
+import { allChapters, subjectOf, slugOf } from '../lib/chapters';
+import { SCENARIOS } from '../demos/catalog';
+
+const all = await allChapters();
+const vols = SUBJECTS.map((s) => {
+  const list = all.filter((c) => subjectOf(c) === s.key);
+  return { ...s, count: list.length, first: list[0], parts: s.parts.filter((p) => list.some((c) => c.data.part === p)) };
+});
+---
+<Base title="The Interview Book" active="home" bodyClass="home">
+  <main id="content" class="home-wrap">
+    <section class="cover">
+      <p class="caps cover-kicker">A reference for software interviews</p>
+      <h1><span class="the">The</span> Interview Book</h1>
+      <p class="cover-sub">JavaScript, Node.js, TypeScript, databases, system design, APIs, security and Kubernetes — explained from first principles, in plain words, with a diagram for every idea.</p>
+      <p class="cover-meta">
+        <span><b>{vols.length}</b> volumes</span>
+        <span><b>{all.length}</b> chapters</span>
+        <span><b>{SCENARIOS.length}</b> step-through demos</span>
+      </p>
+    </section>
+
+    <section class="howto" aria-labelledby="howto-h">
+      <h2 id="howto-h" class="caps">How to read it</h2>
+      <div class="howto-grid">
+        <p><b>Start simple.</b> Every chapter opens with the idea in plain words and an everyday analogy before any jargon.</p>
+        <p><b>Watch the diagrams.</b> Many figures play step by step — press play, or walk through them at your own pace.</p>
+        <p><b>Practise saying it.</b> Each chapter ends with how to explain the topic out loud in an interview, plus likely follow-ups.</p>
+      </div>
+    </section>
+
+    <section class="contents" aria-labelledby="contents-h">
+      <h2 id="contents-h" class="caps">Contents</h2>
+      <ol class="vol-list">
+        {vols.map((v) => (
+          <li class="vol" data-subject={v.key}>
+            <span class="vol-roman">{v.volume}</span>
+            <div class="vol-main">
+              <h3><a href={withBase(`/${v.key}/`)}>{v.name}</a></h3>
+              <p class="vol-blurb">{v.blurb}</p>
+              <p class="vol-parts">{v.parts.join(' · ')}</p>
+            </div>
+            <div class="vol-side">
+              <span class="vol-count">{v.count} chapters</span>
+              {v.first && <a class="vol-begin" href={withBase(`/${v.key}/${slugOf(v.first)}/`)}>Begin reading →</a>}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+
+    <section class="lab-band" aria-labelledby="lab-h">
+      <div>
+        <p class="caps">Demo Lab</p>
+        <h2 id="lab-h">See the runtime think.</h2>
+        <p>Step through real JavaScript and Node.js programs one line at a time and watch the call stack, queues, thread pool and event loop change. Every demo’s output is checked against real Node.</p>
+      </div>
+      <a class="lab-cta" href={withBase('/demos/')}>Open the Demo Lab →</a>
+    </section>
+  </main>
+</Base>
+
+<style>
+  .home-wrap { max-width: 1040px; margin: 0 auto; padding: 0 32px 40px; }
+  .cover { padding: 96px 0 64px; border-bottom: 1px solid var(--rule); }
+  .cover-kicker { margin: 0 0 22px; }
+  .cover h1 {
+    font-family: var(--font-read); font-weight: 600; color: var(--ink);
+    font-size: clamp(3rem, 8vw, 5.6rem); line-height: 0.98; letter-spacing: -0.035em; margin: 0 0 28px;
+  }
+  .cover h1 .the { display: block; font-style: italic; font-weight: 300; font-size: 0.42em; letter-spacing: -0.01em; color: var(--muted); margin-bottom: 0.15em; }
+  .cover-sub { font-family: var(--font-read); font-size: clamp(1.15rem, 2vw, 1.4rem); line-height: 1.5; color: var(--text); max-width: 34em; margin: 0 0 28px; text-wrap: pretty; }
+  .cover-meta { display: flex; gap: 26px; flex-wrap: wrap; margin: 0; font-size: 13.5px; color: var(--muted); }
+  .cover-meta b { color: var(--ink); font-weight: 650; font-variant-numeric: tabular-nums; }
+
+  .howto { padding: 40px 0; border-bottom: 1px solid var(--rule); }
+  .howto h2, .contents > h2 { margin: 0 0 18px; }
+  .howto-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; }
+  .howto-grid p { margin: 0; font-family: var(--font-read); font-size: 16px; line-height: 1.6; color: var(--text); }
+  .howto-grid b { color: var(--ink); font-weight: 620; }
+
+  .contents { padding: 44px 0 20px; }
+  .vol-list { list-style: none; margin: 0; padding: 0; }
+  .vol {
+    display: grid; grid-template-columns: 72px 1fr 190px; gap: 24px; align-items: start;
+    padding: 28px 0; border-top: 1px solid var(--rule);
+  }
+  .vol:last-child { border-bottom: 1px solid var(--rule); }
+  .vol-roman { font-family: var(--font-read); font-style: italic; font-size: 34px; line-height: 1; color: var(--subj); font-weight: 400; }
+  .vol h3 { margin: 0 0 6px; font-family: var(--font-read); font-size: 26px; font-weight: 600; letter-spacing: -0.015em; }
+  .vol h3 a { color: var(--ink); text-decoration: none; }
+  .vol h3 a:hover { color: var(--subj); }
+  .vol-blurb { margin: 0 0 8px; font-family: var(--font-read); font-size: 16.5px; line-height: 1.55; color: var(--text); max-width: 36em; }
+  .vol-parts { margin: 0; font-size: 12.5px; color: var(--muted); letter-spacing: 0.01em; }
+  .vol-side { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; padding-top: 6px; }
+  .vol-count { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .vol-begin { font-size: 13.5px; font-weight: 600; color: var(--subj); text-decoration: none; }
+  .vol-begin:hover { text-decoration: underline; }
+
+  .lab-band {
+    display: flex; justify-content: space-between; align-items: flex-end; gap: 32px;
+    margin: 36px 0 24px; padding: 32px 34px;
+    background: var(--surface); border-radius: 10px; border: 1px solid var(--rule);
+  }
+  .lab-band .caps { margin: 0 0 8px; color: var(--node); }
+  .lab-band h2 { font-family: var(--font-read); font-size: 28px; font-weight: 600; color: var(--ink); margin: 0 0 8px; letter-spacing: -0.015em; }
+  .lab-band p:last-child { margin: 0; max-width: 38em; font-family: var(--font-read); font-size: 16px; line-height: 1.6; }
+  .lab-cta {
+    flex: none; padding: 11px 18px; border-radius: 6px; background: var(--ink); color: var(--bg);
+    text-decoration: none; font-weight: 600; font-size: 14px;
+  }
+  .lab-cta:hover { opacity: 0.9; }
+
+  @media (max-width: 760px) {
+    .home-wrap { padding: 0 20px 32px; }
+    .cover { padding: 56px 0 40px; }
+    .howto-grid { grid-template-columns: 1fr; gap: 14px; }
+    .vol { grid-template-columns: 44px 1fr; }
+    .vol-side { grid-column: 2; align-items: flex-start; flex-direction: row; gap: 16px; padding: 0; }
+    .lab-band { flex-direction: column; align-items: flex-start; padding: 24px; }
+  }
+</style>

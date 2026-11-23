@@ -1,0 +1,182 @@
+---
+title: EventEmitter and the observer pattern
+part: Core APIs
+order: 6
+level: foundation
+summary: The publish–subscribe building block under streams, servers and sockets. Simple to use — with a couple of surprises about timing and errors.
+demo: node-emitter-sync
+---
+
+An **EventEmitter** is an object that lets other code **subscribe** to named events (`on`) and lets the emitter **announce** those events (`emit`). It's Node's implementation of the **observer pattern**: the emitter doesn't need to know who is listening or what they'll do. Much of Node is built on it — HTTP servers emit `'request'`, streams emit `'data'` and `'end'`, sockets emit `'close'`, `process` emits `'exit'`.
+
+<Analogy>
+  A newsletter. Readers sign up (`on`), the publisher sends an issue (`emit`), and every subscriber gets a copy. The publisher doesn't know or care what each reader does with it. One subtlety: in Node, the publisher hand-delivers every copy personally, one reader at a time, before getting on with their day — `emit` is synchronous.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask how EventEmitter works, whether `emit` is synchronous, what happens with an `'error'` event nobody listens to, and how to avoid listener leaks. It's also a design question: when to use events versus direct calls or promises.
+
+## Basic use
+
+```js
+const { EventEmitter } = require('node:events');
+
+class OrderService extends EventEmitter {
+  place(order) {
+    // …save the order…
+    this.emit('placed', order);            // announce
+  }
+}
+
+const orders = new OrderService();
+orders.on('placed', (o) => sendConfirmationEmail(o));   // subscribe
+orders.on('placed', (o) => reserveStock(o));
+orders.once('placed', () => console.log('first order ever!'));
+
+orders.place({ id: 1 });
+```
+
+Main methods: `on`/`addListener`, `once`, `off`/`removeListener`, `removeAllListeners`, `emit`, `listenerCount`, `prependListener`.
+
+## `emit` is synchronous
+
+This is the most important — and most surprising — fact. `emit` loops over the listeners and **calls each one immediately**, in the order they were registered, on the current call stack. It returns only after all of them return.
+
+<Diagram
+  sequence
+  caption="emit() calls every listener right away, one after another, before returning. Nothing is queued."
+  chart={`sequenceDiagram
+    participant C as Caller
+    participant E as emitter
+    participant L1 as email listener
+    participant L2 as stock listener
+    C->>E: emit('placed', order)
+    E->>L1: call listener 1
+    L1-->>E: returns
+    E->>L2: call listener 2
+    L2-->>E: returns
+    E-->>C: emit returns true`}
+  notes={[
+    "The caller emits an event.",
+    "The first listener runs immediately, on top of `emit` on the call stack.",
+    "It finishes.",
+    "Then the second listener runs.",
+    "It finishes.",
+    "Only now does `emit` return — `true` if there were listeners.",
+  ]}
+/>
+
+<DemoLink id="node-emitter-sync" />
+
+Consequences:
+
+- A slow listener **blocks** the emitter and everything after it.
+- An exception thrown in a listener propagates **out of `emit`** into the code that called it, and later listeners don't run.
+- If a listener is `async`, `emit` doesn't wait for its promise — and a rejection inside it is unhandled unless you opt in to `captureRejections`.
+
+If you want listeners to run later, defer inside the listener (`setImmediate`, `queueMicrotask`) or emit later (`process.nextTick(() => this.emit(...))`).
+
+## The special `'error'` event
+
+If an emitter emits `'error'` and **no listener** is registered for it, Node **throws** the error — which usually crashes the process.
+
+```js
+const e = new EventEmitter();
+e.emit('error', new Error('disk full'));   // throws: Unhandled 'error' event
+```
+
+Every stream, socket and server can emit `'error'`. Always handle it:
+
+```js
+socket.on('error', (err) => logger.warn({ err }, 'socket error'));
+```
+
+## Listener leaks
+
+Adding a listener every time something happens — and never removing it — is a classic leak. Node warns when more than 10 listeners are added for one event on one emitter:
+
+```text
+MaxListenersExceededWarning: Possible EventEmitter memory leak detected.
+11 'message' listeners added to [Socket]. Use emitter.setMaxListeners() to increase limit
+```
+
+```js
+// leak: a new listener on a long-lived emitter for every request
+app.get('/stream', (req, res) => {
+  bus.on('update', (u) => res.write(JSON.stringify(u)));      // never removed!
+});
+
+// fix: remove when the request ends
+app.get('/stream', (req, res) => {
+  const onUpdate = (u) => res.write(JSON.stringify(u));
+  bus.on('update', onUpdate);
+  req.on('close', () => bus.off('update', onUpdate));
+});
+```
+
+Raising `setMaxListeners` silences the warning; it doesn't fix a leak. Only raise it when you genuinely need many listeners.
+
+## Promises and events
+
+`events.once` turns a single event into a promise, and `events.on` turns a stream of events into an async iterator:
+
+```js
+const { once, on } = require('node:events');
+
+await once(server, 'listening');            // wait for one event
+const [code] = await once(child, 'exit');
+
+for await (const [msg] of on(socket, 'message')) {   // consume events in a loop
+  handle(msg);
+}
+```
+
+Pass an `AbortSignal` to stop waiting. `EventTarget` (the browser-style API with `addEventListener`) is also available in Node, mostly for web-compatible code.
+
+## When to use events
+
+<Diagram
+  caption="Events decouple the announcer from the reactors. Direct calls and promises are clearer when there is exactly one consumer that must succeed."
+  chart={`flowchart TB
+    Q{"How many parties care,<br/>and must they succeed?"} --> M["Many, optional reactions<br/>(logging, metrics, notifications)"] --> EV["EventEmitter"]
+    Q --> O["One consumer,<br/>result needed"] --> P["Function call / promise"]
+    Q --> X["Other services,<br/>must not be lost"] --> MQ["Message queue<br/>(durable)"]`}
+/>
+
+In-process events are lost if the process crashes and listeners run on the same thread. For cross-service or must-not-lose events, use a durable message broker (see System Design).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Assuming `emit` is asynchronous.
+- No `'error'` listener on streams, sockets or custom emitters.
+- `async` listeners whose rejections nobody handles.
+- Adding listeners per request to long-lived emitters without removing them.
+- Raising `setMaxListeners(0)` to hide a leak warning.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does EventEmitter work, and is emit synchronous?">
+
+An EventEmitter keeps a map from event names to arrays of listener functions. `on` appends a listener, `once` wraps one that removes itself, and `emit` looks up the array and calls each listener in order, synchronously, with the arguments — so `emit` returns only after all listeners have run, and an exception in a listener propagates to the emitter's caller. The `'error'` event is special: emitting it with no listener throws, which typically crashes the process, so every stream or socket needs an error handler. The common production problem is listener leaks — adding listeners per request to long-lived emitters — which Node warns about after ten.
+
+<Fragment slot="deeper">
+
+- **How do you make listeners run asynchronously?** Defer inside them or emit via `process.nextTick`/`setImmediate`.
+- **What about async listeners?** Their promises are ignored; enable `captureRejections` or handle errors inside.
+- **How do you await an event?** `events.once(emitter, 'name')`.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Observer pattern", "Subjects notify subscribed observers without knowing who they are."],
+  ["Listener", "A function registered for an event with `on` or `once`."],
+  ["`emit`", "Synchronously calls all listeners for an event, in registration order."],
+  ["`'error'` event", "Special event that throws if emitted without a listener."],
+  ["Listener leak", "Listeners accumulating on a long-lived emitter because they are never removed."],
+]} />

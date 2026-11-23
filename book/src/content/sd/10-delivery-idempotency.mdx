@@ -1,0 +1,164 @@
+---
+title: Delivery semantics, idempotency and "exactly-once"
+part: Guarantees & data flow
+order: 10
+level: core
+summary: Messages can be lost or delivered twice. You can't make the network deliver exactly once — but you can make processing behave as if it did.
+---
+
+When one system sends a message to another — an HTTP request, a queue message, an event — three delivery guarantees are possible. **At-most-once**: never duplicated, but may be lost. **At-least-once**: never lost, but may be duplicated. **Exactly-once**: neither — which, over an unreliable network, is impossible to guarantee for delivery itself. Real systems choose **at-least-once delivery** and make processing **idempotent**, so duplicates have no extra effect. The combination gives **effectively-once** results.
+
+<Analogy>
+  Posting an important letter. At-most-once is dropping it in a postbox and hoping. At-least-once is sending it by recorded delivery and re-sending until you get the signed receipt — sometimes the recipient gets two copies. The recipient makes duplicates harmless by checking the reference number: "I've already paid invoice #4471, so I'll ignore this copy."
+</Analogy>
+
+## Why it matters
+
+Double charges, duplicate emails and over-counted metrics all come from duplicates meeting non-idempotent handlers. "How do you make sure a payment isn't processed twice?" is a top interview question, and "exactly-once" is a favourite topic to probe for depth.
+
+## Where duplicates come from
+
+<Diagram
+  caption="At-least-once delivery creates duplicates whenever an acknowledgement is lost."
+  chart={`flowchart LR
+    P["Producer / client"] -- "1 · send" --> C["Consumer / server"]
+    C -- "2 · process ✓" --> DB[("side effect done")]
+    C -. "3 · ack lost / crash<br/>before ack" .-> P
+    P -- "4 · timeout → resend" --> C
+    C -- "5 · process again ✗" --> DB`}
+  steps={[
+    { nodes: ["P", "C"], text: "The message is delivered." },
+    { nodes: ["C", "DB"], text: "The consumer processes it — the side effect (charge, email, insert) happens." },
+    { nodes: ["C", "P"], text: "But the acknowledgement is lost, or the consumer crashes just before acknowledging." },
+    { nodes: ["P", "C"], text: "From the sender's view, nothing was confirmed, so it resends — correctly, to avoid loss." },
+    { nodes: ["C", "DB"], text: "Without idempotency, the side effect happens twice." },
+  ]}
+/>
+
+Sources: client retries after timeouts, queue redelivery after visibility timeouts (SQS), consumer crashes before committing offsets (Kafka), outbox relays re-publishing, users double-clicking.
+
+## The three semantics
+
+| Semantics | How | Risk | Used for |
+|---|---|---|---|
+| At-most-once | send once, never retry; or ack before processing | loss | metrics sampling, non-critical notifications |
+| At-least-once | retry until acknowledged; ack after processing | duplicates | almost everything |
+| Exactly-once (processing) | at-least-once + idempotency/dedup, or transactional systems | complexity | payments, ledgers, counters |
+
+## Idempotency
+
+An operation is **idempotent** if doing it twice has the same effect as doing it once.
+
+- Naturally idempotent: `SET status = 'shipped'`, `PUT /users/7 {…}`, `DELETE /items/3`, upserts.
+- Not idempotent: `balance = balance + 10`, `INSERT` without a unique key, `POST /payments`, "send an email".
+
+HTTP methods are *defined* with idempotency in mind: GET, PUT and DELETE should be idempotent; POST is not.
+
+### Idempotency keys
+
+For non-idempotent operations, the client generates a unique **idempotency key** per logical operation and sends it with every attempt. The server stores the key with the result; a repeat with the same key returns the stored result instead of acting again. Stripe's API is the classic example.
+
+<Diagram
+  sequence
+  caption="An idempotency key turns a retried POST into a safe replay."
+  chart={`sequenceDiagram
+    participant C as Client
+    participant S as Payments API
+    participant DB as Database
+    C->>S: POST /payments (Idempotency-Key: k-81f)
+    S->>DB: insert key k-81f (unique) + charge
+    DB-->>S: stored result 201
+    S--xC: response lost
+    C->>S: retry POST (Idempotency-Key: k-81f)
+    S->>DB: key k-81f exists → load stored result
+    S-->>C: same 201 response, no second charge`}
+  notes={[
+    "The client creates a unique key for this payment and sends it.",
+    "The server records the key (with a unique constraint) and performs the charge in the same flow.",
+    "The result is stored against the key.",
+    "The response never reaches the client.",
+    "The client retries with the **same** key.",
+    "The server finds the key and doesn't charge again.",
+    "It returns the original response. The client can't tell it was a retry — which is the point.",
+  ]}
+/>
+
+```sql
+CREATE TABLE idempotency_keys (
+  key         TEXT PRIMARY KEY,
+  request_hash TEXT NOT NULL,      -- reject the same key with a different body
+  status      TEXT NOT NULL,       -- in_progress | done
+  response    JSONB,
+  created_at  TIMESTAMPTZ DEFAULT now()
+);
+```
+
+Details that matter:
+
+- Insert the key **before** acting, in the same transaction as the business write where possible, so two concurrent retries can't both proceed (one gets a unique-violation).
+- Handle "in progress": a second request with the same key while the first is still running should wait or get `409`.
+- Expire keys after a reasonable window (e.g. 24 hours).
+
+### Deduplicating consumers
+
+For queue consumers, record processed **message IDs** in the same transaction as the side effect:
+
+```sql
+BEGIN;
+INSERT INTO processed_messages (message_id) VALUES ($1);   -- fails if already processed
+UPDATE accounts SET balance_cents = balance_cents + $2 WHERE id = $3;
+COMMIT;
+```
+
+If the insert hits a unique violation, the message was already handled — acknowledge it and move on.
+
+## "Exactly-once" in Kafka and stream processing
+
+Kafka offers **exactly-once semantics** within Kafka: idempotent producers (the broker discards duplicate sends using sequence numbers) and **transactions** that atomically write output messages and commit consumer offsets. A "read from Kafka → process → write to Kafka" pipeline (Kafka Streams, Flink) can thus avoid duplicates. But once a side effect leaves Kafka — calling an API, sending an email, writing to another database — you're back to needing idempotency at that boundary.
+
+<Callout type="note" title="Why exactly-once delivery is impossible">
+  A sender can't distinguish "message lost" from "acknowledgement lost" (the two generals problem). It must either risk loss (don't resend) or risk duplication (resend). Every "exactly-once" system is really at-least-once plus deduplication.
+</Callout>
+
+## Ordering
+
+At-least-once with retries can also **reorder** messages (message 2 succeeds while message 1 is being retried). If order matters per entity:
+
+- partition by entity ID (Kafka key, SQS FIFO message group) so one consumer processes them in order,
+- include a **version** or sequence number and ignore stale updates (`UPDATE … WHERE version < $new`).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Retrying `POST /payments` without an idempotency key.
+- Checking "already processed?" and then acting in two separate steps (race between duplicates).
+- Acknowledging a message before processing it (turns into at-most-once).
+- Believing a broker's "exactly-once" covers external side effects.
+- Sending emails or push notifications without dedup — users notice duplicates.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you ensure a payment isn't processed twice?">
+
+Over a network you can't get exactly-once delivery — a lost acknowledgement looks like a lost request, so to avoid losing payments, clients and queues must retry, which means duplicates. So I use at-least-once delivery with idempotent processing. The client generates an idempotency key per logical payment and sends it on every attempt. The server inserts that key into a table with a unique constraint in the same transaction as recording the payment; a duplicate either hits the constraint or finds the stored result and returns the original response, so the card is charged once. Consumers of payment events likewise record processed message IDs in the same transaction as their side effect. The external payment provider call also gets an idempotency key so retries there are safe too.
+
+<Fragment slot="deeper">
+
+- **At-most vs at-least-once?** Ack before processing risks loss; ack after processing risks duplicates.
+- **What does Kafka's exactly-once cover?** Atomic produce + offset commit within Kafka — not external side effects.
+- **How do you keep per-entity order?** Partition by entity key and/or version checks.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["At-most-once", "A message is delivered zero or one times."],
+  ["At-least-once", "A message is delivered one or more times."],
+  ["Exactly-once processing", "Effects happen once, achieved with at-least-once plus deduplication."],
+  ["Idempotent", "Applying an operation multiple times has the same effect as once."],
+  ["Idempotency key", "Client-supplied unique ID letting the server detect retried requests."],
+  ["Deduplication", "Detecting and ignoring repeated messages, usually by ID."],
+]} />

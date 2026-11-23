@@ -1,0 +1,177 @@
+---
+title: Shallow copies, deep copies and immutability
+part: Engine & memory
+order: 8
+level: core
+summary: Spread looks like a copy but shares everything underneath. When that matters, and the right tool for a real deep copy.
+---
+
+"Copying" an object in JavaScript can mean three very different things: copying the **reference** (both names point at the same object), a **shallow copy** (a new outer object, but the nested objects are shared), or a **deep copy** (everything duplicated, all the way down). Choosing the wrong one is behind a whole family of "why did my state change?" bugs.
+
+<Analogy>
+  Imagine a folder of documents. Copying the reference is telling a colleague where the folder is. A shallow copy is a new folder containing the *same* documents — scribble on one and it shows in both folders. A deep copy photocopies every document into a new folder: now the two are completely independent.
+</Analogy>
+
+## Why it matters
+
+React, Redux and most state management libraries decide whether to re-render by checking whether an object is a **different object** from before. Mutating in place hides changes from them; copying too little leaks changes between "independent" states. Interviewers love asking how to copy a nested object safely.
+
+## Three kinds of copy
+
+```js
+const original = { name: 'Ada', address: { city: 'London' } };
+
+const ref     = original;                    // reference copy
+const shallow = { ...original };             // shallow copy
+const deep    = structuredClone(original);   // deep copy
+```
+
+<Diagram
+  caption="A reference copy shares everything. A shallow copy shares nested objects. A deep copy shares nothing."
+  chart={`flowchart LR
+    O["original"] --> OB["{ name, address }"]
+    OB --> A["{ city: 'London' }"]
+    R["ref"] --> OB
+    S["shallow"] --> SB["{ name, address }<br/>new outer object"]
+    SB --> A
+    D["deep"] --> DB["{ name, address }<br/>new"]
+    DB --> DA["{ city: 'London' }<br/>new"]`}
+  steps={[
+    { nodes: ["O", "OB", "A"], text: "The original: an outer object holding a nested `address` object." },
+    { nodes: ["R", "OB", "A"], text: "`ref = original` creates no new objects at all. Any change through `ref` changes `original`." },
+    { nodes: ["S", "SB", "A"], text: "`{ ...original }` makes a **new outer object**, but its `address` points to the **same** nested object." },
+    { nodes: ["D", "DB", "DA"], text: "`structuredClone(original)` recreates every level. Nothing is shared." },
+  ]}
+/>
+
+What happens when we change the nested city through each copy:
+
+```js
+shallow.name = 'Grace';
+original.name;          // 'Ada'    — top level is independent
+
+shallow.address.city = 'Paris';
+original.address.city;  // 'Paris'  — nested level is shared!
+
+deep.address.city = 'Rome';
+original.address.city;  // 'Paris'  — deep copy is fully independent
+```
+
+## Ways to copy, compared
+
+| Technique | Depth | Keeps | Loses or breaks on |
+|---|---|---|---|
+| `{ ...obj }`, `Object.assign({}, obj)` | Shallow | Everything at the top level | Nested objects are shared |
+| `[...arr]`, `arr.slice()` | Shallow | | Nested objects are shared |
+| `JSON.parse(JSON.stringify(obj))` | Deep | Plain data | `Date` → string, `undefined`/functions dropped, `Map`/`Set` → `{}`, cycles throw |
+| `structuredClone(obj)` | Deep | `Date`, `Map`, `Set`, `RegExp`, typed arrays, **cycles** | Functions, DOM nodes, class prototypes (instances become plain objects) |
+| Library (`lodash.cloneDeep`) | Deep | Most things | Extra dependency |
+
+<Callout type="tip">
+  Reach for `structuredClone` when you genuinely need a deep copy. It is built into browsers and Node 17+, handles circular references, and preserves `Date`, `Map` and `Set`. Only use the JSON trick when you know the data is plain JSON.
+</Callout>
+
+```js
+const withDate = { at: new Date(), tags: new Set(['a']) };
+
+JSON.parse(JSON.stringify(withDate));
+// { at: '2026-11-23T10:00:00.000Z', tags: {} }   ← Date became a string, Set became {}
+
+structuredClone(withDate);
+// { at: Date, tags: Set(1) { 'a' } }             ← types preserved
+```
+
+## Updating nested data without mutation
+
+Most of the time you do not need a full deep copy. You need to change **one** nested value while sharing everything else. The pattern is: copy every object on the path to the change, and nothing else.
+
+```js
+const state = {
+  user: { name: 'Ada', prefs: { theme: 'light', lang: 'en' } },
+  cart: { items: [/* 500 items */] },
+};
+
+const next = {
+  ...state,
+  user: {
+    ...state.user,
+    prefs: { ...state.user.prefs, theme: 'dark' },
+  },
+};
+```
+
+<Diagram
+  caption="Structural sharing: only the objects on the path to the change are new. The big cart is reused, which is fast and lets libraries see exactly what changed."
+  chart={`flowchart TB
+    S["state"] --> U["user"]
+    S --> C["cart (500 items)"]
+    U --> P["prefs: light"]
+    N["next (new)"] --> U2["user (new)"]
+    N --> C
+    U2 --> P2["prefs: dark (new)"]`}
+  steps={[
+    { nodes: ["S", "U", "C", "P"], text: "The old state tree." },
+    { nodes: ["N", "U2", "P2"], text: "The new state has new objects only along the path `state → user → prefs`." },
+    { nodes: ["N", "C"], text: "The cart was not touched, so `next.cart === state.cart`. A component showing the cart can skip re-rendering." },
+  ]}
+/>
+
+This is called **structural sharing**. Libraries like Immer let you write ordinary-looking mutations (`draft.user.prefs.theme = 'dark'`) and produce exactly this kind of result for you. Redux Toolkit uses Immer internally.
+
+## Immutable array updates
+
+```js
+const list = [{ id: 1, done: false }, { id: 2, done: false }];
+
+const added   = [...list, { id: 3, done: false }];
+const removed = list.filter((t) => t.id !== 1);
+const toggled = list.map((t) => (t.id === 2 ? { ...t, done: true } : t));
+const sorted  = list.toSorted((a, b) => a.id - b.id);
+```
+
+## Freezing
+
+`Object.freeze` stops changes to an object's own properties. It is **shallow**, so nested objects can still change. A recursive "deep freeze" helper is easy to write, but in practice freezing is mostly used for configuration constants and in development builds to catch accidental mutation.
+
+```js
+function deepFreeze(obj) {
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === 'object') deepFreeze(value);
+  }
+  return Object.freeze(obj);
+}
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using `{ ...obj }` and then mutating a nested object, believing the original is safe.
+- Using the JSON trick on data containing dates, `undefined`, `Map`s or class instances.
+- Deep-cloning large state on every update instead of copying just the changed path.
+- Expecting `structuredClone` to keep class methods — instances come back as plain objects.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is the difference between a shallow and a deep copy, and how do you make each?">
+
+A shallow copy creates a new top-level object or array, but any nested objects are still shared with the original — spread, `Object.assign` and `slice` all do this. A deep copy recursively duplicates every level so nothing is shared. Today the right built-in for a deep copy is `structuredClone`, which handles dates, maps, sets and even circular references. For state updates I usually avoid both and copy only the objects on the path to the change, which keeps unchanged parts shared — that is structural sharing, and it is what Immer and Redux Toolkit do for you.
+
+<Fragment slot="deeper">
+
+- **What does `JSON.parse(JSON.stringify(x))` lose?** Functions and `undefined` are dropped, dates become strings, maps and sets become empty objects, and circular references throw.
+- **Why do React and Redux care?** They compare by reference to detect changes; mutation keeps the same reference, so the change is missed.
+- **Is `Object.freeze` deep?** No.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Shallow copy", "A new outer object whose nested objects are still shared."],
+  ["Deep copy", "A full recursive duplicate that shares nothing with the original."],
+  ["`structuredClone`", "Built-in deep copy supporting dates, maps, sets, typed arrays and cycles."],
+  ["Structural sharing", "Creating a new version of data by copying only the changed path and reusing the rest."],
+  ["Immutability", "Treating data as read-only and creating new versions instead of changing it."],
+]} />

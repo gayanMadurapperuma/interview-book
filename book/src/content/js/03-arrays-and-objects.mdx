@@ -1,0 +1,239 @@
+---
+title: Working with arrays and objects
+part: Foundations
+order: 3
+level: foundation
+summary: The everyday tools for transforming data — map, filter, reduce, spread, destructuring — and which of them change the original.
+---
+
+Most JavaScript code is about taking some data — a list of orders, a user profile, a JSON response — and turning it into another shape. **Arrays** hold ordered lists; **objects** hold named fields. This chapter is the toolbox for both, with special attention to one question that causes many bugs: *does this method change the original, or give me a new one?*
+
+<Analogy>
+  Think of an array method like a photocopier versus a marker pen. `map`, `filter` and `slice` are photocopiers: they give you a new sheet and leave the original untouched. `push`, `sort` and `splice` are marker pens: they write on the original sheet that everyone else is also reading.
+</Analogy>
+
+## Why it matters
+
+Interview coding tasks almost always involve transforming arrays and objects, and reviewers watch whether you reach for `map`/`filter`/`reduce` fluently. In real apps — especially React or Redux — mutating data that you meant to copy is one of the most common bugs.
+
+## The core array methods
+
+<Diagram
+  caption="The three workhorses. map changes each item, filter keeps some items, reduce combines all items into one result."
+  chart={`flowchart LR
+    A["[1, 2, 3, 4]"] -- "map(x => x * 10)" --> M["[10, 20, 30, 40]<br/>same length"]
+    A -- "filter(x => x % 2 === 0)" --> F["[2, 4]<br/>fewer items"]
+    A -- "reduce((sum, x) => sum + x, 0)" --> R["10<br/>one value"]`}
+  flow
+/>
+
+```js
+const orders = [
+  { id: 1, total: 30, status: 'paid' },
+  { id: 2, total: 80, status: 'refunded' },
+  { id: 3, total: 50, status: 'paid' },
+];
+
+const paid    = orders.filter((o) => o.status === 'paid');         // keep some
+const totals  = paid.map((o) => o.total);                          // transform each
+const revenue = totals.reduce((sum, t) => sum + t, 0);             // combine all
+// revenue === 80
+```
+
+You can chain them, reading left to right like a pipeline:
+
+```js
+const revenue = orders
+  .filter((o) => o.status === 'paid')
+  .map((o) => o.total)
+  .reduce((sum, t) => sum + t, 0);
+```
+
+### How `reduce` works, step by step
+
+`reduce` is the one people find hardest. It walks the array carrying an **accumulator** — a running result — and your function decides how each item updates it.
+
+<Diagram
+  caption="reduce carries a running total through the array. The second argument (0) is the starting value."
+  chart={`flowchart LR
+    S(("start<br/>acc = 0")) --> I1["item 30<br/>acc = 0 + 30"]
+    I1 --> I2["item 50<br/>acc = 30 + 50"]
+    I2 --> E(("result<br/>80"))`}
+  steps={[
+    { nodes: ["S"], text: "The accumulator starts at the initial value you passed: `0`." },
+    { nodes: ["S", "I1"], text: "First item, 30: the callback returns `0 + 30`, which becomes the new accumulator." },
+    { nodes: ["I1", "I2"], text: "Second item, 50: it returns `30 + 50`." },
+    { nodes: ["I2", "E"], text: "No items left. The final accumulator, `80`, is what `reduce` returns." },
+  ]}
+/>
+
+<Callout type="tip">
+  Always pass the initial value to `reduce`. Without it, the first element is used as the start, and calling `reduce` on an empty array throws a `TypeError`.
+</Callout>
+
+### Searching and testing
+
+```js
+orders.find((o) => o.id === 3);           // the first match, or undefined
+orders.findIndex((o) => o.id === 3);      // its index, or -1
+orders.some((o) => o.total > 75);         // true if at least one matches
+orders.every((o) => o.total > 0);         // true if all match
+[1, 2, 3].includes(2);                    // true (works with NaN, unlike indexOf)
+```
+
+### Grouping
+
+Modern JavaScript has a built-in grouping helper:
+
+```js
+const byStatus = Object.groupBy(orders, (o) => o.status);
+// { paid: [order1, order3], refunded: [order2] }
+```
+
+## Which methods change the original?
+
+| Returns a **new** array (safe) | **Mutates** the original |
+|---|---|
+| `map`, `filter`, `slice`, `concat`, `flat`, `flatMap` | `push`, `pop`, `shift`, `unshift` |
+| `toSorted`, `toReversed`, `toSpliced`, `with` | `sort`, `reverse`, `splice` |
+| spread `[...arr]` | `fill`, `copyWithin` |
+
+The newer `toSorted()`, `toReversed()` and `with(index, value)` were added in ES2023 precisely so you can sort or update without mutating.
+
+```js
+const scores = [30, 5, 100];
+const sorted = scores.toSorted((a, b) => a - b); // [5, 30, 100]; scores unchanged
+```
+
+<Callout type="pitfall" title="sort() sorts as text by default">
+
+```js
+[10, 9, 1].sort();               // [1, 10, 9]  — compared as strings!
+[10, 9, 1].sort((a, b) => a - b); // [1, 9, 10]
+```
+
+Always pass a comparison function when sorting numbers. It should return a negative number if `a` comes first, positive if `b` comes first, and `0` if they are equal.
+
+</Callout>
+
+## Objects: reading, adding and looping
+
+```js
+const user = { name: 'Ada', role: 'admin' };
+
+user.name;            // dot access
+user['role'];         // bracket access — needed when the key is in a variable
+const key = 'name';
+user[key];            // 'Ada'
+
+user.email = 'ada@example.com';   // add a field (mutates)
+delete user.role;                 // remove a field (mutates)
+
+Object.keys(user);     // ['name', 'email']
+Object.values(user);   // ['Ada', 'ada@example.com']
+Object.entries(user);  // [['name', 'Ada'], ['email', 'ada@example.com']]
+
+for (const [k, v] of Object.entries(user)) {
+  console.log(k, v);
+}
+```
+
+`Object.entries` and its reverse, `Object.fromEntries`, let you use array methods on objects:
+
+```js
+const prices = { apple: 1, pear: 2 };
+const doubled = Object.fromEntries(
+  Object.entries(prices).map(([k, v]) => [k, v * 2]),
+);
+// { apple: 2, pear: 4 }
+```
+
+## Spread and destructuring
+
+**Spread** (`...`) copies the contents of an array or object into a new one. It is the standard way to "update" data without mutating it.
+
+```js
+const base = { theme: 'light', lang: 'en' };
+const prefs = { ...base, theme: 'dark' };      // later keys win
+// { theme: 'dark', lang: 'en' }; base is unchanged
+
+const a = [1, 2];
+const b = [...a, 3];                            // [1, 2, 3]
+```
+
+**Destructuring** pulls values out into variables:
+
+```js
+const { name, role = 'viewer' } = user;        // with a default
+const { name: displayName } = user;            // rename
+const [first, second, ...others] = [1, 2, 3, 4];
+```
+
+<Diagram
+  caption="Spread makes a new outer object, but nested objects are still shared. This is called a shallow copy."
+  chart={`flowchart LR
+    subgraph Before
+      A["state"] --> AU["user: { name: 'Ada' }"]
+    end
+    subgraph After["copy = { ...state }"]
+      C["copy"] --> AU2["same user object"]
+    end
+    AU -.-> AU2`}
+/>
+
+<Callout type="pitfall">
+  Spread is **shallow**. `{ ...state }` creates a new top-level object, but `state.user` and `copy.user` are still the same nested object. To update a nested value immutably, spread each level you change: `{ ...state, user: { ...state.user, name: 'Grace' } }`. The chapter on copying covers deep copies with `structuredClone`.
+</Callout>
+
+## Optional chaining and nullish defaults
+
+When data may be missing, these two operators keep code short and safe:
+
+```js
+const city = response?.user?.address?.city ?? 'Unknown';
+```
+
+- `a?.b` returns `undefined` instead of throwing if `a` is `null` or `undefined`.
+- `x ?? fallback` uses the fallback **only** when `x` is `null` or `undefined` — unlike `||`, it keeps valid values like `0` and `''`.
+
+```js
+const retries = config.retries || 3;  // bug: 0 retries becomes 3
+const retries2 = config.retries ?? 3; // correct: 0 stays 0
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using `forEach` and pushing into another array when `map` or `filter` would do it in one expression.
+- Calling `sort()` on data you did not mean to change (for example, React state).
+- Forgetting `reduce`'s initial value.
+- Expecting `{ ...obj }` to copy nested objects.
+- Using `||` for defaults when `0`, `false` or `''` are valid values.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is the difference between map, filter and reduce?">
+
+All three walk an array without changing it. `map` returns a new array of the same length where each item has been transformed. `filter` returns a new array containing only the items for which the callback returned true. `reduce` combines every item into a single value — a sum, an object, a grouped map — by carrying an accumulator from one item to the next, starting from an initial value you provide.
+
+<Fragment slot="deeper">
+
+- **Which array methods mutate?** `push`, `pop`, `shift`, `unshift`, `splice`, `sort`, `reverse`, `fill`. Use `toSorted`, `toReversed`, `with` or spread to avoid mutation.
+- **`forEach` vs `map`?** `forEach` returns nothing and is for side effects; `map` returns a new array.
+- **How do you update a nested object immutably?** Spread each level on the path you change.
+- **`||` vs `??`?** `??` only falls back for `null`/`undefined`.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Accumulator", "The running result that `reduce` passes from one step to the next."],
+  ["Mutation", "Changing an existing array or object in place."],
+  ["Spread (`...`)", "Expands the contents of an array or object into a new one."],
+  ["Destructuring", "Extracting values from arrays or objects into variables."],
+  ["Shallow copy", "A new outer container whose nested objects are still shared with the original."],
+  ["Optional chaining (`?.`)", "Reads a property but returns `undefined` instead of throwing when the value before it is null or undefined."],
+]} />

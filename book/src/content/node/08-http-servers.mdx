@@ -1,0 +1,177 @@
+---
+title: HTTP servers, keep-alive and connection pooling
+part: Core APIs
+order: 8
+level: core
+summary: What happens between a client opening a socket and your handler running — and how reusing connections makes both servers and clients much faster.
+demo: node-request-lifecycle
+---
+
+Frameworks like Express, Fastify and NestJS sit on top of Node's built-in `http` module. Underneath, every request follows the same path: the OS accepts a TCP connection, Node parses the HTTP bytes into a `req` object, calls your handler with `req` and a `res` object, and you write the response back over the same socket. Understanding that path — and that connections can be **reused** (keep-alive) — explains timeouts, latency and many production incidents.
+
+<Analogy>
+  A phone call versus letters. Opening a TCP (and TLS) connection is dialling and saying hello — it takes a few round trips before you can say anything useful. Keep-alive means staying on the line and asking several questions in one call, instead of hanging up and redialling for each one.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask you to describe the request lifecycle, explain keep-alive and why outbound HTTP calls need a connection pool, and handle timeouts properly. These details decide whether a service survives load.
+
+## A server from scratch
+
+```js
+const http = require('node:http');
+
+const server = http.createServer(async (req, res) => {
+  // req: IncomingMessage (a readable stream)  res: ServerResponse (a writable stream)
+  if (req.method === 'POST' && req.url === '/echo') {
+    let body = '';
+    for await (const chunk of req) body += chunk;        // read the request body
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ youSent: body }));
+  }
+  res.writeHead(404).end();
+});
+
+server.listen(3000, () => console.log('listening on :3000'));
+```
+
+Frameworks add routing, body parsing, middleware and error handling, but they all call into exactly this.
+
+## The life of a request
+
+<Diagram
+  sequence
+  caption="From connection to response. The JS thread only runs the short callbacks; waiting happens in the kernel and the thread pool."
+  chart={`sequenceDiagram
+    participant C as Client
+    participant K as OS kernel
+    participant N as Node (JS thread)
+    participant DB as Database
+    C->>K: TCP handshake (+ TLS)
+    K->>N: new connection ready (poll phase)
+    C->>K: HTTP request bytes
+    K->>N: bytes ready → llhttp parses → req, res
+    N->>DB: query (async, returns immediately)
+    DB-->>N: rows arrive (poll phase)
+    N->>K: res.end(json)
+    K->>C: response bytes`}
+  notes={[
+    "The client opens a TCP connection (and a TLS handshake for HTTPS). This costs round trips before any data is exchanged.",
+    "The kernel accepts it and tells libuv; Node's `'connection'` callback runs in the poll phase.",
+    "The request bytes arrive.",
+    "Node's C parser (llhttp) turns bytes into `req` and `res`, and your handler runs.",
+    "The handler starts a database query and returns. The JS thread is free for other requests.",
+    "When the rows arrive, the continuation runs.",
+    "`res.end` hands the response to the kernel.",
+    "The kernel sends it. With keep-alive, the connection stays open for the next request.",
+  ]}
+/>
+
+<DemoLink id="node-request-lifecycle" />
+
+## Keep-alive
+
+HTTP/1.1 keeps connections open by default, so the next request on the same connection skips the TCP and TLS handshakes. Node's server closes idle connections after **`keepAliveTimeout`** (5 seconds by default).
+
+<Callout type="pitfall" title="The load-balancer 502 problem">
+  If a load balancer (AWS ALB, nginx) keeps idle connections open **longer** than Node does, it may send a request on a connection Node is just closing, and the client gets a `502`. Set Node's `server.keepAliveTimeout` **higher** than the load balancer's idle timeout (ALB default: 60 s), and `server.headersTimeout` slightly higher still.
+
+```js
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
+```
+</Callout>
+
+## Outbound requests need a connection pool
+
+When your service calls other services, each new connection costs a DNS lookup, a TCP handshake and a TLS handshake — often more than the request itself. An **agent** keeps a pool of open connections per host and reuses them.
+
+<Diagram
+  caption="Without keep-alive, every call pays for connection setup. With a pooled agent, setup is paid once and connections are reused."
+  chart={`flowchart TB
+    subgraph NoPool["No keep-alive: every request"]
+      direction LR
+      a1["DNS"] --> a2["TCP handshake"] --> a3["TLS handshake"] --> a4["request / response"] --> a5["close"]
+    end
+    subgraph Pool["Keep-alive agent: after the first request"]
+      direction LR
+      b1["take idle socket from pool"] --> b2["request / response"] --> b3["return socket to pool"]
+    end
+    NoPool ~~~ Pool`}
+/>
+
+```js
+const http = require('node:http');
+
+const agent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 50,        // max concurrent connections per host
+  maxFreeSockets: 10,    // idle connections kept around
+  timeout: 60_000,       // idle socket timeout
+});
+
+http.get({ host: 'inventory.internal', path: '/stock', agent }, onResponse);
+```
+
+Node's global `fetch` (built on **undici**) pools connections automatically. For heavy use you can configure undici's `Agent`/`Pool` directly. Older Node versions' default `http.globalAgent` did not keep connections alive — a common source of slow services.
+
+## Timeouts everywhere
+
+A request that never completes ties up a socket, memory and often a database connection. Set timeouts on **both** sides:
+
+```js
+// outbound: give up after 5 s, and actually cancel the request
+const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+
+// inbound: protect the server from slow clients
+server.requestTimeout = 30_000;   // whole request must arrive within 30 s
+server.headersTimeout = 66_000;
+```
+
+Slow clients that send headers byte by byte ("slowloris") are blocked by these limits — and by a reverse proxy in front of Node.
+
+## HTTP/2 and HTTP/3, briefly
+
+- **HTTP/2** multiplexes many requests over **one** connection with compressed headers. Node supports it with `node:http2`; usually a proxy or load balancer terminates it.
+- **HTTP/3** runs over QUIC (UDP) and avoids TCP head-of-line blocking. Typically handled by CDNs and load balancers rather than Node directly.
+
+## Behind a proxy
+
+In production, Node usually sits behind a load balancer or reverse proxy that terminates TLS. That changes things: the client IP is in `X-Forwarded-For`, the protocol in `X-Forwarded-Proto`. Only trust these headers from your own proxy (Express: `app.set('trust proxy', 1)`).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `keepAliveTimeout` shorter than the load balancer's idle timeout → random 502s.
+- No connection pooling for outbound calls → high latency and port exhaustion.
+- No timeouts on outbound requests → hung requests pile up during an outage.
+- Reading the whole request body without a size limit → memory exhaustion.
+- Trusting `X-Forwarded-For` from anyone.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Walk me through what happens when a request hits a Node HTTP server.">
+
+The client opens a TCP connection, plus a TLS handshake for HTTPS. The kernel accepts it and libuv notifies Node in the poll phase. As bytes arrive, Node's llhttp parser builds the request object — a readable stream — and a response object — a writable stream — and calls the handler. The handler should do only quick work on the main thread: it starts async I/O, like a database query, and returns; when results come back, the continuation runs and writes the response with `res.end`, which hands the bytes to the kernel. With keep-alive, the connection stays open for subsequent requests, which saves handshakes. For outbound calls I use a pooled keep-alive agent, always with timeouts, and I make sure the server's `keepAliveTimeout` exceeds the load balancer's idle timeout to avoid 502s.
+
+<Fragment slot="deeper">
+
+- **Why pool outbound connections?** DNS, TCP and TLS setup can cost more than the request; pools also prevent socket exhaustion.
+- **What causes intermittent 502s behind an ALB?** Node closing idle keep-alive connections before the ALB does.
+- **How do you cancel an outbound request?** Pass an `AbortSignal` (e.g. `AbortSignal.timeout`).
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Keep-alive", "Reusing a TCP connection for multiple HTTP requests."],
+  ["Agent", "Node's per-host connection pool for outbound HTTP."],
+  ["`keepAliveTimeout`", "How long a Node server keeps an idle connection open."],
+  ["llhttp", "Node's fast C HTTP parser."],
+  ["undici", "The HTTP client behind Node's global `fetch`."],
+  ["Reverse proxy", "A server in front of Node that terminates TLS and forwards requests."],
+]} />

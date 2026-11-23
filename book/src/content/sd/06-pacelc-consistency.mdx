@@ -1,0 +1,130 @@
+---
+title: PACELC and the consistency spectrum
+part: Distributed fundamentals
+order: 6
+level: advanced
+summary: Even with a healthy network, replicated data forces a trade-off between latency and consistency. Between "always the latest" and "eventually the same" lies a whole spectrum of useful guarantees.
+---
+
+CAP only talks about what happens during a network partition — a rare event. **PACELC** extends it to the everyday case: **if there's a Partition**, choose **A**vailability or **C**onsistency; **Else** (normal operation), choose **L**atency or **C**onsistency. Keeping replicas in sync takes time — waiting for other machines, possibly in other regions — so every replicated system trades speed for freshness all the time, not just during failures. And "consistency" isn't one thing: there is a **spectrum** of guarantees between strict and eventual.
+
+<Analogy>
+  A shared family calendar synced across phones. Strong consistency is phoning everyone to confirm before an event counts as added — always correct, but slow. Eventual consistency is adding it on your phone and letting the others sync when they can — instant, but for a while your partner might not see it. In-between guarantees exist too: "at least *I* always see what *I* added" (read-your-writes) is often all you really need.
+</Analogy>
+
+## Why it matters
+
+Senior interviews go beyond "CP vs AP" to "what consistency does this feature actually need?" Choosing the weakest guarantee that's still correct for each feature is how large systems stay fast.
+
+## PACELC
+
+<Diagram
+  caption="PACELC: two decisions — one for the rare partition, one for every request."
+  chart={`flowchart TB
+    Q{"Is there a network partition?"} -- "yes (P)" --> PA{"choose"}
+    PA --> A["A: stay available<br/>(maybe stale)"]
+    PA --> C1["C: stay consistent<br/>(maybe unavailable)"]
+    Q -- "no (E)" --> EL{"choose"}
+    EL --> L["L: low latency<br/>(read local replica, async replication)"]
+    EL --> C2["C: consistency<br/>(wait for quorum / leader / other region)"]`}
+/>
+
+| System | Partition | Else | Notes |
+|---|---|---|---|
+| DynamoDB, Cassandra (defaults) | PA | EL | fast local reads, eventual consistency, tunable |
+| MongoDB (default) | PC | EC | single primary; reads from primary |
+| Google Spanner | PC | EC | global strong consistency; pays with commit latency (TrueTime) |
+| PostgreSQL + async read replicas | PC* | EL for replica reads | primary is consistent; replica reads are stale-but-fast |
+
+\* PostgreSQL itself doesn't decide; your failover setup does.
+
+## The consistency spectrum
+
+From strongest (and slowest) to weakest (and fastest):
+
+<Diagram
+  caption="Stronger guarantees need more coordination. Many features are perfectly correct with a weaker one."
+  chart={`flowchart LR
+    LIN["Linearisable<br/>one up-to-date copy,<br/>real-time order"] --> SEQ["Sequential<br/>everyone sees the same order"]
+    SEQ --> CAU["Causal<br/>cause before effect"]
+    CAU --> SES["Session guarantees<br/>read-your-writes,<br/>monotonic reads"]
+    SES --> EV["Eventual<br/>converges someday"]`}
+  steps={[
+    { nodes: ["LIN"], text: "**Linearisable**: behaves like a single copy; once a write completes, every later read anywhere sees it. Needs consensus or a single leader — slowest." },
+    { nodes: ["LIN", "SEQ"], text: "**Sequential**: all clients see operations in the same order, though not necessarily in real time." },
+    { nodes: ["SEQ", "CAU"], text: "**Causal**: if one event could have caused another (a reply to a comment), everyone sees them in that order. Unrelated events can appear in different orders." },
+    { nodes: ["CAU", "SES"], text: "**Session guarantees** apply per client: you see your own writes, and your reads never go backwards in time." },
+    { nodes: ["SES", "EV"], text: "**Eventual**: if writes stop, all replicas eventually agree. No promises about what you see meanwhile — fastest." },
+  ]}
+/>
+
+### Session guarantees, the practical middle
+
+| Guarantee | Meaning | Typical fix |
+|---|---|---|
+| **Read-your-writes** | after I write, I see my write | read from the leader for a while after writing; or track the write's version |
+| **Monotonic reads** | I never see older data after newer data | stick a user to one replica |
+| **Monotonic writes** | my writes are applied in the order I made them | route a user's writes through one leader/partition |
+| **Writes-follow-reads** | if I reply to something, my reply is ordered after it | causal metadata |
+
+These cover most user-visible weirdness ("my comment disappeared", "the count went down then up") at a fraction of the cost of linearisability.
+
+## Matching features to guarantees
+
+| Feature | Needs | Why |
+|---|---|---|
+| Account balance, stock, unique username | linearisable (or a single-leader transaction) | wrong answers cost money or break invariants |
+| Chat messages in a conversation | causal / per-conversation order | replies after questions; global order unnecessary |
+| User edits their profile | read-your-writes | the editor must see the change; others can lag |
+| Like counts, view counts | eventual | small temporary errors are harmless |
+| Search index, analytics | eventual (seconds–minutes lag) | derived data |
+
+## Tunable consistency: quorums
+
+Dynamo-style stores let you choose per request: with **N** replicas, a write waits for **W** acknowledgements and a read queries **R** replicas. If **R + W > N**, every read overlaps with the latest write's replicas. (Details in *Consensus, quorums and leader election*.)
+
+```text
+N = 3
+W = 1, R = 1 → fastest, eventual
+W = 2, R = 2 → overlapping quorums, strongly consistent reads (in the absence of failures/edge cases)
+W = 3, R = 1 → fast reads, slow and fragile writes
+```
+
+## The cost of strong consistency across regions
+
+Light needs ~70 ms to cross the Atlantic and back. A linearisable write that must be acknowledged in two regions can't be faster than that round trip. That's why globally strongly consistent databases (Spanner, CockroachDB multi-region) offer options like regional leaders per row (data homed near its users), and why most global apps use local leaders and asynchronous cross-region replication for everything that tolerates it.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Requiring strong consistency everywhere "to be safe" — and paying for it on every request.
+- Using eventual consistency for invariants (balances, uniqueness).
+- Forgetting read-your-writes when routing reads to replicas.
+- Treating "eventual" as "within milliseconds" — under load or failures it can be much longer.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is PACELC, and how do you choose a consistency level?">
+
+PACELC extends CAP: during a partition you choose availability or consistency, but even when everything is healthy you choose between latency and consistency, because keeping replicas in sync means waiting for other nodes, possibly across regions. Consistency is a spectrum — linearisable, sequential, causal, session guarantees like read-your-writes and monotonic reads, and eventual — and stronger means more coordination and latency. I pick per feature: balances, inventory and unique constraints need a single leader or linearisable operations; chat needs per-conversation ordering; a user's own edits need read-your-writes; counters, feeds and search can be eventual. Dynamo-style systems let you tune this per request with read and write quorums.
+
+<Fragment slot="deeper">
+
+- **What's causal consistency?** Causally related operations are seen in order by everyone; unrelated ones may differ.
+- **How do you implement read-your-writes with replicas?** Leader reads after a write, version/LSN tracking, or sticky sessions.
+- **Why is global strong consistency slow?** Commits must wait for cross-region round trips.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["PACELC", "Partition: availability vs consistency; Else: latency vs consistency."],
+  ["Linearisability", "The strongest single-object consistency: behaves like one up-to-date copy."],
+  ["Causal consistency", "Operations that are causally related are seen in the same order by all."],
+  ["Read-your-writes", "A client always sees its own previous writes."],
+  ["Monotonic reads", "A client never sees data go back in time."],
+  ["Quorum", "A minimum number of replicas that must respond for an operation."],
+]} />

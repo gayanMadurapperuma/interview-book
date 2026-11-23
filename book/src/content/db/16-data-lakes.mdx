@@ -1,0 +1,144 @@
+---
+title: "Data lakes: S3, Parquet, Glue and Athena"
+part: Data platform
+order: 16
+level: advanced
+summary: Cheap object storage plus open columnar files plus a query engine — how companies analyse years of data without running a database for it.
+---
+
+A **data lake** is a store for large amounts of raw and processed data — events, logs, exports, database snapshots — kept as **files** in cheap **object storage** like Amazon S3. Instead of loading everything into a database, you write files in an analytics-friendly format (**Parquet**), describe them in a **catalog** (AWS Glue), and query them with SQL using a serverless **query engine** (Amazon Athena, Trino, Spark) that reads the files directly. Storage and compute are separate, so you pay for storage cheaply and for compute only when you query.
+
+<Analogy>
+  A huge, well-labelled warehouse of archive boxes. Boxes are cheap to store. The catalogue at the front says what each aisle contains and how its boxes are organised. When someone has a question, you hire a team of temporary workers (the query engine) who go straight to the right aisles — thanks to the labels — open only the relevant boxes, and report back. You pay the workers by the hour, not to stand around.
+</Analogy>
+
+## Why it matters
+
+Backend engineers increasingly own the pipelines that feed analytics: exporting events, partitioning data, keeping costs down. Interviewers for data-heavy roles ask why Parquet, how partitioning saves money, and how a lake differs from a warehouse.
+
+## The architecture
+
+<Diagram
+  caption="A typical AWS data lake: data lands raw, is cleaned into Parquet, catalogued, and queried with SQL."
+  chart={`flowchart LR
+    SRC["Sources<br/>app events · CDC · logs · exports"] --> RAW["S3 raw zone<br/>JSON / CSV as received"]
+    RAW --> ETL["Transform<br/>Glue jobs · Spark · Lambda"]
+    ETL --> CUR["S3 curated zone<br/>Parquet, partitioned"]
+    CUR --> CAT["Glue Data Catalog<br/>table schemas + partitions"]
+    CAT --> Q["Athena / Trino / Spark<br/>SQL over files"]
+    Q --> BI["dashboards · reports · ML"]`}
+  steps={[
+    { nodes: ["SRC", "RAW"], text: "Data arrives as-is into a **raw** zone. Keeping the original lets you reprocess later if logic changes." },
+    { nodes: ["RAW", "ETL", "CUR"], text: "Jobs clean, deduplicate and convert it to **Parquet**, organised into partitions such as `date=2026-11-23/`." },
+    { nodes: ["CUR", "CAT"], text: "The **catalog** records each table's schema and where its partitions live, so engines know how to read the files." },
+    { nodes: ["CAT", "Q"], text: "A query engine runs SQL directly against the files — no database server to manage." },
+    { nodes: ["Q", "BI"], text: "Results feed dashboards, reports and machine learning." },
+  ]}
+/>
+
+## Why Parquet
+
+**Parquet** is an open, **columnar**, compressed file format.
+
+| | JSON / CSV | Parquet |
+|---|---|---|
+| Layout | row by row, as text | column by column, binary |
+| Size | large | typically 5–10× smaller |
+| Reading 2 of 50 columns | must read everything | reads only those 2 columns |
+| Types | strings (CSV) or loose | typed schema embedded |
+| Skipping data | no | row groups store min/max stats, so engines skip irrelevant blocks |
+
+Because engines like Athena charge per **byte scanned**, Parquet plus column selection often cuts cost by 90% or more compared with querying raw JSON.
+
+## Partitioning the files
+
+Organise files into folders by a column you filter on — usually date:
+
+```text
+s3://lake/curated/orders/date=2026-11-22/part-0001.parquet
+s3://lake/curated/orders/date=2026-11-23/part-0001.parquet
+```
+
+```sql
+SELECT region, SUM(total) FROM orders
+WHERE date BETWEEN '2026-11-01' AND '2026-11-30'   -- only November's folders are read
+GROUP BY region;
+```
+
+<Diagram
+  caption="Partition pruning: the engine lists only matching folders, then reads only the needed columns inside them."
+  chart={`flowchart TB
+    Q["WHERE date in November<br/>SELECT region, total"] --> P1["date=2026-10-31 ✗ skipped"]
+    Q --> P2["date=2026-11-01 … 11-30 ✓ read"]
+    Q --> P3["date=2026-12-01 ✗ skipped"]
+    P2 --> C["inside each file: only the<br/>region and total columns"]`}
+/>
+
+Guidelines: partition on low-to-medium-cardinality columns you filter by (date, maybe region); avoid partitioning on high-cardinality columns like `user_id` (millions of tiny folders). Aim for files of roughly 128 MB–1 GB — many tiny files ("small file problem") make queries slow, so compact them.
+
+## Table formats: Iceberg, Delta, Hudi
+
+Plain folders of Parquet files lack database features: no atomic updates, no deletes for GDPR requests, schema changes are awkward. **Open table formats** — **Apache Iceberg**, Delta Lake, Apache Hudi — add a metadata layer on top of the files that provides ACID commits, row-level updates and deletes, time travel ("query as of yesterday") and safe schema evolution. Athena, Spark, Trino, Snowflake and BigQuery all read Iceberg. This combination is often called a **lakehouse**.
+
+## Lake versus warehouse
+
+| | Data lake | Data warehouse |
+|---|---|---|
+| Storage | files in object storage (cheap) | managed database storage |
+| Formats | open (Parquet, Iceberg) | proprietary internals |
+| Schema | applied when reading (or by table format) | enforced on load |
+| Best for | raw + large-scale data, ML, cheap retention | fast, governed BI queries |
+| Examples | S3 + Glue + Athena, Databricks | Snowflake, BigQuery, Redshift |
+
+Many companies use both: the lake as cheap, complete history; the warehouse (or lakehouse) for curated, fast analytics.
+
+## Getting data in from your app
+
+- **Events**: services publish to Kafka or Kinesis; Kinesis Data Firehose or Kafka Connect write batched Parquet files to S3.
+- **Database tables**: CDC (Debezium, AWS DMS) streams changes; or nightly snapshot exports.
+- **Logs**: shipped by the logging pipeline.
+
+Never point analytics queries directly at the production database — that's why the lake exists.
+
+## Costs and governance
+
+- Athena charges per TB scanned: partition, use Parquet, select only needed columns, and set per-workgroup limits.
+- S3 lifecycle rules move old raw data to cheaper storage classes.
+- Access control at table and column level (Lake Formation), encryption, and masking of personal data.
+- A data catalog with ownership and documentation keeps the lake from becoming a "data swamp".
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Querying raw JSON with `SELECT *` — slow and expensive.
+- Partitioning by a high-cardinality column, creating millions of tiny files.
+- Writing thousands of tiny files per hour from streaming jobs without compaction.
+- No schema management, so changes in source data silently break queries.
+- Keeping personal data forever with no deletion path.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you set up analytics on application data without slowing down the production database?">
+
+I'd move data out to a lake: application events through a stream such as Kinesis Firehose or Kafka Connect, and database tables via CDC or periodic exports, landing in S3. A transformation step cleans the data and writes it as Parquet, partitioned by date, ideally as Iceberg tables so updates, deletes and schema changes are safe. The Glue catalog holds table definitions, and analysts query with Athena or Trino using SQL, paying only for data scanned — which Parquet's column pruning and partition pruning keep low. For fast, governed dashboards I might load curated tables into a warehouse. The production database only feeds the pipeline and never serves analytical queries.
+
+<Fragment slot="deeper">
+
+- **Why Parquet over JSON?** Columnar, compressed, typed, and has stats for skipping — far less data scanned.
+- **What is partition pruning?** Reading only folders whose partition values match the query filter.
+- **What do Iceberg/Delta add?** ACID commits, updates/deletes, time travel and schema evolution on top of files.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Data lake", "Large-scale storage of raw and processed data as files in object storage."],
+  ["Parquet", "Open columnar, compressed file format for analytics."],
+  ["Data catalog", "Metadata service describing tables, schemas and partitions (e.g. AWS Glue)."],
+  ["Partition pruning", "Skipping files whose partition values don't match the query."],
+  ["Open table format", "Iceberg, Delta or Hudi: database-like features over lake files."],
+  ["Lakehouse", "A lake with table-format features, serving warehouse-style queries."],
+]} />

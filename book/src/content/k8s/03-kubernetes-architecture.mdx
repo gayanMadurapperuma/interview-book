@@ -1,0 +1,170 @@
+---
+title: Kubernetes architecture
+part: Kubernetes core
+order: 3
+level: core
+summary: The control plane, the worker nodes, and the reconciliation loop that keeps the cluster matching what you declared.
+---
+
+**Kubernetes** (K8s) is a platform that runs containers across a cluster of machines. You don't tell it *how* to start things; you **declare the desired state** — "run three replicas of this image, reachable on this port" — and Kubernetes continuously works to make reality match: scheduling containers onto machines, restarting them when they crash, replacing them when a machine dies, and rolling out new versions. Its architecture is a **control plane** that decides and records, and **worker nodes** that run the workloads.
+
+<Analogy>
+  A thermostat. You set the desired temperature (desired state). The thermostat keeps measuring the room (actual state) and turns the heating on or off to close the gap — forever, without you issuing commands. Kubernetes is a huge set of thermostats: one for "number of replicas", one for "pods on healthy nodes", one for "endpoints of a service", and so on.
+</Analogy>
+
+## Why it matters
+
+Kubernetes is the default platform for running services at many companies, and DevOps/backend interviews ask about its components, how a deployment actually happens, and the declarative model. Understanding the architecture makes debugging ("why is my pod Pending?") far easier.
+
+## The big picture
+
+<Diagram
+  caption="Control plane components decide and store state; node components run containers and report back."
+  chart={`flowchart TB
+    subgraph CP["Control plane"]
+      API["kube-apiserver<br/>the front door: REST API,<br/>auth, validation"]
+      ETCD[("etcd<br/>cluster state (Raft)")]
+      SCH["kube-scheduler<br/>picks a node for each new pod"]
+      CM["controller-manager<br/>reconciliation loops"]
+      CCM["cloud-controller-manager<br/>load balancers, volumes, nodes"]
+      API <--> ETCD
+      SCH <--> API
+      CM <--> API
+      CCM <--> API
+    end
+    subgraph N1["Worker node"]
+      KL1["kubelet"] --> CR1["container runtime<br/>(containerd)"]
+      KP1["kube-proxy / CNI"]
+      P1["pods"]
+    end
+    subgraph N2["Worker node"]
+      KL2["kubelet"] --> CR2["containerd"]
+      P2["pods"]
+    end
+    KL1 <--> API
+    KL2 <--> API
+    U["kubectl / CI / GitOps"] --> API`}
+  steps={[
+    { nodes: ["U", "API"], text: "Everything — kubectl, CI pipelines, controllers — talks to the **API server**. It authenticates, authorises, validates and persists objects." },
+    { nodes: ["API", "ETCD"], text: "**etcd**, a consistent key-value store using Raft, holds the entire cluster state. Only the API server talks to it." },
+    { nodes: ["SCH", "API"], text: "The **scheduler** watches for pods without a node and assigns each to a suitable node (resources, affinity, taints)." },
+    { nodes: ["CM", "CCM", "API"], text: "**Controllers** run reconciliation loops: deployments, replica sets, nodes, jobs, endpoints… The cloud controller creates load balancers and disks." },
+    { nodes: ["KL1", "CR1", "P1", "KL2", "CR2", "P2"], text: "On each node, the **kubelet** watches for pods assigned to it, asks the container runtime to start them, runs probes, and reports status back." },
+  ]}
+/>
+
+Managed services — **EKS**, **GKE**, **AKS** — run the control plane for you; you manage nodes (or use serverless nodes like Fargate or GKE Autopilot) and your workloads.
+
+## Declarative objects
+
+Everything in Kubernetes is an **object** with a `spec` (desired state) and a `status` (observed state), usually written in YAML and applied with `kubectl apply`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-api
+  labels: { app: orders-api }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: orders-api }
+  template:
+    metadata:
+      labels: { app: orders-api }
+    spec:
+      containers:
+        - name: api
+          image: registry.example.com/orders-api@sha256:4b1e…
+          ports: [{ containerPort: 3000 }]
+```
+
+**Labels** (key–value tags) and **selectors** are how objects find each other: a Deployment manages pods with `app: orders-api`; a Service routes to them by the same label.
+
+## The reconciliation loop
+
+<Diagram
+  caption="Every controller repeats: observe actual state, compare with desired state, act to close the gap."
+  chart={`flowchart LR
+    O["observe<br/>actual: 2 pods running"] --> C{"compare with desired<br/>spec.replicas = 3"}
+    C -- "gap" --> A["act<br/>create 1 pod"]
+    A --> O
+    C -- "match" --> W["wait for the next change"]
+    W --> O`}
+/>
+
+This is why Kubernetes **self-heals**: if a pod crashes or a node disappears, actual state drifts from desired state, and controllers create replacements. You never "run a command to start 3 containers" — you change the desired state and let the loop do the work.
+
+## What happens on `kubectl apply`
+
+<Diagram
+  sequence
+  caption="From applying a Deployment to running containers — a chain of controllers, each reacting to the previous one's changes via the API server."
+  chart={`sequenceDiagram
+    participant U as kubectl
+    participant API as API server / etcd
+    participant DC as Deployment controller
+    participant RS as ReplicaSet controller
+    participant S as Scheduler
+    participant K as kubelet (node)
+    U->>API: apply Deployment (replicas 3)
+    API-->>DC: watch: new Deployment
+    DC->>API: create ReplicaSet
+    API-->>RS: watch: new ReplicaSet
+    RS->>API: create 3 Pods (no node yet)
+    API-->>S: watch: unscheduled Pods
+    S->>API: bind each Pod to a node
+    API-->>K: watch: Pod assigned to me
+    K->>K: pull image, start container, run probes, report Ready`}
+  notes={[
+    "You submit the desired state. It's validated and stored in etcd.",
+    "The Deployment controller notices the new Deployment through a watch.",
+    "It creates a ReplicaSet for this version of the pod template.",
+    "The ReplicaSet controller notices it.",
+    "It creates three Pod objects — just records, not yet running anywhere.",
+    "The scheduler sees pods without a node.",
+    "It picks nodes based on requested resources and constraints, and records the binding.",
+    "The kubelet on each chosen node sees a pod assigned to it.",
+    "It pulls the image, starts the container via containerd, runs readiness probes and reports status. No single component did everything — each reacted to state.",
+  ]}
+/>
+
+## Namespaces and API extension
+
+- **Namespaces** partition a cluster for teams or environments, with their own quotas, RBAC and network policies.
+- **Custom Resource Definitions (CRDs)** + **operators** extend Kubernetes with new object types and controllers (e.g. a `PostgresCluster` resource managed by a database operator, cert-manager `Certificate` objects).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Treating Kubernetes imperatively (`kubectl run`, manual edits) instead of declaratively from version-controlled manifests.
+- Running unmanaged control planes without the expertise to operate etcd.
+- Ignoring `status` and events when debugging (`kubectl describe` shows why a pod is Pending or failing).
+- Over-using Kubernetes for very small systems where a managed container service (ECS, Cloud Run) would be simpler.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Explain the Kubernetes architecture.">
+
+Kubernetes has a control plane and worker nodes. The API server is the single entry point: it authenticates, authorises and validates requests and stores objects in etcd, a Raft-replicated key-value store holding all cluster state. The scheduler assigns new pods to nodes based on resource requests and constraints, and the controller manager runs reconciliation loops — for deployments, replica sets, nodes, endpoints and so on — that continuously compare desired state in object specs with observed state and act to close the gap; a cloud controller manages load balancers and volumes. On each node, the kubelet watches for pods assigned to it, runs them through a container runtime like containerd, executes health probes and reports status, while kube-proxy or the CNI plugin handles networking. Because everything is declarative and reconciled, the cluster self-heals when pods or nodes fail.
+
+<Fragment slot="deeper">
+
+- **What is stored in etcd?** All Kubernetes objects and their state.
+- **What does the scheduler consider?** Resource requests, node selectors/affinity, taints and tolerations, topology spread.
+- **What is an operator?** A custom controller managing a custom resource, encoding operational knowledge.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Control plane", "API server, etcd, scheduler and controllers that manage the cluster."],
+  ["Node / kubelet", "A worker machine / the agent running pods on it."],
+  ["etcd", "Consistent key-value store holding cluster state."],
+  ["Desired state", "What you declare in an object's spec."],
+  ["Reconciliation loop", "Controller pattern that continuously moves actual state toward desired state."],
+  ["Label / selector", "Tags on objects / queries that match them."],
+]} />

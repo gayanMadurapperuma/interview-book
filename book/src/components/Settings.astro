@@ -1,0 +1,73 @@
+---
+const themes = [
+  { k: 'paper', label: 'Paper' },
+  { k: 'sepia', label: 'Sepia' },
+  { k: 'night', label: 'Night' },
+];
+const sizes = ['s', 'm', 'l', 'xl'];
+---
+<div class="settings">
+  <button class="icon-btn" id="settingsBtn" aria-haspopup="true" aria-expanded="false" aria-controls="settingsPanel" title="Reading settings">
+    <span class="aa" aria-hidden="true">Aa</span>
+    <span class="visually-hidden">Reading settings</span>
+  </button>
+  <div class="settings-panel" id="settingsPanel" hidden>
+    <p class="caps">Page</p>
+    <div class="theme-row" role="radiogroup" aria-label="Theme">
+      {themes.map((t) => (
+        <button class="theme-opt" data-theme-opt={t.k} role="radio" aria-checked="false">
+          <span class={`swatch sw-${t.k}`} aria-hidden="true"><i>Aa</i></span>
+          {t.label}
+        </button>
+      ))}
+    </div>
+    <p class="caps">Text size</p>
+    <div class="size-row" role="radiogroup" aria-label="Text size">
+      {sizes.map((s, i) => (
+        <button class="size-opt" data-size-opt={s} role="radio" aria-checked="false" aria-label={`Size ${i + 1}`}>
+          <span style={`font-size:${12 + i * 3}px`}>A</span>
+        </button>
+      ))}
+    </div>
+  </div>
+</div>
+
+<script>
+  const root = document.documentElement;
+  const btn = document.getElementById('settingsBtn')!;
+  const panel = document.getElementById('settingsPanel')!;
+
+  const sync = () => {
+    document.querySelectorAll<HTMLElement>('[data-theme-opt]').forEach((b) =>
+      b.setAttribute('aria-checked', String(b.dataset.themeOpt === root.dataset.theme)));
+    document.querySelectorAll<HTMLElement>('[data-size-opt]').forEach((b) =>
+      b.setAttribute('aria-checked', String(b.dataset.sizeOpt === root.dataset.size)));
+    const meta = document.querySelector('meta[name="theme-color"]');
+    meta?.setAttribute('content', getComputedStyle(root).getPropertyValue('--bg').trim());
+  };
+
+  const close = () => { panel.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    panel.hidden = !panel.hidden;
+    btn.setAttribute('aria-expanded', String(!panel.hidden));
+  });
+  panel.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', close);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+
+  document.querySelectorAll<HTMLElement>('[data-theme-opt]').forEach((b) =>
+    b.addEventListener('click', () => {
+      root.dataset.theme = b.dataset.themeOpt!;
+      try { localStorage.setItem('book:theme', b.dataset.themeOpt!); } catch {}
+      sync();
+      window.dispatchEvent(new CustomEvent('book:theme'));
+    }));
+  document.querySelectorAll<HTMLElement>('[data-size-opt]').forEach((b) =>
+    b.addEventListener('click', () => {
+      root.dataset.size = b.dataset.sizeOpt!;
+      try { localStorage.setItem('book:size', b.dataset.sizeOpt!); } catch {}
+      sync();
+    }));
+  sync();
+</script>

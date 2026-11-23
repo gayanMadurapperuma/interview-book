@@ -1,0 +1,172 @@
+---
+title: API design and rate limiting
+part: Architecture
+order: 23
+level: core
+summary: Designing APIs that are pleasant to use and safe to evolve — REST, GraphQL and gRPC — and protecting them with rate limits.
+---
+
+An **API** is a contract between your system and its clients. A good one is predictable, consistent and hard to misuse; it can evolve without breaking existing clients; and it protects itself from abuse with **rate limiting**. The three common styles — **REST**, **GraphQL** and **gRPC** — make different trade-offs, but the principles of good design apply to all of them.
+
+<Analogy>
+  An API is the menu and ordering counter of a restaurant. A good menu is clearly organised, uses the same terms throughout, and doesn't change dishes' names every week. Rate limiting is the rule that one customer can't order 500 coffees a minute and block everyone else in the queue.
+</Analogy>
+
+## Why it matters
+
+Every system design includes an API section, and many interviews include "design the API for X". Interviewers look for sensible resources, pagination, idempotency, error formats, versioning — and a solid rate-limiting design, often asked as a standalone question.
+
+## REST essentials
+
+Model **resources** (nouns) and use HTTP methods for actions:
+
+```text
+GET    /orders?status=paid&limit=20&cursor=…   list (paginated)
+POST   /orders                                 create        → 201 + Location
+GET    /orders/{id}                            read          → 200 / 404
+PATCH  /orders/{id}                            partial update
+DELETE /orders/{id}                            delete        → 204
+POST   /orders/{id}/cancel                     action that isn't plain CRUD
+GET    /customers/{id}/orders                  sub-resource
+```
+
+| Practice | Why |
+|---|---|
+| Correct status codes: 200/201/204, 400 (bad input), 401 (not authenticated), 403 (not allowed), 404, 409 (conflict), 422, 429 (rate limited), 5xx | clients can react without parsing text |
+| Consistent error body: `{ code, message, details, requestId }` | predictable handling and support |
+| **Cursor pagination** with a limit cap | stable, fast pages (see *Slow query patterns*) |
+| **Idempotency keys** on POSTs that create or charge | safe retries |
+| Filtering, sorting and sparse fields as query params | clients fetch only what they need |
+| `ETag` + `If-None-Match` / `If-Match` | caching and optimistic concurrency |
+
+## REST vs GraphQL vs gRPC
+
+<Diagram
+  caption="Three styles, three sweet spots."
+  chart={`flowchart TB
+    Q{"Who calls it, and how?"} --> PUB["Public / partner APIs,<br/>browsers, cacheable resources"] --> REST["REST + JSON<br/>simple, cacheable, universal"]
+    Q --> UI["Many UI clients needing<br/>different shapes of nested data"] --> GQL["GraphQL<br/>client picks fields, one round trip"]
+    Q --> SVC["Internal service-to-service,<br/>high throughput, streaming"] --> GRPC["gRPC + Protobuf<br/>typed contracts, HTTP/2, fast"]`}
+/>
+
+| | REST | GraphQL | gRPC |
+|---|---|---|---|
+| Shape | fixed per endpoint | client chooses fields | fixed, typed messages |
+| Over/under-fetching | common | avoided | n/a (designed per call) |
+| HTTP caching | excellent | hard (POST, one endpoint) | n/a |
+| Typing | OpenAPI (optional) | schema (built in) | Protobuf (built in) |
+| Pitfalls | many round trips for nested data | N+1 resolvers (DataLoader), query cost limits | browser support needs a proxy; binary debugging |
+| Typical use | public APIs | BFF for web/mobile | internal microservices |
+
+## Versioning and evolution
+
+The best versioning strategy is **not breaking clients**:
+
+- **Additive changes are safe**: new fields, new endpoints, new optional parameters.
+- Clients should ignore unknown fields ("tolerant reader").
+- **Breaking changes** (removing/renaming fields, changing types or meaning) need a new version: `/v2/orders`, a header, or a new GraphQL field with the old one deprecated.
+- Deprecate with dates, warnings (`Deprecation`/`Sunset` headers) and usage metrics; remove only when traffic is gone.
+
+## Rate limiting
+
+Rate limiting caps how many requests a client may make in a period. It protects capacity, ensures fairness between clients, controls costs, and blunts abuse (credential stuffing, scraping).
+
+### Where and by what
+
+- **Where**: at the edge (API gateway, CDN/WAF) for coarse protection; in the service for fine-grained, business-aware limits.
+- **Key**: API key, user ID, IP address (careful with shared NATs), tenant, endpoint — often several at once (e.g. 1,000/min per tenant and 10/min per user on `/login`).
+
+### Algorithms
+
+<Diagram
+  caption="Four classic algorithms. Token bucket is the usual default: it allows short bursts while enforcing an average rate."
+  chart={`flowchart TB
+    FW["Fixed window counter<br/>count per clock minute<br/>simple · bursts at window edges"]
+    SL["Sliding window log<br/>store each timestamp<br/>exact · memory-heavy"]
+    SC["Sliding window counter<br/>weighted mix of current and previous window<br/>accurate enough · cheap"]
+    TB["Token bucket<br/>bucket refills at r/s up to capacity b;<br/>each request takes a token<br/>bursts up to b, average r"]
+    LB["Leaky bucket<br/>queue drained at a fixed rate<br/>smooths output"]`}
+/>
+
+| Algorithm | Burst behaviour | Memory | Notes |
+|---|---|---|---|
+| Fixed window | up to 2× limit across a window boundary | 1 counter | `INCR` + `EXPIRE` in Redis |
+| Sliding log | exact | one entry per request | sorted set of timestamps |
+| Sliding window counter | approximately exact | 2 counters | good default for "N per minute" |
+| **Token bucket** | allows bursts up to capacity | 2 numbers (tokens, last refill) | used by AWS, Stripe; great for APIs |
+| Leaky bucket | none — constant outflow | queue | shaping traffic to a downstream |
+
+<Diagram
+  caption="Token bucket: tokens drip in at a steady rate up to the bucket's capacity. A burst can spend saved-up tokens; then requests are limited to the refill rate."
+  chart={`flowchart LR
+    REF["refill<br/>10 tokens/s"] --> B[("bucket<br/>capacity 20")]
+    REQ["request"] --> CHK{"token available?"}
+    B --> CHK
+    CHK -- "yes: take 1" --> OK["allow"]
+    CHK -- "no" --> NO["429 Too Many Requests<br/>Retry-After: 1"]`}
+  steps={[
+    { nodes: ["REF", "B"], text: "Tokens are added at a steady rate (10/s) until the bucket is full (20)." },
+    { nodes: ["REQ", "CHK", "B"], text: "Each request checks for a token." },
+    { nodes: ["CHK", "OK"], text: "If there is one, it's taken and the request proceeds. A quiet client can burst up to 20 at once." },
+    { nodes: ["CHK", "NO"], text: "If the bucket is empty, reject with `429` and tell the client when to retry." },
+  ]}
+/>
+
+### Distributed rate limiting
+
+With many API servers, counters must be shared — usually in **Redis**, with the check-and-decrement done **atomically** (a Lua script or a single command) to avoid races. To avoid a Redis round trip on every request at very high volume, servers can keep local buckets and sync periodically (allowing slight overshoot), or limits can be enforced at the gateway.
+
+```lua
+-- token bucket in Redis (KEYS[1] = bucket key; ARGV = rate, capacity, now_ms, cost)
+local b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local rate, cap, now, cost = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
+local tokens = tonumber(b[1]) or cap
+local ts = tonumber(b[2]) or now
+tokens = math.min(cap, tokens + (now - ts) / 1000 * rate)
+local allowed = tokens >= cost
+if allowed then tokens = tokens - cost end
+redis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', now)
+redis.call('PEXPIRE', KEYS[1], math.ceil(cap / rate * 1000))
+return allowed and 1 or 0
+```
+
+### Responding
+
+Return **`429 Too Many Requests`** with `Retry-After`, and ideally rate-limit headers (`RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`) so well-behaved clients can pace themselves. Decide whether to **fail open** (allow traffic) or **closed** if the rate-limit store is unavailable — usually open for general limits, closed for security-critical ones like login.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Verbs in REST URLs for everything (`/getOrders`, `/createOrder`).
+- Returning `200` with an error message in the body.
+- OFFSET pagination on large collections; no maximum page size.
+- Breaking changes without a new version or deprecation period.
+- Rate-limit check and increment as two separate Redis calls (race conditions).
+- Per-IP limits only, punishing users behind shared IPs and missing distributed attackers.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you design rate limiting for a public API?">
+
+I'd enforce limits at two levels: coarse per-IP protection at the edge, and per-API-key or per-tenant limits, with stricter ones on sensitive endpoints like login, in the gateway or service. For the algorithm I'd use a token bucket — tokens refill at the allowed average rate up to a burst capacity, and each request spends one — because it permits short bursts while enforcing the average. With many API servers, state lives in Redis, and the refill-check-decrement runs atomically in a Lua script. Rejected requests get `429` with `Retry-After` and rate-limit headers so clients can back off. I'd decide fail-open versus fail-closed if Redis is unavailable, and monitor rejection rates per client to tune limits.
+
+<Fragment slot="deeper">
+
+- **Fixed window's weakness?** Up to twice the limit across a window boundary.
+- **Token vs leaky bucket?** Token allows bursts up to capacity; leaky enforces a constant output rate.
+- **REST vs GraphQL?** Fixed, cacheable resources vs client-selected fields with N+1 and caching challenges.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Resource", "A noun-like entity exposed by a REST API, addressed by URL."],
+  ["Cursor pagination", "Paging with an opaque pointer to the last item rather than an offset."],
+  ["Tolerant reader", "A client that ignores unknown fields, enabling additive evolution."],
+  ["Rate limiting", "Restricting how many requests a client can make in a time period."],
+  ["Token bucket", "Rate-limiting algorithm allowing bursts up to a capacity at an average refill rate."],
+  ["429 Too Many Requests", "HTTP status for rate-limited requests, usually with `Retry-After`."],
+]} />

@@ -1,0 +1,186 @@
+---
+title: "Promise combinators: all, allSettled, race, any"
+part: Asynchrony
+order: 21
+level: advanced
+summary: Four ways to wait for many promises at once. Each answers a different question, and none of them cancels the losers.
+demo: js-combinators
+---
+
+When you have several promises, you usually want to wait for them as a group. JavaScript offers four **combinators** — functions that take a list of promises and return one promise. They differ in one thing: **what counts as "done"**. Picking the right one is a classic interview question, and implementing `Promise.all` by hand is a classic exercise.
+
+<Analogy>
+  You've sent four friends to find things for a picnic. `all` waits until *everyone* is back — but if one calls to say "the shop is closed", you cancel the picnic right away. `allSettled` waits for everyone and then reads out who succeeded and who didn't. `race` acts on whoever calls first, good news or bad. `any` acts on the first one who calls with *good* news, and only gives up if all four fail.
+</Analogy>
+
+## Why it matters
+
+Calling APIs in parallel is one of the most common performance improvements in real code, and the choice of combinator decides how failures behave: whether one failing request breaks the whole page, or whether you can show partial results.
+
+## The four at a glance
+
+| Combinator | Fulfils when… | Rejects when… | Result |
+|---|---|---|---|
+| `Promise.all` | **all** fulfil | **any one** rejects (immediately) | array of values, in input order |
+| `Promise.allSettled` | all have settled, either way | never | array of `{ status, value }` / `{ status, reason }` |
+| `Promise.race` | the **first to settle** fulfils | the first to settle rejects | that first value or reason |
+| `Promise.any` | the **first to fulfil** | **all** reject | first value, or an `AggregateError` |
+
+<Diagram
+  caption="Which combinator to use is a question about what you need from the group."
+  chart={`flowchart TB
+    Q{"What do you need?"} --> A1["Every result,<br/>and one failure ruins it"] --> ALL["Promise.all"]
+    Q --> A2["Every outcome,<br/>partial success is useful"] --> SET["Promise.allSettled"]
+    Q --> A3["Whichever settles first<br/>(e.g. a timeout)"] --> RACE["Promise.race"]
+    Q --> A4["The first success<br/>(e.g. mirror servers)"] --> ANY["Promise.any"]`}
+/>
+
+## `Promise.all`: everything or nothing
+
+```js
+const [user, orders, prefs] = await Promise.all([
+  getUser(id),
+  getOrders(id),
+  getPrefs(id),
+]);
+```
+
+Results come back **in the order of the input**, not the order they finished. If any promise rejects, `Promise.all` rejects straight away with that error, and you do not get the other results.
+
+<Diagram
+  caption="Promise.all fails fast. The other operations keep running — they are simply ignored."
+  chart={`flowchart LR
+    S(("start")) --> A["a · 300 ms ✓"]
+    S --> B["b · 100 ms ✗"]
+    S --> C["c · 200 ms ✓"]
+    B --> R["Promise.all rejects<br/>at 100 ms"]
+    A -. "still runs,<br/>result ignored" .-> X["(discarded)"]
+    C -. "still runs" .-> X`}
+  steps={[
+    { nodes: ["S", "A", "B", "C"], text: "All three operations start immediately — creating a promise starts its work." },
+    { nodes: ["B", "R"], text: "At 100 ms, `b` rejects. `Promise.all` rejects **right away** with b's error." },
+    { nodes: ["A", "C", "X"], text: "`a` and `c` are **not cancelled**. They keep using network and CPU; their results are just thrown away." },
+  ]}
+/>
+
+<DemoLink id="js-combinators" />
+
+## `Promise.allSettled`: give me every outcome
+
+```js
+const results = await Promise.allSettled(urls.map((u) => fetch(u)));
+
+const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+const failed = results.filter((r) => r.status === 'rejected').map((r) => r.reason);
+```
+
+It never rejects. Use it for dashboards (show the widgets that loaded), batch jobs (report which items failed) and cleanup tasks (close every connection, even if some error).
+
+## `Promise.race`: first to finish, good or bad
+
+The classic use is a **timeout**:
+
+```js
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+const data = await withTimeout(fetch('/slow'), 2000);
+```
+
+Note the `finally(clearTimeout)`: without it, the timer keeps the Node process alive and fires a pointless rejection later. Also note that the slow `fetch` is **not** cancelled by losing the race. For real cancellation, pass a signal:
+
+```js
+const res = await fetch('/slow', { signal: AbortSignal.timeout(2000) });
+```
+
+## `Promise.any`: first success wins
+
+```js
+const fastest = await Promise.any([
+  fetch('https://mirror-eu.example.com/file'),
+  fetch('https://mirror-us.example.com/file'),
+]);
+```
+
+Failures are ignored as long as at least one succeeds. If **all** fail, it rejects with an `AggregateError`, whose `.errors` array holds every reason.
+
+## Implementing `Promise.all`
+
+A favourite interview exercise. The key points: keep results in **input** order, count completions, reject on the first failure, and handle an empty list and non-promise values.
+
+```js
+function promiseAll(items) {
+  return new Promise((resolve, reject) => {
+    const list = Array.from(items);
+    const results = new Array(list.length);
+    let remaining = list.length;
+    if (remaining === 0) return resolve(results);
+
+    list.forEach((item, i) => {
+      Promise.resolve(item).then((value) => {   // wrap plain values too
+        results[i] = value;                     // store by index, not by finish order
+        remaining -= 1;
+        if (remaining === 0) resolve(results);
+      }, reject);                               // first rejection wins; later calls are ignored
+    });
+  });
+}
+```
+
+Calling `reject` more than once is harmless: a promise settles only once.
+
+## Cancelling the losers
+
+None of the combinators can stop the work behind the other promises. If that work is expensive (many HTTP requests, database queries), share an `AbortController`:
+
+```js
+const controller = new AbortController();
+try {
+  return await Promise.all(
+    ids.map((id) => fetch(`/api/items/${id}`, { signal: controller.signal })),
+  );
+} catch (err) {
+  controller.abort();   // stop all remaining requests
+  throw err;
+}
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Believing `Promise.all` cancels other operations when one fails.
+- Using `Promise.all` where partial success is acceptable — use `allSettled`.
+- Writing a timeout with `race` and forgetting to clear the timer.
+- Passing functions instead of promises: `Promise.all([fetchA, fetchB])` — call them: `[fetchA(), fetchB()]`.
+- `Promise.all` over thousands of items with no concurrency limit.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is the difference between Promise.all, allSettled, race and any?">
+
+`Promise.all` fulfils with every value, in input order, once all fulfil, but rejects as soon as any one rejects. `allSettled` waits for every promise and never rejects; it gives a status object for each, so it is right when partial success is useful. `race` settles with whichever promise settles first, success or failure, which is the usual way to build a timeout. `any` fulfils with the first success and only rejects, with an `AggregateError`, if all of them fail. None of them cancel the other operations; for that you pass an `AbortSignal` to the underlying work.
+
+<Fragment slot="deeper">
+
+- **How would you implement `Promise.all`?** Store results by index, count completions, resolve at zero, reject on first error; handle empty input.
+- **Why is a timeout with `race` incomplete?** It stops waiting but not the work; use `AbortSignal.timeout` to really cancel.
+- **What is an `AggregateError`?** The error `Promise.any` rejects with; `.errors` lists every rejection.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Combinator", "A function that combines several promises into one."],
+  ["Fail fast", "Rejecting as soon as one input fails, as `Promise.all` does."],
+  ["Settled", "Either fulfilled or rejected."],
+  ["`AggregateError`", "An error object containing a list of errors; used by `Promise.any`."],
+  ["`AbortSignal`", "A token passed to cancellable APIs; aborting it stops the work."],
+]} />

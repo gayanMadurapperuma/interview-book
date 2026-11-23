@@ -1,0 +1,152 @@
+---
+title: "Case study: a notification service"
+part: Case studies
+order: 35
+level: core
+summary: Sending push, email and SMS at scale — reliably, without duplicates, respecting user preferences, and never letting a slow provider block everything else.
+---
+
+Almost every product needs to notify users: "your order shipped", "new message", "password reset", a weekly digest. A **notification service** centralises this: other services send it an event, and it decides **whether**, **how** and **when** to notify — checking preferences, rendering templates, choosing channels (push, email, SMS, in-app) — and delivers through third-party providers (APNs, FCM, SES, Twilio) reliably, at scale, without duplicates or spam.
+
+<Analogy>
+  A company's mailroom. Departments drop off messages; the mailroom checks each recipient's preferences ("email only, no calls after 9 pm"), puts the message in the right envelope (template, language), sends it by the right courier, retries if the courier fails, and keeps a log — so no department needs to know how couriers work.
+</Analogy>
+
+## 1. Requirements
+
+**Functional**
+
+- Accept notification requests from internal services (event + recipient + template + data).
+- Channels: mobile push, email, SMS, in-app inbox.
+- User preferences and opt-outs per category and channel; quiet hours; time zones.
+- Templates with localisation.
+- Scheduled and bulk sends (marketing campaigns); delivery tracking (sent, delivered, opened).
+
+**Non-functional**
+
+- Transactional notifications (OTP, password reset) are **fast** (seconds) and **high priority**.
+- **At-least-once** delivery internally, but users must not receive **duplicates**.
+- Scale: e.g. 50 million notifications/day, with bursts of millions for campaigns.
+- Isolation: a slow SMS provider or a huge campaign must not delay password resets.
+
+## 2. Estimates
+
+- 5 × 10⁷/day ≈ **600/s** average; campaigns can push **10,000+/s** for an hour.
+- Provider limits matter more than our own capacity: APNs/FCM handle high throughput, but SMS and email providers enforce rate limits and charge per message.
+
+## 3. High-level design
+
+<Diagram
+  caption="Intake validates and enqueues; processing applies preferences and templates; per-channel workers deliver through providers with retries."
+  chart={`flowchart LR
+    SVC["Order / auth / chat services"] -- "notify(event)" --> API["Notification API"]
+    API --> Q1["priority queue<br/>(transactional)"]
+    API --> Q2["bulk queue<br/>(marketing)"]
+    Q1 --> PR["Processor<br/>preferences · dedup ·<br/>template · channel choice"]
+    Q2 --> PR
+    PR --> CP["push queue"] --> PW["push workers"] --> APNS["APNs / FCM"]
+    PR --> CE["email queue"] --> EW["email workers"] --> SES["SES / SendGrid"]
+    PR --> CS["SMS queue"] --> SW["SMS workers"] --> TW["Twilio"]
+    PR --> INB[("in-app inbox")]
+    PR --> LOG[("notification log")]`}
+  steps={[
+    { nodes: ["SVC", "API"], text: "Services call the notification API (or publish events). The API validates, attaches an idempotency key and returns immediately." },
+    { nodes: ["API", "Q1", "Q2"], text: "Requests go into **separate queues by priority**, so a 5-million-user campaign can't delay a one-time password." },
+    { nodes: ["Q1", "Q2", "PR"], text: "Processors check preferences and quiet hours, deduplicate, render the template in the user's language, and choose channels." },
+    { nodes: ["PR", "CP", "CE", "CS"], text: "Each channel has its **own queue and workers** — a bulkhead: if the SMS provider is slow, push and email are unaffected." },
+    { nodes: ["PW", "EW", "SW", "APNS", "SES", "TW"], text: "Workers call providers with timeouts, retries with backoff, and respect provider rate limits." },
+    { nodes: ["PR", "INB", "LOG"], text: "In-app notifications are written to the user's inbox; every attempt is logged for status tracking and debugging." },
+  ]}
+/>
+
+## 4. Deep dive: reliability without duplicates
+
+- Each request carries an **idempotency key** (e.g. `order-1042-shipped`). The processor records keys it has handled (Redis with TTL, or a unique DB constraint) and drops repeats — producers retrying won't double-notify.
+- Queues give **at-least-once** delivery; workers acknowledge only after the provider accepts the message.
+- Before calling a provider, workers check a per-message "sent" marker to avoid re-sending after a crash between send and ack (small risk remains; providers like FCM collapse duplicates with a collapse key).
+- Failed messages retry with exponential backoff; after N attempts they go to a **dead-letter queue** and the failure is recorded.
+
+<Diagram
+  sequence
+  caption="Sending one push notification with retries, provider rate limits and status tracking."
+  chart={`sequenceDiagram
+    participant Q as Push queue
+    participant W as Push worker
+    participant P as FCM / APNs
+    participant L as Notification log
+    Q->>W: message (key: order-1042-shipped)
+    W->>P: send to device tokens
+    P-->>W: 503 (temporarily unavailable)
+    W->>Q: retry later (backoff + jitter)
+    Q->>W: redelivered
+    W->>P: send
+    P-->>W: 200 accepted / token invalid
+    W->>L: status sent (+ remove invalid tokens)`}
+  notes={[
+    "A worker takes a push job from its channel queue.",
+    "It sends to the user's device tokens through the provider.",
+    "The provider is temporarily unavailable.",
+    "The worker schedules a retry with backoff instead of failing the job or hammering the provider.",
+    "The message comes back later.",
+    "Second attempt.",
+    "Success for valid tokens; some tokens may be reported invalid (app uninstalled).",
+    "The worker logs the outcome and cleans up dead device tokens.",
+  ]}
+/>
+
+## 5. Deep dive: preferences, quiet hours, throttling
+
+- **Preferences** per user, category and channel (`marketing: email only`, `security: all channels`). Security and transactional messages often can't be disabled (but must respect legal rules for SMS/email marketing).
+- **Quiet hours** in the user's time zone: non-urgent notifications are **scheduled** for later (a delayed queue or scheduler table).
+- **Frequency caps and batching**: don't send 30 "new like" pushes — aggregate into one digest ("Ada and 29 others liked your post") using a short batching window.
+- **Channel fallback**: try push; if no active device or not opened within N minutes for important messages, send email.
+
+## 6. Templates and content
+
+Templates versioned and stored centrally, rendered with user data and locale; preview and test tooling for product teams; links with tracking parameters; unsubscribe links in every marketing email (legal requirement).
+
+## 7. Campaigns and scale
+
+Bulk sends are produced by a **scheduler** that pages through the audience and enqueues in batches at a controlled rate, respecting provider limits and spreading load. Workers autoscale on queue depth. Track progress and allow cancelling a campaign mid-way.
+
+## 8. Tracking and observability
+
+- Status per notification: queued → sent → delivered → opened/clicked (from provider webhooks, verified by signature).
+- Metrics per channel and provider: latency, failure rates, queue depth, DLQ size.
+- Alerts on transactional delivery latency (OTPs taking more than a few seconds is a real incident).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- One shared queue for OTPs and marketing blasts.
+- No idempotency, so retries send duplicates.
+- Synchronous provider calls inside the producing service's request.
+- Ignoring provider rate limits and getting throttled or blocked.
+- Sending notifications at 3 a.m. local time, or without unsubscribe options.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Design a notification service that sends push, email and SMS.">
+
+Producers call a notification API, or publish events, with a recipient, a template, data and an idempotency key; the API validates and enqueues, with separate queues for transactional and bulk traffic so campaigns can't delay one-time passwords. Processors deduplicate by the idempotency key, apply user preferences, opt-outs and quiet hours — scheduling non-urgent messages for later — render localised templates, and route to per-channel queues. Each channel has its own workers, which act as bulkheads; they call providers like FCM, SES and Twilio with timeouts, exponential backoff, provider-specific rate limits and dead-letter queues, and acknowledge only after acceptance. Every attempt is logged, provider webhooks update delivery status, and invalid device tokens are cleaned up. Frequency caps and batching prevent spam, and campaigns are enqueued gradually by a scheduler.
+
+<Fragment slot="deeper">
+
+- **How do you avoid duplicate notifications?** Idempotency keys checked before sending, plus provider collapse keys.
+- **Why per-channel queues?** Isolation: one slow provider doesn't block others.
+- **How do you handle quiet hours?** Schedule non-urgent sends for the user's local morning via a delayed queue.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Channel", "A delivery medium: push, email, SMS or in-app."],
+  ["Provider", "Third-party delivery service such as APNs, FCM, SES or Twilio."],
+  ["Priority queue", "Separate, faster lane for urgent messages."],
+  ["Device token", "Identifier for an app installation used to send push notifications."],
+  ["Frequency cap", "Limit on how many notifications a user receives in a period."],
+  ["Collapse key", "Provider feature that replaces older pending notifications with newer ones."],
+]} />

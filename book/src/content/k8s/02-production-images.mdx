@@ -1,0 +1,161 @@
+---
+title: Building production images for Node.js
+part: Containers
+order: 2
+level: core
+summary: A small, fast-building, secure Dockerfile for a Node service — multi-stage builds, caching, non-root users, signals and image scanning.
+---
+
+A Dockerfile that "works" and one that's ready for production are very different. A good production image is **small** (fast to pull, less to attack), **reproducible** (lockfile installs, pinned base images), **fast to build** (layer caching), **secure** (non-root, no build tools or secrets, scanned), and **well-behaved at runtime** (handles signals, logs to stdout). Multi-stage builds make all of that straightforward.
+
+<Analogy>
+  Moving house. You don't ship the toolbox, sawdust and offcuts along with the finished bookshelf — you build it in the workshop, then move only the finished piece. A multi-stage build builds in one stage (the workshop) and copies only the result into a clean final stage.
+</Analogy>
+
+## Why it matters
+
+Interviewers often ask you to review or write a Dockerfile. Bloated, root-running images with secrets inside are common real-world findings in security audits, and slow builds waste CI time on every commit.
+
+## A production Dockerfile
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+# ---- deps: install production dependencies only ----
+FROM node:24-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev
+
+# ---- build: compile TypeScript / bundle ----
+FROM node:24-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build
+
+# ---- runtime: only what's needed to run ----
+FROM node:24-alpine AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=deps  --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --chown=node:node package.json ./
+USER node
+EXPOSE 3000
+CMD ["node", "dist/server.js"]
+```
+
+<Diagram
+  caption="Multi-stage build: dependencies and compilation happen in separate stages; the final image receives only runtime files."
+  chart={`flowchart LR
+    subgraph S1["stage: deps"]
+      D1["npm ci --omit=dev"]
+    end
+    subgraph S2["stage: build"]
+      B1["npm ci (all deps)"] --> B2["tsc / bundle → dist/"]
+    end
+    subgraph S3["stage: runtime (shipped)"]
+      R1["node_modules (prod only)"]
+      R2["dist/"]
+      R3["USER node · CMD node dist/server.js"]
+    end
+    D1 -- "COPY --from=deps" --> R1
+    B2 -- "COPY --from=build" --> R2`}
+  steps={[
+    { nodes: ["D1"], text: "One stage installs only production dependencies from the lockfile." },
+    { nodes: ["B1", "B2"], text: "Another installs everything (TypeScript, bundlers) and compiles to `dist/`." },
+    { nodes: ["R1", "R2", "R3"], text: "The final image copies just the production `node_modules` and the compiled output. Compilers, dev dependencies and source never ship." },
+  ]}
+/>
+
+## The checklist, explained
+
+| Practice | Why |
+|---|---|
+| **Pin the base image** (`node:24.11-alpine`, or by digest) | reproducible builds; controlled upgrades |
+| **Small base**: `-alpine`, `-slim` or distroless | fewer packages = fewer vulnerabilities, faster pulls |
+| **Copy lockfile first, `npm ci`, then code** | dependency layer cached across code changes |
+| **`npm ci --omit=dev`** for runtime deps | smaller image, fewer packages |
+| **Multi-stage** | build tools never reach production |
+| **`.dockerignore`** (`node_modules`, `.git`, `.env`, tests) | smaller context, no local secrets copied |
+| **`USER node`** (non-root) | limits damage if the app is compromised |
+| **Exec-form `CMD ["node", …]`** | Node is PID 1 and receives SIGTERM (no `npm start` wrapper) |
+| **No secrets** in `ENV`, `ARG` or files | images are shared and inspectable; use runtime secrets or BuildKit secret mounts |
+| **Log to stdout/stderr** | the platform collects logs |
+| **`HEALTHCHECK`** (Docker) or Kubernetes probes | restart unhealthy containers |
+
+### Signals and PID 1
+
+When the orchestrator stops a container it sends **SIGTERM** to PID 1. With `CMD npm start` or `sh -c`, PID 1 is npm or the shell, which may not forward the signal — Node never runs its graceful shutdown and is SIGKILLed after the grace period. Use exec form, or `--init`/`tini` if you need an init process to reap zombie processes.
+
+### Native modules and Alpine
+
+Alpine uses musl libc. Packages with native binaries (bcrypt, sharp, some database drivers) must have musl builds or be compiled in the build stage; otherwise use a `-slim` (Debian) base.
+
+## Image size and build speed
+
+```text
+node:24 (Debian full)        ~1.1 GB
+node:24-slim                 ~250 MB
+node:24-alpine               ~160 MB
+distroless/nodejs + app      ~150 MB, no shell or package manager
+```
+
+BuildKit features help: cache mounts for npm (`--mount=type=cache`), secret mounts for private registries (`--mount=type=secret`), and remote cache in CI (`--cache-from`) so pipelines don't rebuild unchanged layers.
+
+## Scanning, signing, SBOMs
+
+<Diagram
+  caption="A CI pipeline for container images."
+  chart={`flowchart LR
+    B["build image<br/>(tag = git SHA)"] --> T["run tests<br/>in the image"]
+    T --> SC["scan<br/>Trivy / Grype / ECR scan"]
+    SC --> SB["generate SBOM"]
+    SB --> SG["sign (cosign)"]
+    SG --> P["push to registry"]
+    P --> D["deploy by digest;<br/>admission policy verifies signature"]`}
+  flow
+/>
+
+- Fail the build on critical vulnerabilities with available fixes.
+- Rebuild regularly to pick up base-image patches even without code changes.
+- Tag with the git commit SHA (plus a semver tag for releases) and deploy by **digest**.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `COPY . .` before `npm install` — every code change reinstalls all dependencies.
+- No `.dockerignore`: local `node_modules` and `.env` copied in.
+- Running as root; using `npm start` as CMD.
+- `ARG`/`ENV` for secrets (they persist in image history).
+- Unpinned base images that change underneath you.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you write a production Dockerfile for a Node.js service?">
+
+I'd use a multi-stage build on a pinned slim or Alpine Node base. One stage copies only the package files and runs `npm ci --omit=dev` for production dependencies; another installs everything and compiles TypeScript; the final stage copies just the production `node_modules` and the compiled output, so build tools and source never ship. Copying the lockfile before the code keeps the dependency layer cached across commits, and a `.dockerignore` excludes `node_modules`, `.git` and `.env`. The final image runs as the non-root `node` user with an exec-form `CMD ["node", "dist/server.js"]`, so Node is PID 1 and receives SIGTERM for graceful shutdown. No secrets in the image; logs go to stdout. In CI the image is tagged with the commit SHA, scanned, given an SBOM, signed, and deployed by digest.
+
+<Fragment slot="deeper">
+
+- **Why exec-form CMD?** So the signal goes directly to Node, not a shell or npm.
+- **Alpine caveat?** musl libc — native modules may need rebuilding or a Debian slim base.
+- **How do you pass secrets at build time?** BuildKit secret mounts, never ARG/ENV.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Multi-stage build", "Dockerfile with several stages; only the last ships."],
+  ["Layer cache", "Reusing unchanged build layers to speed up builds."],
+  ["`.dockerignore`", "Excludes files from the build context."],
+  ["Distroless image", "Minimal base with only the runtime, no shell or package manager."],
+  ["PID 1", "The first process in a container, which receives stop signals."],
+  ["Image signing", "Cryptographically signing images so deployments can verify origin."],
+]} />

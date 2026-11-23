@@ -1,0 +1,148 @@
+---
+title: "Amazon SQS, SNS and EventBridge"
+part: Core components
+order: 26
+level: core
+summary: AWS's fully managed queue, pub/sub topic and event bus — what each does, how they combine, and the settings that decide reliability.
+---
+
+AWS offers three managed messaging services you'll meet in almost every AWS-based design. **SQS** (Simple Queue Service) is a work queue: producers send messages, consumers poll, process and delete them. **SNS** (Simple Notification Service) is pub/sub: a message published to a topic is pushed to every subscriber — SQS queues, Lambda functions, HTTP endpoints, email, SMS. **EventBridge** is an event bus with content-based routing rules, schema discovery and integrations with SaaS and AWS services. All three are serverless: no brokers to run, near-unlimited scale, pay per request.
+
+<Analogy>
+  SNS is a loudspeaker announcement; SQS queues are the inboxes of each department that heard it and will deal with it when they can; EventBridge is a smart receptionist who reads every message and forwards it only to the departments whose rules say they care.
+</Analogy>
+
+## Why it matters
+
+AWS-heavy interviews (and real systems) constantly use the **SNS → SQS fan-out** pattern, SQS-triggered Lambdas and DLQs. Knowing visibility timeouts, FIFO vs standard and batch-failure handling separates people who've used them from people who've read about them.
+
+## SQS
+
+<Diagram
+  sequence
+  caption="SQS lifecycle: receive hides the message for the visibility timeout; delete removes it; otherwise it reappears and, after maxReceiveCount, moves to the DLQ."
+  chart={`sequenceDiagram
+    participant P as Producer
+    participant Q as SQS queue
+    participant W as Worker
+    participant D as DLQ
+    P->>Q: SendMessage
+    W->>Q: ReceiveMessage (long poll 20 s)
+    Q-->>W: message (invisible for 60 s)
+    W->>Q: DeleteMessage after success
+    Q->>D: after 5 failed receives → DLQ`}
+  notes={[
+    "The producer sends a message; SQS stores it redundantly across availability zones.",
+    "A worker long-polls, waiting up to 20 seconds for messages instead of hammering the API.",
+    "It receives a message, which becomes invisible to others for the visibility timeout.",
+    "On success it deletes it. If it crashes or the timeout passes, the message becomes visible again — at-least-once delivery.",
+    "A redrive policy moves messages that keep failing to a dead-letter queue.",
+  ]}
+/>
+
+| Setting | What it does | Guidance |
+|---|---|---|
+| **Visibility timeout** | how long a received message is hidden | > max processing time (6× Lambda timeout for Lambda triggers); extend for long jobs |
+| **Long polling** (`WaitTimeSeconds=20`) | wait for messages instead of empty responses | always on — cheaper, fewer empty receives |
+| **Redrive policy / DLQ** | after `maxReceiveCount` failures, move to DLQ | always configure; alarm on DLQ depth |
+| **Delay queue / message timer** | delay delivery up to 15 min | scheduled retries |
+| **Retention** | 1 min – 14 days | messages older than this are deleted |
+| **Message size** | up to 256 KB (1 MB for some) | larger → store in S3, send pointer |
+
+### Standard vs FIFO
+
+| | Standard | FIFO |
+|---|---|---|
+| Ordering | best effort | strict within a **message group ID** |
+| Duplicates | possible (at-least-once) | exactly-once processing within a 5-minute dedup window |
+| Throughput | nearly unlimited | lower (thousands/s, higher with high-throughput mode) |
+| Use | most workloads | when per-entity order matters: use `MessageGroupId = orderId` |
+
+## SNS and the fan-out pattern
+
+<Diagram
+  caption="SNS → SQS fan-out: one published event reaches every interested service, each with its own durable queue, retries and DLQ."
+  chart={`flowchart LR
+    O["Order service"] -- "publish OrderPlaced" --> T(("SNS topic<br/>order-events"))
+    T --> Q1[["SQS: billing"]] --> B["billing workers"]
+    T --> Q2[["SQS: email<br/>filter: country = UK"]] --> E["email workers"]
+    T --> Q3[["SQS: analytics"]] --> A["Lambda"]
+    T --> HTTP["HTTPS webhook"]`}
+  steps={[
+    { nodes: ["O", "T"], text: "The producer publishes once to a topic. It doesn't know who listens." },
+    { nodes: ["T", "Q1", "Q2", "Q3"], text: "SNS pushes a copy into each subscribed SQS queue. **Subscription filter policies** let a subscriber receive only matching messages." },
+    { nodes: ["Q1", "B", "Q2", "E", "Q3", "A"], text: "Each service consumes from its own queue at its own pace, with its own retries and DLQ — one slow service doesn't affect the others." },
+    { nodes: ["T", "HTTP"], text: "SNS can also push directly to HTTP endpoints, Lambda, email or SMS." },
+  ]}
+/>
+
+Why not subscribe services to SNS directly over HTTP? A queue in between buffers spikes, survives consumer downtime and gives you per-service retries and DLQs. SNS FIFO topics + SQS FIFO queues preserve ordering through fan-out.
+
+## Lambda with SQS
+
+An SQS event source mapping polls the queue and invokes your function with batches.
+
+- Return **partial batch failures** (`ReportBatchItemFailures`) so only failed messages are retried, not the whole batch.
+- Set **maximum concurrency** to protect downstream databases.
+- Make handlers idempotent; duplicates happen.
+
+```js
+export const handler = async (event) => {
+  const failures = [];
+  for (const record of event.Records) {
+    try { await process(JSON.parse(record.body)); }
+    catch { failures.push({ itemIdentifier: record.messageId }); }
+  }
+  return { batchItemFailures: failures };   // only these are retried
+};
+```
+
+## EventBridge
+
+An **event bus** where producers put structured events and **rules** route them by content to targets (Lambda, SQS, Step Functions, API destinations, other buses/accounts). Extras: schema registry, archive and replay, scheduled rules (cron), and built-in events from AWS services and SaaS partners. Choose it for **event-driven integration** across many services and accounts with content-based routing; choose SNS for simple, high-throughput fan-out.
+
+## Choosing among them
+
+| Need | Service |
+|---|---|
+| Background jobs, buffering, worker pools | SQS |
+| One event → many consumers | SNS → SQS per consumer |
+| Content-based routing across services/accounts, SaaS events, cron | EventBridge |
+| Ordered stream, replay, multiple readers by position | Kinesis or MSK (Kafka) |
+| Long multi-step workflows with retries and state | Step Functions |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Visibility timeout shorter than processing time → duplicates and loops.
+- No DLQ, or a DLQ nobody alarms on.
+- Expecting ordering from a standard queue.
+- Failing a whole Lambda batch because one message failed.
+- Short polling (many empty, billable receives).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you use SQS and SNS in an event-driven AWS architecture?">
+
+A service publishes each domain event once to an SNS topic, and every consumer service subscribes its own SQS queue, optionally with a filter policy — the fan-out pattern. That decouples producers from consumers, buffers spikes, and gives each consumer independent retries and a dead-letter queue. Consumers long-poll their queue, process, and delete messages; the visibility timeout must exceed processing time, a redrive policy moves repeatedly failing messages to a DLQ that we alarm on, and handlers are idempotent because delivery is at-least-once. Where ordering per entity matters I'd use FIFO topics and queues with the entity ID as the message group. With Lambda consumers I'd report partial batch failures and cap concurrency. For richer content-based routing across accounts or SaaS events I'd use EventBridge, and for replayable ordered streams Kinesis or Kafka.
+
+<Fragment slot="deeper">
+
+- **What is the visibility timeout?** How long a received message is hidden before becoming available again.
+- **Standard vs FIFO?** Best-effort order and possible duplicates vs strict per-group order and deduplication.
+- **Why put SQS behind SNS?** Durability, buffering and independent retries per consumer.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["SQS", "Managed message queue with at-least-once delivery."],
+  ["SNS", "Managed pub/sub topics pushing to subscribers."],
+  ["Visibility timeout", "Period a received SQS message stays hidden from other consumers."],
+  ["Redrive policy", "Moves messages to a DLQ after too many failed receives."],
+  ["Message group ID", "FIFO grouping key; ordering is guaranteed within a group."],
+  ["EventBridge", "Managed event bus with content-based routing rules."],
+]} />

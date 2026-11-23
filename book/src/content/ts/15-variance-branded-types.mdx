@@ -1,0 +1,161 @@
+---
+title: Variance, branded types and type-level safety
+part: Type-level programming
+order: 15
+level: advanced
+summary: When one type can stand in for another, where TypeScript's type system is deliberately unsound, and how branded types stop you mixing up IDs, money and units.
+---
+
+**Assignability** — when a value of one type may be used where another type is expected — is the heart of a type system. For simple types it's intuitive (a `Dog` is an `Animal`). For **generic** types it depends on **variance**: is an array of dogs an array of animals? A function that accepts animals usable as one that accepts dogs? TypeScript makes some deliberately **unsound** choices for convenience, and its **structural** typing means two different things with the same shape are interchangeable — which **branded types** fix for IDs, currencies and units.
+
+<Analogy>
+  A box of apples is a box of fruit — as long as you only take fruit out. If someone treats it as "a box of fruit" and puts a banana in, the apple-only box is now wrong. Variance is the set of rules about when "a box of apples" can safely be called "a box of fruit", and branding is putting a coloured sticker on boxes so "apples (euros)" can't be mistaken for "apples (dollars)".
+</Analogy>
+
+## Why it matters
+
+Senior interviews probe type-system depth: covariance and contravariance, why arrays are unsound, how to prevent passing a `UserId` where an `OrderId` is expected. These ideas explain confusing compiler errors and prevent real bugs.
+
+## Variance in one table
+
+Assume `Dog` is assignable to `Animal` (Dog is a subtype).
+
+| Kind | Rule | Example in TypeScript |
+|---|---|---|
+| **Covariant** | `F<Dog>` → `F<Animal>` ✓ | readonly arrays, return types, `Promise<T>` |
+| **Contravariant** | `F<Animal>` → `F<Dog>` ✓ | function **parameters** (with `strictFunctionTypes`) |
+| **Invariant** | neither direction | mutable containers in a sound system |
+| **Bivariant** | both directions | method parameters (legacy unsoundness) |
+
+<Diagram
+  caption="Outputs (things you read) are covariant; inputs (things you accept) are contravariant."
+  chart={`flowchart TB
+    subgraph CO["Covariant: producers"]
+      direction LR
+      p1["() => Dog"] -- "assignable to" --> p2["() => Animal"]
+    end
+    subgraph CONTRA["Contravariant: consumers"]
+      direction LR
+      c1["(a: Animal) => void"] -- "assignable to" --> c2["(d: Dog) => void"]
+    end
+    CO ~~~ CONTRA`}
+  steps={[
+    { nodes: ["p1", "p2"], text: "A function that **returns** a Dog can be used where one returning an Animal is expected — callers get a Dog, which is an Animal. Covariant." },
+    { nodes: ["c1", "c2"], text: "A function that **accepts** any Animal can be used where one accepting a Dog is expected — it can certainly handle a Dog. Contravariant." },
+    { nodes: ["p1", "c2"], text: "The reverse fails: a function needing a Dog can't safely be given any Animal (a Cat would break it)." },
+  ]}
+/>
+
+```ts
+type Handler<T> = (item: T) => void;
+const handleAnimal: Handler<Animal> = (a) => console.log(a.name);
+const handleDog: Handler<Dog> = handleAnimal;   // ✓ contravariance
+const back: Handler<Animal> = handleDog;        // ✘ with strictFunctionTypes
+```
+
+## Where TypeScript is deliberately unsound
+
+```ts
+const dogs: Dog[] = [new Dog()];
+const animals: Animal[] = dogs;       // allowed (arrays treated covariantly)
+animals.push(new Cat());              // allowed
+dogs[1].bark();                       // runtime crash: it's a Cat
+```
+
+Mutable arrays should be invariant, but TypeScript treats them covariantly because it's far more convenient. Use `readonly Animal[]` for inputs you don't mutate — it's genuinely covariant and safe.
+
+Other known holes: **method parameters** are checked bivariantly (method syntax `handle(x: T): void` in interfaces), `any`, type assertions, unchecked index access (enable `noUncheckedIndexedAccess`), and `!`. TypeScript's goal is productivity with mostly-sound checking, not mathematical soundness.
+
+You can declare variance explicitly for generic types to document intent and speed up checks: `interface Producer<out T>`, `interface Consumer<in T>`.
+
+## Branded (nominal) types
+
+Structural typing means these are all just `string` or `number`:
+
+```ts
+function refund(orderId: string, userId: string, amount: number) {}
+refund(user.id, order.id, 4999);   // compiles — arguments swapped!
+```
+
+A **brand** adds a phantom property that exists only in the type system, making otherwise identical types incompatible:
+
+```ts
+declare const brand: unique symbol;
+type Brand<T, B extends string> = T & { readonly [brand]: B };
+
+type UserId  = Brand<string, 'UserId'>;
+type OrderId = Brand<string, 'OrderId'>;
+type Cents   = Brand<number, 'Cents'>;
+
+// the only way to create one: a constructor that validates
+const UserId = (s: string): UserId => {
+  if (!/^usr_[a-z0-9]+$/.test(s)) throw new Error('invalid user id');
+  return s as UserId;
+};
+const Cents = (n: number): Cents => {
+  if (!Number.isInteger(n) || n < 0) throw new Error('invalid amount');
+  return n as Cents;
+};
+
+function refund(orderId: OrderId, userId: UserId, amount: Cents) {}
+refund(userId, orderId, Cents(4999));   // ✘ compile error: arguments swapped
+refund(orderId, userId, 49.99);         // ✘ plain number isn't Cents
+```
+
+<Diagram
+  caption="Branding: raw values become branded only by passing through a validating constructor, so the brand also means 'already validated'."
+  chart={`flowchart LR
+    RAW["raw string from request"] --> V{"UserId(s)<br/>validate format"}
+    V -- "valid" --> B["UserId (branded)"]
+    V -- "invalid" --> ERR["throw / 400"]
+    B --> F["functions requiring UserId"]
+    RAW -. "✘ can't pass directly" .-> F`}
+/>
+
+Brands cost nothing at runtime (they're erased) and are great for IDs, money, units (`Meters` vs `Feet`), sanitised strings (`SafeHtml`), and validated data (`Email`). zod supports them with `.brand<'UserId'>()`.
+
+## "Make illegal states unrepresentable"
+
+Combining these ideas:
+
+- Discriminated unions for states (no `receiptId` on a pending payment).
+- Branded types for identity and units.
+- `readonly` for data that mustn't change.
+- Exhaustive switches with `never`.
+- `NonEmptyArray<T> = [T, ...T[]]` when "at least one" matters.
+
+The compiler then catches whole categories of bugs — mixed-up IDs, unhandled states — before tests even run.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Passing mutable arrays through covariant positions and mutating them.
+- Method-syntax callbacks hiding unsound parameter checks (prefer property syntax: `handle: (x: T) => void`).
+- Plain `string` for every kind of ID.
+- Creating branded values with `as` all over the code instead of one validating constructor.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What are covariance and contravariance, and what are branded types for?">
+
+Variance describes how subtyping of a generic type relates to subtyping of its parameter. Outputs are covariant — a function returning a Dog can be used where one returning an Animal is expected — and inputs are contravariant: a function accepting any Animal can stand in for one accepting a Dog, which TypeScript enforces for function types under `strictFunctionTypes`. TypeScript is deliberately unsound in places — mutable arrays are treated covariantly, and method parameters bivariantly — so I use readonly arrays for inputs. Because typing is structural, a `UserId` and an `OrderId` that are both strings are interchangeable, which lets you swap arguments silently. A branded type intersects the base type with a phantom property, so they become incompatible at compile time with zero runtime cost; creating them only through a validating constructor means the brand also certifies the value was checked.
+
+<Fragment slot="deeper">
+
+- **Why are mutable arrays unsound in TS?** Writing a Cat into a Dog[] viewed as Animal[] is allowed.
+- **What are `in`/`out` variance annotations?** Explicit declarations of contravariance/covariance on type parameters.
+- **Do brands exist at runtime?** No — they're erased; the constructor function is the runtime part.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Assignability", "Whether a value of one type may be used where another is expected."],
+  ["Covariance", "Subtype relation preserved: F of Dog is assignable to F of Animal."],
+  ["Contravariance", "Relation reversed: F of Animal is assignable to F of Dog (parameters)."],
+  ["Soundness", "Guarantee that well-typed programs never have type errors at runtime."],
+  ["Branded type", "A type made nominal by a phantom property, e.g. UserId."],
+]} />

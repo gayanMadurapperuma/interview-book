@@ -1,0 +1,146 @@
+---
+title: Availability maths, failure models and redundancy
+part: Performance & reliability
+order: 16
+level: core
+summary: What "three nines" really means, why chaining services lowers availability and redundancy raises it, and how systems fail in practice.
+---
+
+**Availability** is the fraction of time a system works correctly. It's usually quoted in "nines": 99.9% (three nines) allows about 8.8 hours of downtime a year; 99.99% about 53 minutes. A system is built from parts, and simple arithmetic shows how they combine: components **in series** (all needed) multiply their availabilities — making the whole **less** available than any part — while **redundant** components in parallel make the whole **more** available. Designing for availability is mostly about removing single points of failure and limiting the blast radius of each failure.
+
+<Analogy>
+  Christmas lights. Old-style lights wired in series go dark if any single bulb fails — the more bulbs, the more likely the string is dark. Lights wired in parallel stay lit even if a few bulbs die. Your architecture is a string of lights: every required dependency is a bulb in series.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask you to reason about availability targets, single points of failure, multi-AZ and multi-region designs. Being able to say "three dependencies at 99.9% in series give about 99.7%" shows you can quantify trade-offs.
+
+## The nines
+
+| Availability | Downtime per year | per month | per week |
+|---|---|---|---|
+| 99% | 3.65 days | 7.3 hours | 1.7 hours |
+| 99.9% | 8.8 hours | 43.8 minutes | 10 minutes |
+| 99.95% | 4.4 hours | 21.9 minutes | 5 minutes |
+| 99.99% | 52.6 minutes | 4.4 minutes | 1 minute |
+| 99.999% | 5.3 minutes | 26 seconds | 6 seconds |
+
+Each extra nine costs roughly 10× more effort: redundancy everywhere, automated failover, careful deploys, 24/7 on-call. Most products don't need five nines.
+
+## Series and parallel
+
+<Diagram
+  caption="In series, availabilities multiply (worse). In parallel, failure probabilities multiply (better)."
+  chart={`flowchart TB
+    subgraph Series["Series: all required"]
+      direction LR
+      A1["LB 99.99%"] --> A2["API 99.9%"] --> A3["DB 99.9%"] --> A4["Payment API 99.9%"]
+    end
+    subgraph Parallel["Parallel: any one is enough"]
+      direction LR
+      P1["API instance 99%"]
+      P2["API instance 99%"]
+      P3["API instance 99%"]
+    end
+    Series --> RS["0.9999 × 0.999 × 0.999 × 0.999<br/>≈ 99.69% (≈ 27 h/year down)"]
+    Parallel --> RP["1 − (0.01)³<br/>= 99.9999%"]`}
+  steps={[
+    { nodes: ["A1", "A2", "A3", "A4"], text: "A request needs the load balancer, the API, the database and a payment provider — all of them." },
+    { nodes: ["A1", "A2", "A3", "A4", "RS"], text: "Multiply: about 99.69%. The whole is worse than its weakest part, and every new required dependency lowers it further." },
+    { nodes: ["P1", "P2", "P3"], text: "Three independent instances, any one of which can serve traffic." },
+    { nodes: ["P1", "P2", "P3", "RP"], text: "All three must fail together: 0.01³. Even mediocre parts become highly available — if failures are truly independent." },
+  ]}
+/>
+
+- **Series**: A = A₁ × A₂ × … × Aₙ
+- **Parallel** (independent): A = 1 − (1 − A₁) × (1 − A₂) × …
+
+The catch is **independence**. Three instances in the same rack, zone or deploy share failures (power, network, a bad release). Redundancy only helps if replicas fail independently — hence multiple availability zones, staggered deploys and diverse dependencies.
+
+## Removing single points of failure
+
+<Diagram
+  caption="A typical highly available layout within one region: every tier has redundancy across availability zones."
+  chart={`flowchart TB
+    DNS["DNS (managed, anycast)"] --> LB["Load balancer<br/>(managed, multi-AZ)"]
+    LB --> AZ1["AZ-a: API × 3"]
+    LB --> AZ2["AZ-b: API × 3"]
+    LB --> AZ3["AZ-c: API × 3"]
+    AZ1 --> DBP[("DB primary AZ-a")]
+    AZ2 --> DBP
+    AZ3 --> DBP
+    DBP -- "sync replica" --> DBS[("DB standby AZ-b<br/>auto failover")]
+    AZ1 --> RC[("Redis replicas<br/>across AZs")]`}
+/>
+
+Checklist: multiple instances per tier, spread across availability zones; managed load balancer; database with standby and automatic failover; replicated cache; no one-off "special" server; queues and storage on managed, replicated services.
+
+## Failure models
+
+How things fail determines how you defend:
+
+| Failure | Example | Defence |
+|---|---|---|
+| **Crash (fail-stop)** | process or machine dies | redundancy, health checks, restarts |
+| **Omission** | messages lost | retries, acks, idempotency |
+| **Timing / gray failure** | node is slow, not dead; passes health checks | timeouts, outlier detection, circuit breakers |
+| **Byzantine** | node sends wrong or malicious data | checksums, validation; full BFT only for blockchains/hostile settings |
+| **Correlated** | AZ outage, bad config pushed everywhere, expired certificate | multi-AZ/region, staged rollouts, fault isolation |
+
+**Gray failures** — partial, slow, intermittent — cause many real outages because simple health checks still pass. Health checks should test real functionality, and clients should detect slow peers.
+
+## Limiting the blast radius
+
+- **Cells / shards**: split users across independent copies of the stack, so one failure affects a fraction of customers.
+- **Bulkheads**: separate pools for different dependencies or customer tiers.
+- **Staged rollouts**: canary → one zone → everything; automatic rollback on errors.
+- **Graceful degradation**: if recommendations are down, show the page without them.
+- **Static stability**: systems keep working with their last known configuration if the control plane fails.
+
+## Multi-region
+
+| Mode | RTO / RPO | Cost / complexity |
+|---|---|---|
+| Backup & restore in another region | hours / hours | low |
+| Pilot light (data replicated, minimal infra) | tens of minutes / minutes | medium |
+| Warm standby (scaled-down copy running) | minutes / seconds–minutes | medium–high |
+| Active–active (all regions serve traffic) | seconds / near zero | high (write conflicts, routing) |
+
+**RTO** (recovery time objective) is how long recovery may take; **RPO** (recovery point objective) is how much recent data you can afford to lose.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Counting redundant components as independent when they share a zone, deploy or config.
+- Adding required dependencies without accounting for the availability cost.
+- Health checks that only test "process is up".
+- Untested failover and backups — they fail when you need them.
+- Aiming for five nines without the budget or the need.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you design a system for high availability?">
+
+I start from a target, like 99.95%, which allows about 22 minutes of downtime a month, and work out the maths: required dependencies in series multiply, so four at 99.9% give only about 99.6%; independent redundant components in parallel multiply failure probabilities, so redundancy raises availability. So I remove single points of failure — several stateless instances across availability zones behind a managed load balancer, a database with a synchronous standby and automatic failover, replicated caches and queues — and reduce the number of hard dependencies, degrading gracefully when optional ones fail. Because failures are often correlated or gray, I use real health checks, timeouts and circuit breakers, staged rollouts, and cell-based isolation to limit the blast radius. Multi-region active-passive or active-active comes in when RTO and RPO demand it.
+
+<Fragment slot="deeper">
+
+- **What is RTO vs RPO?** Time to recover vs amount of data loss allowed.
+- **What is a gray failure?** Partial or degraded failure that basic health checks miss.
+- **Why must redundancy be independent?** Correlated failures take out all replicas at once.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Availability", "Fraction of time a system is working correctly."],
+  ["Single point of failure", "A component whose failure takes down the whole system."],
+  ["Availability zone", "An isolated datacentre (or group) within a cloud region."],
+  ["Gray failure", "Partial, slow or intermittent failure that evades simple detection."],
+  ["Blast radius", "How much of the system or user base a failure affects."],
+  ["RTO / RPO", "Recovery time objective / recovery point objective."],
+]} />

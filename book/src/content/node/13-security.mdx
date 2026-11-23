@@ -1,0 +1,178 @@
+---
+title: Security essentials for Node services
+part: Building services
+order: 13
+level: core
+summary: The vulnerabilities that actually hit Node backends — injection, broken auth, prototype pollution, SSRF, resource exhaustion — and the habits that prevent them.
+---
+
+Security is not a separate feature you add at the end; it is a set of habits applied everywhere input enters your system or data leaves it. Most real breaches come from a short list of well-known mistakes — the **OWASP Top 10** — plus a few that are specific to JavaScript, such as prototype pollution. This chapter covers the ones every Node developer should be able to explain and prevent.
+
+<Analogy>
+  Treat every request like a parcel from an unknown sender. You check what's inside before opening it fully (validation), you don't let it into rooms it doesn't need (least privilege), you don't read its instructions aloud to the building's control system (injection), and you keep a log of what arrived and when.
+</Analogy>
+
+## Why it matters
+
+Backend interviews almost always include security questions: how do you prevent SQL injection? How do you store sessions? What is CSRF? What headers do you set? Knowing the vocabulary — and that you reach for parameterised queries and validation by default — is expected at every level.
+
+## The principle: never trust input
+
+<Diagram
+  caption="Every boundary where data enters is a place to validate. Every place data leaves is a place to encode or filter."
+  chart={`flowchart LR
+    IN["Untrusted input<br/>body · query · headers · files · webhooks"] --> V["Validate & normalise<br/>schema, types, sizes, allow-lists"]
+    V --> APP["Business logic<br/>authorisation checks"]
+    APP --> DB[("Database<br/>parameterised queries")]
+    APP --> OUT["Output<br/>encode HTML, filter fields,<br/>no stack traces"]`}
+  flow
+/>
+
+Validate shape, types, lengths and ranges at the edge with a schema (zod, joi, ajv, class-validator), and **reject unknown fields** rather than passing raw `req.body` into your logic or database.
+
+```js
+const CreateUser = z.object({
+  email: z.string().email().max(254),
+  name: z.string().min(1).max(100),
+  age: z.number().int().min(13).max(130).optional(),
+}).strict();   // unknown keys are an error
+
+app.post('/users', async (req, res) => {
+  const input = CreateUser.parse(req.body);   // throws ValidationError → 400
+  res.status(201).json(await users.create(input));
+});
+```
+
+## Injection
+
+Injection happens when input is concatenated into something that gets **interpreted**: SQL, a shell command, a NoSQL query, HTML.
+
+```js
+// SQL injection: id = "1 OR 1=1" returns every row
+db.query(`SELECT * FROM users WHERE id = ${req.params.id}`);
+
+// safe: parameterised — the driver sends data separately from the SQL
+db.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+```
+
+- **SQL**: always parameterise (ORMs and query builders do this for you unless you use raw strings).
+- **NoSQL**: `{ password: { $ne: null } }` sent as JSON can bypass a login check in MongoDB. Validate types so a field expected to be a string can't be an object.
+- **Shell**: never `exec` with user input; use `execFile`/`spawn` with argument arrays.
+- **HTML (XSS)**: encode output; template engines escape by default — don't bypass it. Set a Content-Security-Policy.
+
+## Authentication and sessions
+
+- Hash passwords with argon2/scrypt/bcrypt (see *Crypto*). Rate-limit login and reset endpoints.
+- For browser sessions, prefer **HTTP-only, Secure, SameSite** cookies over storing tokens in `localStorage` (which any XSS can read).
+- Keep access tokens short-lived; rotate refresh tokens; support revocation.
+- Use generic messages ("invalid email or password") to avoid revealing which accounts exist.
+
+```js
+res.cookie('sid', sessionId, {
+  httpOnly: true,      // not readable from JavaScript
+  secure: true,        // HTTPS only
+  sameSite: 'lax',     // not sent on most cross-site requests → CSRF protection
+  maxAge: 1000 * 60 * 60 * 8,
+});
+```
+
+**CSRF** (cross-site request forgery) tricks a logged-in user's browser into sending a request to your site. `SameSite` cookies stop most of it; for cookie-authenticated state-changing endpoints, add CSRF tokens or require a custom header.
+
+## Authorisation
+
+Authentication answers *who are you?*; authorisation answers *are you allowed to do this?* The most common API vulnerability is **broken object-level authorisation**: checking that the user is logged in, but not that the order they're reading is **theirs**.
+
+```js
+// vulnerable: any logged-in user can read any order by changing the ID
+const order = await orders.findById(req.params.id);
+
+// correct: scope the query to the caller
+const order = await orders.findOne({ id: req.params.id, userId: req.user.id });
+if (!order) throw new NotFoundError('order');
+```
+
+## JavaScript-specific: prototype pollution
+
+Merging untrusted JSON into objects can set properties on `Object.prototype`, affecting **every** object in the process.
+
+```js
+const evil = JSON.parse('{"__proto__": {"isAdmin": true}}');
+naiveDeepMerge({}, evil);
+({}).isAdmin;   // true — every object now looks like an admin!
+```
+
+Prevention: validate input with strict schemas, use maintained merge utilities, use `Map` or `Object.create(null)` for dictionaries of user keys, and consider `node --disable-proto=delete`.
+
+## SSRF
+
+**Server-side request forgery**: your server fetches a URL supplied by the user (webhooks, "import from URL", image previews), and an attacker points it at internal addresses — such as the cloud metadata endpoint `http://169.254.169.254/` that hands out credentials.
+
+<Diagram
+  caption="SSRF: the attacker can't reach internal services directly, but your server can — and will, if you fetch any URL it is given."
+  chart={`flowchart LR
+    A["Attacker"] -- "url = http://169.254.169.254/…" --> S["Your server<br/>fetch(url)"]
+    S --> M["Cloud metadata service<br/>(credentials)"]
+    S --> I["Internal admin API"]
+    A -. "blocked by firewall" .-> I`}
+/>
+
+Defences: allow-list destination hosts; resolve DNS and block private, loopback and link-local IP ranges (re-check after redirects); use IMDSv2 on AWS; run fetchers in a network-restricted environment.
+
+## Resource exhaustion (denial of service)
+
+- **Limit body sizes** (`express.json({ limit: '100kb' })`) and file uploads.
+- **Rate-limit** per IP and per user, with a shared store (Redis) when you run several instances.
+- **Timeouts** on requests and outbound calls.
+- **Regex DoS**: avoid nested quantifiers like `(a+)+` on user input; consider `re2`.
+- **Pagination limits**: never let a client request 1,000,000 rows.
+
+## Security headers and transport
+
+```js
+const helmet = require('helmet');
+app.use(helmet());   // sets HSTS, X-Content-Type-Options, frame protection, a basic CSP…
+app.disable('x-powered-by');
+```
+
+Serve only over HTTPS (usually terminated at the load balancer), configure CORS with an explicit allow-list (never reflect any origin with credentials), and keep secrets out of logs.
+
+## Dependencies and the supply chain
+
+Most of your code is other people's code. Run `npm audit` in CI, use a lockfile and `npm ci`, update regularly, and be careful with install scripts. The *npm and the supply chain* chapter goes deeper.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- String-built SQL or shell commands.
+- Passing `req.body` straight into an ORM `update` (mass assignment: users set `role: 'admin'`).
+- Checking authentication but not ownership of the resource.
+- Tokens in `localStorage`; cookies without `HttpOnly`/`Secure`/`SameSite`.
+- `cors({ origin: true, credentials: true })` — any site can call your API as the user.
+- Returning stack traces or SQL errors to clients.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What are the main security concerns for a Node.js API, and how do you address them?">
+
+I treat all input as untrusted: every endpoint validates the body, query and params against a strict schema that rejects unknown fields and limits sizes. All database access is parameterised, and I never pass user input to a shell. For auth, passwords are hashed with argon2 or scrypt, sessions use HttpOnly, Secure, SameSite cookies or short-lived tokens, and — the most common real bug — every query is scoped to the resources the user actually owns. I set security headers with helmet, an explicit CORS allow-list, body-size limits, rate limiting and timeouts to resist abuse, guard against SSRF when fetching user-supplied URLs, and keep dependencies audited with a lockfile. Errors return generic messages; details go to logs, without secrets.
+
+<Fragment slot="deeper">
+
+- **What is prototype pollution?** Untrusted keys like `__proto__` modifying `Object.prototype` via unsafe merges.
+- **How does SameSite help against CSRF?** The browser doesn't attach the cookie to most cross-site requests.
+- **What is broken object-level authorisation?** Accessing other users' objects by changing an ID, because ownership isn't checked.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Injection", "Untrusted input interpreted as code or query syntax (SQL, shell, NoSQL, HTML)."],
+  ["Parameterised query", "A query where data is sent separately from SQL, so it can't change the query's meaning."],
+  ["XSS", "Cross-site scripting: attacker script running in another user's browser."],
+  ["CSRF", "Cross-site request forgery: forcing a logged-in browser to send unwanted requests."],
+  ["SSRF", "Server-side request forgery: tricking a server into fetching internal URLs."],
+  ["Prototype pollution", "Modifying `Object.prototype` via untrusted object keys."],
+]} />

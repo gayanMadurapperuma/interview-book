@@ -1,0 +1,93 @@
+---
+import '../styles/base.css';
+import '../styles/prose.css';
+import '../styles/chrome.css';
+import '../styles/components.css';
+import { SUBJECTS, withBase, type SubjectKey } from '../lib/subjects';
+import Settings from '../components/Settings.astro';
+import Search from '../components/Search.astro';
+
+interface Props {
+  title: string;
+  description?: string;
+  subject?: SubjectKey;
+  active?: SubjectKey | 'demos' | 'home';
+  bodyClass?: string;
+}
+const { title, description = 'A plain-English book for JavaScript, Node.js, TypeScript, databases, system design, APIs, security and Kubernetes interviews.', subject, active, bodyClass = '' } = Astro.props;
+const pageTitle = title === 'The Interview Book' ? title : `${title} — The Interview Book`;
+---
+<!doctype html>
+<html lang="en" data-theme="paper" data-size="m">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{pageTitle}</title>
+  <meta name="description" content={description} />
+  <link rel="icon" href={withBase('/favicon.svg')} type="image/svg+xml" />
+  <meta name="theme-color" content="#f7f5f0" />
+  <script is:inline>
+    (function () {
+      try {
+        var t = localStorage.getItem('book:theme');
+        if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'night' : 'paper';
+        var s = localStorage.getItem('book:size') || 'm';
+        document.documentElement.dataset.theme = t;
+        document.documentElement.dataset.size = s;
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body class={bodyClass} data-subject={subject}>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="masthead">
+    <a class="wordmark" href={withBase('/')}>
+      <span class="wm-the">The</span> Interview Book
+    </a>
+    <nav class="volumes" aria-label="Volumes">
+      {SUBJECTS.map((s) => (
+        <a href={withBase(`/${s.key}/`)} data-subject={s.key} aria-current={active === s.key ? 'page' : undefined}>
+          <span class="vol-num">{s.volume}</span>{s.name}
+        </a>
+      ))}
+      <span class="vol-sep" aria-hidden="true"></span>
+      <a href={withBase('/demos/')} class="lab-link" aria-current={active === 'demos' ? 'page' : undefined}>Demo Lab</a>
+    </nav>
+    <div class="masthead-tools">
+      <Search />
+      <Settings />
+      <button class="icon-btn menu-btn" id="menuBtn" aria-label="Open contents" aria-expanded="false">
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2.5 5h13M2.5 9h13M2.5 13h13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </header>
+  <div class="progress-hairline" aria-hidden="true"><span id="readProgress"></span></div>
+  <slot />
+  <footer class="colophon">
+    <p>
+      Set in Literata &amp; Inter. Written for people preparing for their next interview.
+      <a href={withBase('/../')}>Classic reference →</a>
+    </p>
+  </footer>
+
+  <script>
+    const bar = document.getElementById('readProgress');
+    const onScroll = () => {
+      const h = document.documentElement;
+      const max = h.scrollHeight - h.clientHeight;
+      if (bar) bar.style.transform = `scaleX(${max > 0 ? Math.min(1, h.scrollTop / max) : 0})`;
+    };
+    document.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+
+    const menuBtn = document.getElementById('menuBtn');
+    menuBtn?.addEventListener('click', () => {
+      const open = document.body.classList.toggle('toc-open');
+      menuBtn.setAttribute('aria-expanded', String(open));
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') document.body.classList.remove('toc-open');
+    });
+  </script>
+</body>
+</html>

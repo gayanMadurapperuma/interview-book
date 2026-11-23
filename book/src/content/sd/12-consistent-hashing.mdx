@@ -1,0 +1,127 @@
+---
+title: Partitioning and consistent hashing
+part: Guarantees & data flow
+order: 12
+level: core
+summary: How to spread data and requests over many machines so that adding or losing one moves as little as possible.
+---
+
+Once data or traffic is too big for one machine, you **partition** it: each machine takes a share of the keys. The question is how to decide which machine owns which key, in a way that spreads load evenly and copes with machines being added, removed or failing. **Consistent hashing** is the classic answer, used by distributed caches, Dynamo-style databases, CDNs and load balancers. (The Databases volume covers sharding a relational database; this chapter focuses on the general technique.)
+
+<Analogy>
+  Seating guests at round tables by the first letter of their name. With "letter mod number of tables", adding one more table means re-seating almost everyone. With consistent hashing, tables are placed around a big circular room and each guest sits at the next table clockwise from their spot; adding a table only moves the guests sitting just before it.
+</Analogy>
+
+## Why it matters
+
+"Design a distributed cache" and "how would you shard this?" are classic interview questions, and consistent hashing — with virtual nodes and replication along the ring — is the expected core of the answer.
+
+## The problem with `hash mod N`
+
+```text
+server = hash(key) % N
+```
+
+Simple and even — until N changes. Going from 4 to 5 servers changes the result for about **80%** of keys. For a cache, that means a near-total miss storm hitting the database at once; for a datastore, a massive data migration.
+
+<Diagram
+  caption="With modulo placement, changing the number of servers remaps most keys. With consistent hashing, only about 1/N of keys move."
+  chart={`flowchart LR
+    subgraph MOD["hash mod N: 4 → 5 servers"]
+      direction TB
+      m1["~80% of keys move"]
+    end
+    subgraph CH["consistent hashing: 4 → 5 servers"]
+      direction TB
+      c1["~20% of keys move<br/>(only to the new server)"]
+    end
+    MOD ~~~ CH`}
+/>
+
+## The ring
+
+1. Hash each **server** to a point on a circle (say, 0 to 2³²).
+2. Hash each **key** to a point on the same circle.
+3. A key belongs to the **first server clockwise** from its position.
+
+<Diagram
+  caption="Keys belong to the next server clockwise. Adding server D only takes keys from the arc between C and D."
+  chart={`flowchart LR
+    subgraph Ring["the ring (clockwise →, wraps around)"]
+      direction LR
+      A(("A")) --> k1["k1, k2"] --> B(("B")) --> k3["k3"] --> C(("C")) --> k4["k4, k5, k6"] --> A
+    end
+    D(("D added<br/>between C and A")) -. "takes over k5, k6 only" .-> k4`}
+  steps={[
+    { nodes: ["A", "k1", "B"], text: "k1 and k2 hash between A and B, so the next server clockwise — B — owns them." },
+    { nodes: ["B", "k3", "C"], text: "k3 belongs to C." },
+    { nodes: ["C", "k4", "A"], text: "k4, k5, k6 lie after C and wrap around to A." },
+    { nodes: ["D", "k4"], text: "Add server D at a point between C and A: only the keys between C and D (k5, k6) move to D. Every other key stays where it was." },
+  ]}
+/>
+
+Removing a server works the same way in reverse: its keys move to the next server clockwise; nobody else is affected.
+
+## Virtual nodes
+
+With only a few points on the ring, arcs are uneven — one server might own 40% of the keys. And when a server dies, **all** its load lands on one neighbour.
+
+The fix is **virtual nodes**: each physical server is placed at many points (say 100–200). Load evens out statistically, a failed server's keys scatter across many others, and you can give bigger machines more virtual nodes (weighting).
+
+## Replication on the ring
+
+To survive failures, store each key on the **next R distinct servers** clockwise (its *preference list*). Dynamo, Cassandra and Riak do this: a write goes to R replicas, combined with quorums (W, R) for consistency (see *Consensus and quorums*).
+
+<Diagram
+  caption="Replication factor 3: each key is stored on the next three distinct servers clockwise."
+  chart={`flowchart LR
+    K["key k → position p"] --> S1(("server B<br/>replica 1"))
+    S1 --> S2(("server C<br/>replica 2"))
+    S2 --> S3(("server A<br/>replica 3"))`}
+/>
+
+## Alternatives
+
+- **Fixed partitions** (slots): split the key space into many fixed partitions (Redis Cluster uses 16,384 hash slots; Kafka has partitions), and assign partitions to nodes. Rebalancing moves whole partitions; the mapping is explicit and easy to reason about.
+- **Rendezvous (highest random weight) hashing**: for each key, compute a score for every server and pick the highest. Also moves ~1/N of keys; simple, no ring.
+- **Jump consistent hash**: fast and memory-free for numbered buckets, but servers can only be added/removed at the end.
+- **Directory-based**: an explicit lookup table of key ranges → nodes (e.g. Bigtable, HBase), maintained by a coordinator.
+
+## Hot keys
+
+Hashing spreads **keys** evenly, not **traffic**: one celebrity user or viral item can overload its server no matter how good the ring is. Options: replicate hot keys to several nodes and read from any; add a local in-process cache in front; split a hot key into sub-keys (`counter#0…#9`) and aggregate.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `hash mod N` for caches or storage that will ever be resized.
+- Too few virtual nodes, leading to uneven load.
+- Assuming even key distribution means even traffic (hot keys).
+- Forgetting that clients must agree on the ring membership (usually via a coordination service or gossip).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is consistent hashing and why is it useful?">
+
+It's a way to assign keys to servers so that changing the set of servers moves as few keys as possible. Servers and keys are hashed onto a ring, and each key belongs to the first server clockwise. Adding a server only takes keys from the arc just before it, and removing one only hands its keys to its successor — about 1/N of keys move, instead of most of them with `hash mod N`. To balance load and spread a failed server's keys, each server gets many virtual nodes; for durability each key is stored on the next few distinct servers along the ring. It's used in distributed caches and Dynamo-style databases; systems like Redis Cluster use the related approach of fixed hash slots assigned to nodes. It doesn't solve hot keys, which need replication or splitting.
+
+<Fragment slot="deeper">
+
+- **Why virtual nodes?** Even distribution, weighted capacity, and spreading load when a node fails.
+- **How does replication work on the ring?** Store on the next R distinct nodes clockwise.
+- **Fixed slots vs ring?** Slots make the mapping explicit and rebalance by moving whole slots.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Partitioning", "Splitting keys or data across multiple machines."],
+  ["Consistent hashing", "Placing keys and nodes on a hash ring so membership changes move few keys."],
+  ["Virtual node", "One of many ring positions belonging to a physical node."],
+  ["Preference list", "The nodes responsible for storing a key's replicas."],
+  ["Hash slot", "A fixed partition of the key space assigned to a node (e.g. Redis Cluster)."],
+  ["Hot key", "A key receiving disproportionate traffic."],
+]} />

@@ -1,0 +1,163 @@
+---
+title: Reading query plans with EXPLAIN
+part: Performance
+order: 8
+level: advanced
+summary: The query planner decides how to run your SQL. EXPLAIN shows you that decision — and where the time really goes.
+---
+
+SQL says *what* you want; the database's **query planner** decides *how* to get it: which index to use, which table to read first, which join algorithm to apply. It does this by estimating the **cost** of many possible plans using **statistics** about your data, then picking the cheapest. `EXPLAIN` shows the chosen plan; `EXPLAIN ANALYZE` actually runs the query and shows real timings and row counts next to the estimates.
+
+<Analogy>
+  A satnav choosing a route. It uses its map data (statistics) to estimate travel time for different routes and picks the fastest. EXPLAIN is looking at the planned route before you leave. EXPLAIN ANALYZE is the trip log afterwards — and if the map data was out of date (stale statistics), you'll see the satnav sent you down a road it thought was empty but was jammed.
+</Analogy>
+
+## Why it matters
+
+"This query is slow — what do you do?" Every senior backend interview expects: run `EXPLAIN ANALYZE`, read the plan, find the expensive node, and fix it with an index, a rewrite or better statistics. It's the most valuable database skill after schema design.
+
+## Running it
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT o.id, o.total_cents
+FROM orders o
+JOIN customers c ON c.id = o.customer_id
+WHERE c.email = 'ada@example.com'
+ORDER BY o.created_at DESC
+LIMIT 10;
+```
+
+```text
+Limit  (cost=12.9..13.0 rows=10) (actual time=0.081..0.084 rows=10 loops=1)
+  ->  Sort  (cost=12.9..13.1 rows=42) (actual time=0.080..0.081 rows=10 loops=1)
+        Sort Key: o.created_at DESC
+        ->  Nested Loop  (cost=0.85..11.6 rows=42) (actual time=0.031..0.062 rows=37 loops=1)
+              ->  Index Scan using customers_email_key on customers c  (rows=1) (actual rows=1)
+                    Index Cond: (email = 'ada@example.com')
+              ->  Index Scan using orders_customer_id_idx on orders o  (rows=42) (actual rows=37)
+                    Index Cond: (customer_id = c.id)
+Planning Time: 0.2 ms
+Execution Time: 0.1 ms
+```
+
+`ANALYZE` executes the query — wrap data-changing statements in `BEGIN … ROLLBACK`.
+
+## Reading a plan
+
+A plan is a **tree**. Read it **inside-out** (most indented first): leaf nodes read data, parents combine and process it.
+
+<Diagram
+  caption="The plan above as a tree. Data flows upward: two index scans feed a nested-loop join, then a sort, then the limit."
+  chart={`flowchart BT
+    A["Index Scan customers<br/>email = 'ada@…' → 1 row"] --> NL["Nested Loop join<br/>37 rows"]
+    B["Index Scan orders<br/>customer_id = c.id → 37 rows"] --> NL
+    NL --> S["Sort by created_at DESC"]
+    S --> L["Limit 10"]`}
+  steps={[
+    { nodes: ["A"], text: "Innermost first: find the customer by email using the unique index — 1 row." },
+    { nodes: ["A", "B", "NL"], text: "For each customer row (just one), look up their orders by index. The nested loop produces 37 rows." },
+    { nodes: ["NL", "S"], text: "Sort those 37 rows by date. Cheap here — but on 3 million rows this node would dominate." },
+    { nodes: ["S", "L"], text: "Return the first 10." },
+  ]}
+/>
+
+For each node, compare:
+
+- **`rows=` (estimated) vs `actual rows=`**: big mismatches (10× or more) mean the planner misjudged — the usual root cause of bad plans.
+- **`actual time=start..end`**: per loop, in milliseconds. Multiply by **`loops`** for the total.
+- **`BUFFERS`**: `shared hit` (from memory) vs `read` (from disk). Lots of reads = I/O-bound.
+
+## Scan types
+
+| Node | Meaning | When it's fine / not |
+|---|---|---|
+| Seq Scan | read every row | fine for small tables or when most rows match; bad for selective filters on big tables |
+| Index Scan | walk index, fetch each row | great for selective queries |
+| Index Only Scan | answer from the index alone | best — needs a covering index and a well-vacuumed table |
+| Bitmap Heap Scan | collect matching row locations from index(es), then read pages in order | medium selectivity, or combining indexes with OR |
+
+## Join algorithms
+
+<Diagram
+  caption="Three ways to join. The planner picks based on row counts and available indexes."
+  chart={`flowchart TB
+    J{"Join strategy"} --> NL["Nested Loop<br/>for each outer row, look up inner rows<br/>best: small outer side + index on inner"]
+    J --> HJ["Hash Join<br/>build a hash table of the smaller side,<br/>probe it with the larger<br/>best: large unsorted inputs, equality joins"]
+    J --> MJ["Merge Join<br/>walk two sorted inputs together<br/>best: both sides already sorted"]`}
+/>
+
+A nested loop over 50,000 outer rows with a sequential scan inside is catastrophic; the same loop over 5 rows with an index is ideal. The danger sign is a nested loop where the planner **expected** few outer rows but **actually** got many.
+
+## A worked example: finding the problem
+
+```text
+Limit (actual time=3120.4..3120.5 rows=20)
+  ->  Sort (actual time=3120.4 rows=20)  Sort Method: top-N heapsort
+        ->  Seq Scan on orders (rows=4800 estimated) (actual rows=4,710,233)
+              Filter: (status = 'pending' AND created_at > now() - '7 days')
+              Rows Removed by Filter: 15,289,767
+```
+
+Reading it: a **Seq Scan** over 20 million rows removes 15 million with a filter, taking 3 seconds. The fix is an index matching the filter and sort — for example a partial index:
+
+```sql
+CREATE INDEX CONCURRENTLY orders_pending_recent ON orders (created_at DESC) WHERE status = 'pending';
+```
+
+## When estimates are wrong
+
+The planner relies on **statistics**: row counts, the most common values, histograms of each column. They're refreshed by `ANALYZE` (autovacuum runs it automatically).
+
+- After a big data load or delete, run `ANALYZE table_name`.
+- Correlated columns (`city = 'Paris' AND country = 'France'`) are estimated as independent, so the planner underestimates. PostgreSQL's `CREATE STATISTICS` captures such correlations.
+- Skewed data (one customer with 2 million orders) can make generic plans bad for that customer.
+
+## A slow-query workflow
+
+<Diagram
+  caption="From 'something is slow' to a verified fix."
+  chart={`flowchart LR
+    F["Find it<br/>pg_stat_statements:<br/>total time, mean, calls"] --> E["EXPLAIN (ANALYZE, BUFFERS)<br/>with real parameters"]
+    E --> N["Find the expensive node<br/>& estimate vs actual gaps"]
+    N --> X["Fix<br/>index · rewrite · ANALYZE ·<br/>fewer rows · pagination"]
+    X --> V["Verify<br/>plan + timing again,<br/>watch write cost"]`}
+  flow
+/>
+
+`pg_stat_statements` aggregates statistics per query shape — sort by **total time** to find what costs the most overall (a 5 ms query called 2 million times beats a 3 s query called twice). Tools like `auto_explain` log plans of slow queries automatically; visualisers (explain.dalibo.com, depesz) make big plans readable.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Reading `EXPLAIN` without `ANALYZE` and trusting estimates.
+- Forgetting to multiply per-loop times by `loops`.
+- Testing with literal values when the app uses parameters (plans can differ).
+- Testing on a tiny dev database — plans change completely with data size.
+- Running `EXPLAIN ANALYZE` on a `DELETE` outside a rolled-back transaction.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="A query is slow. How do you diagnose it?">
+
+First I confirm it's the query — `pg_stat_statements` shows which statements cost the most total time. Then I run `EXPLAIN (ANALYZE, BUFFERS)` with realistic parameters on production-like data. I read the plan tree from the innermost nodes up, looking for the node where the time goes, and compare estimated with actual rows: a large mismatch means stale statistics or correlated columns, and leads to bad choices like a nested loop over far more rows than expected. Typical findings are a sequential scan with a selective filter, which needs an index; a sort of millions of rows for a small `LIMIT`, which an index on the sort column fixes; or reading far more rows than returned. After the fix I re-run the plan to verify and consider the write cost of any new index.
+
+<Fragment slot="deeper">
+
+- **Nested loop vs hash vs merge join?** Small outer + indexed inner; large unsorted equality joins; pre-sorted inputs.
+- **Why would the planner choose a seq scan despite an index?** It estimates many rows match — or statistics are wrong.
+- **What does `BUFFERS` add?** Memory hits vs disk reads per node.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Query planner", "The component that chooses an execution plan by estimating costs."],
+  ["`EXPLAIN ANALYZE`", "Runs the query and shows the plan with actual times and row counts."],
+  ["Statistics", "Data distribution summaries used for estimates; refreshed by `ANALYZE`."],
+  ["Nested loop / hash / merge join", "The three main join algorithms."],
+  ["`pg_stat_statements`", "PostgreSQL extension aggregating per-query performance statistics."],
+]} />

@@ -1,0 +1,185 @@
+---
+title: Hoisting and the temporal dead zone
+part: Scope & functions
+order: 12
+level: core
+summary: Declarations are processed before code runs. What you get when you touch a name "too early" depends on how it was declared.
+demo: js-hoisting-tdz
+---
+
+**Hoisting** is the name for a simple fact: before JavaScript runs the code in a scope, it first scans that scope and registers every declaration in it. So every variable and function "exists" from the very start of its scope, even above the line where it is written. What differs is the **state** each one starts in — and that is where the interview questions live.
+
+<Analogy>
+  Before a meeting starts, the organiser puts a name card on the table for everyone on the invite list. Some cards already have a full bio attached (function declarations). Some are blank (`var` — reads as `undefined`). And some carry a "do not disturb until I arrive" sign (`let`/`const` — touching them before their line is an error). Nobody is physically moved; the room is simply set up before anyone speaks.
+</Analogy>
+
+## Why it matters
+
+"What does this print?" questions involving `var` before declaration, functions called before they are defined, and `let` in the TDZ are interview staples. Understanding hoisting also explains real errors like `Cannot access 'x' before initialization`.
+
+## Three starting states
+
+<Diagram
+  caption="All declarations are registered in the creation phase. They start in different states."
+  chart={`flowchart TB
+    C["Creation phase scans the scope"] --> FD["function declarations<br/>created complete — callable"]
+    C --> V["var<br/>initialised to undefined"]
+    C --> L["let · const · class<br/>registered but uninitialised (TDZ)"]
+    L --> R["reading or writing them<br/>before their line → ReferenceError"]`}
+/>
+
+| Declaration | Hoisted? | Value before its line | Scope |
+|---|---|---|---|
+| `function f() {}` | Yes, with its body | the function | function/block |
+| `var x` | Yes | `undefined` | function |
+| `let x`, `const x` | Yes, but uninitialised | **ReferenceError** (TDZ) | block |
+| `class C {}` | Yes, but uninitialised | **ReferenceError** (TDZ) | block |
+| `const f = () => {}` | as `const` | **ReferenceError** | block |
+| `import` | Yes, linked before any code runs | the live binding | module |
+
+## Seeing it
+
+```js
+console.log(typeof greet); // 'function'  — fully hoisted
+console.log(count);        // undefined    — var hoisted, not yet assigned
+console.log(total);        // ReferenceError: Cannot access 'total' before initialization
+
+var count = 1;
+let total = 2;
+function greet() { return 'hi'; }
+```
+
+The engine effectively treats the code as if it were arranged like this before running it:
+
+```js
+function greet() { return 'hi'; }   // declared and defined
+var count;                           // declared, = undefined
+// let total;                        // declared, but locked until its line
+
+console.log(typeof greet);
+console.log(count);
+console.log(total);                  // still locked → error
+
+count = 1;
+total = 2;                           // unlocked here
+```
+
+<Callout type="note">
+  Nothing is literally moved. "Hoisting" is just a convenient way to describe the creation phase of an execution context.
+</Callout>
+
+<DemoLink id="js-hoisting-tdz" />
+
+## The temporal dead zone
+
+The **temporal dead zone (TDZ)** is the period between the start of a scope and the line where a `let`, `const` or `class` is declared. During that time the name exists — the scope knows about it — but any access throws.
+
+<Diagram
+  caption="The TDZ is about time, not position: a function that reads the variable is fine as long as it is called after the declaration has run."
+  chart={`flowchart LR
+    S["Block starts"] --> T["TDZ for x<br/>access → ReferenceError"]
+    T --> D["let x = 5;<br/>runs"]
+    D --> OK["x usable"]`}
+  steps={[
+    { nodes: ["S"], text: "Entering the block registers `x` immediately — it already shadows any outer `x`." },
+    { nodes: ["S", "T"], text: "Until the declaration line executes, `x` is in the dead zone. `typeof x` throws too." },
+    { nodes: ["T", "D"], text: "When `let x = 5` runs, `x` is initialised." },
+    { nodes: ["D", "OK"], text: "From now on, any code — including functions written earlier — can read it." },
+  ]}
+/>
+
+```js
+function report() {
+  return limit * 2;        // fine IF report() is called after limit is initialised
+}
+const limit = 10;
+report();                  // 20
+
+// but:
+report2();                 // ReferenceError — called before 'limit2' line ran
+const limit2 = 10;
+function report2() { return limit2; }
+```
+
+Why does `let` throw instead of returning `undefined`? Because silent `undefined`s from `var` caused real bugs. The TDZ turns "used too early" into a loud, obvious error.
+
+### The TDZ also shadows outer variables
+
+```js
+const theme = 'light';
+function render() {
+  console.log(theme);   // ReferenceError, not 'light'!
+  const theme = 'dark';
+}
+```
+
+The inner `theme` is registered at the start of `render`, so it shadows the outer one for the **whole** function — including the line above its declaration.
+
+## Function declarations versus function expressions
+
+```js
+sayHi();   // works: declarations are hoisted with their body
+function sayHi() { console.log('hi'); }
+
+sayBye();  // TypeError: sayBye is not a function (var → undefined)
+var sayBye = function () { console.log('bye'); };
+
+sayLater(); // ReferenceError (const → TDZ)
+const sayLater = () => console.log('later');
+```
+
+Note the two different errors: calling `undefined` gives a **TypeError**; touching a TDZ name gives a **ReferenceError**.
+
+## `var` inside blocks
+
+`var` ignores block boundaries and hoists to the top of the **function**:
+
+```js
+function check(flag) {
+  if (flag) {
+    var message = 'on';
+  }
+  return message;   // undefined when flag is false — no error, just a silent bug
+}
+```
+
+<Callout type="tip" title="Practical rules">
+
+- Use `const` by default and `let` when you must reassign. Avoid `var`.
+- Declare things before you use them, even though function declarations would let you skip that.
+- Relying on function-declaration hoisting is fine for helper functions at the bottom of a file — many style guides allow it.
+
+</Callout>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Saying "`let` and `const` are not hoisted". They are; they start uninitialised (the TDZ).
+- Expecting `typeof` to be safe for TDZ variables. It throws for them (it is only safe for names that were never declared at all).
+- Calling a function expression before its line and being confused by `TypeError` vs `ReferenceError`.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is hoisting, and what is the temporal dead zone?">
+
+Before executing a scope, the engine registers all of its declarations — that creation step is what we call hoisting. Function declarations are created with their body, so you can call them before their line. `var` is registered and initialised to `undefined`, so reading it early gives `undefined`. `let`, `const` and `class` are also registered, but left uninitialised until their declaration line runs; the time before that is the temporal dead zone, and any access in it throws a `ReferenceError`. That design turns "used before defined" into a clear error instead of a silent `undefined`.
+
+<Fragment slot="deeper">
+
+- **Are `let` and `const` hoisted?** Yes — that is why they shadow outer names from the top of their block — but they are uninitialised until their line.
+- **Why does calling a `var` function expression early give a TypeError?** The variable is `undefined`, and calling `undefined` is a type error.
+- **Is `typeof` always safe?** Only for names never declared; for TDZ names it throws.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Hoisting", "Declarations being registered before code in their scope executes."],
+  ["Creation phase", "The setup step of an execution context in which hoisting happens."],
+  ["Temporal dead zone (TDZ)", "The time between entering a scope and running a `let`/`const`/`class` declaration, when the name cannot be accessed."],
+  ["Function declaration", "`function name() {}` — hoisted together with its body."],
+  ["Function expression", "A function assigned to a variable; follows that variable's hoisting rules."],
+]} />

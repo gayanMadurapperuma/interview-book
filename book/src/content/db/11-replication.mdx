@@ -1,0 +1,163 @@
+---
+title: Replication, read replicas and failover
+part: Scale
+order: 11
+level: core
+summary: Keeping copies of the database on other machines — for survival, for scaling reads, and for being closer to users. Every copy brings the question of how stale it may be.
+---
+
+**Replication** means keeping copies of the same data on several database servers. The usual setup has one **primary** (also called leader or writer) that accepts all writes, and one or more **replicas** (followers, readers) that receive a stream of changes from the primary and apply them. Replication gives you **high availability** (if the primary dies, promote a replica), **read scaling** (send reads to replicas) and **geographic locality**. The catch is **replication lag**: replicas are always slightly behind.
+
+<Analogy>
+  A head office and its branch offices. All official changes are made at head office, which then posts updates to every branch. Branches can answer customer questions (reads) — usually with up-to-date information, but if an update is still in the post, a branch may tell you yesterday's answer. If head office burns down, one branch is promoted to become the new head office.
+</Analogy>
+
+## Why it matters
+
+"How would you scale reads?" and "what happens if the database fails?" are standard system design questions. Replication lag also causes a specific, very common bug: a user saves something and immediately doesn't see it.
+
+## How it works
+
+<Diagram
+  caption="Leader–follower replication: writes go to the primary; its log of changes streams to replicas, which apply them in order."
+  chart={`flowchart LR
+    APP["Application"] -- "writes" --> P[("Primary")]
+    P -- "WAL stream" --> R1[("Replica 1")]
+    P -- "WAL stream" --> R2[("Replica 2<br/>other region")]
+    APP -- "reads" --> R1
+    APP -- "reads" --> R2
+    APP -- "reads needing<br/>latest data" --> P`}
+  flow
+/>
+
+In PostgreSQL, replicas receive the **write-ahead log** (physical streaming replication) or a stream of row changes (logical replication). MySQL ships its binlog. Managed services (RDS, Aurora, Cloud SQL) set all this up for you.
+
+## Synchronous versus asynchronous
+
+<Diagram
+  sequence
+  caption="Asynchronous replication acknowledges the commit before replicas have the change. Synchronous waits for at least one replica."
+  chart={`sequenceDiagram
+    participant App
+    participant P as Primary
+    participant R as Replica
+    App->>P: COMMIT
+    P->>P: write WAL locally
+    P-->>App: OK (async: right away)
+    P->>R: ship WAL
+    R-->>P: applied
+    Note over App,R: synchronous mode: the OK waits until the replica confirms`}
+  notes={[
+    "The application commits on the primary.",
+    "The primary makes the change durable on its own disk.",
+    "In asynchronous mode it acknowledges immediately — fast, but the replica doesn't have the data yet.",
+    "The change is shipped to the replica a few milliseconds later…",
+    "…and applied. If the primary had crashed between the OK and this point, that commit would be lost on failover.",
+  ]}
+/>
+
+| | Asynchronous | Synchronous |
+|---|---|---|
+| Commit latency | low | higher (waits for a replica round trip) |
+| Data loss on primary failure | the last few transactions may be lost | none (for confirmed replicas) |
+| If a replica is down | no effect | writes stall (unless configured to fall back) |
+
+Many systems use **semi-synchronous**: wait for one replica (often in the same region), replicate asynchronously to the rest.
+
+## Replication lag and read-your-writes
+
+Lag is usually milliseconds, but under heavy writes, long queries on the replica, or network trouble it can be seconds or minutes.
+
+<Diagram
+  caption="The classic lag bug: a write goes to the primary, the immediate re-read hits a replica that hasn't caught up."
+  chart={`flowchart LR
+    U["User saves<br/>new display name"] -- "UPDATE" --> P[("Primary<br/>name = 'Ada L.'")]
+    U -- "page reload<br/>SELECT" --> R[("Replica<br/>name = 'Ada' (stale)")]
+    P -. "lag: 800 ms" .-> R`}
+  steps={[
+    { nodes: ["U", "P"], text: "The user updates their profile. The write goes to the primary." },
+    { nodes: ["U", "R"], text: "The page reloads immediately and the read is routed to a replica." },
+    { nodes: ["P", "R"], text: "The replica is 800 ms behind, so the user sees their **old** name and thinks the save failed." },
+  ]}
+/>
+
+Ways to get **read-your-writes** consistency:
+
+- Read from the **primary** for a short time after a user writes (e.g. a few seconds, tracked in their session).
+- Route reads for **the user's own data** to the primary; others to replicas.
+- Track the primary's log position (LSN) at write time and only read from a replica that has reached it.
+- Return the updated data in the write response so the client doesn't need to re-read.
+
+Other lag effects: **monotonic reads** (a user bouncing between replicas sees time go backwards) — fix by pinning a user to one replica.
+
+## Failover
+
+When the primary fails:
+
+1. Detect the failure (health checks; careful not to react to a brief network blip).
+2. Choose the most up-to-date replica and **promote** it to primary.
+3. Redirect writes to it (DNS change, proxy, or a cluster endpoint in managed services).
+4. Rebuild a new replica to replace the lost one.
+
+<Diagram
+  caption="Automatic failover. Asynchronous replicas may be missing the last few commits from the old primary."
+  chart={`flowchart TB
+    P[("Primary ✗ failed")] --> D["health check detects failure"]
+    D --> C["choose the replica<br/>with the latest position"]
+    C --> PR["promote it to primary"]
+    PR --> RT["repoint writers<br/>(endpoint / DNS / proxy)"]
+    RT --> NR["create a new replica"]`}
+/>
+
+Hazards:
+
+- **Lost writes** with asynchronous replication.
+- **Split brain**: the old primary wasn't actually dead (a network partition), comes back, and both accept writes. Prevent with fencing — the old primary must be shut off (STONITH) or lose its lease before a new one takes over.
+- **Failover time**: typically 30 seconds to a couple of minutes on managed databases. Applications need connection retries.
+
+## Replication is not a backup
+
+A replica faithfully copies **mistakes** too: `DELETE FROM users` without a `WHERE` is replicated in milliseconds. You also need backups with **point-in-time recovery** (base backups plus archived WAL), and you should regularly test restoring them.
+
+## Multi-leader and leaderless, briefly
+
+- **Multi-leader**: several nodes accept writes (e.g. one per region). Writes can conflict and need resolution (last-write-wins, merges, CRDTs).
+- **Leaderless** (Dynamo-style: Cassandra, DynamoDB internals): clients write to several replicas and read from several, using **quorums** (R + W > N) to see the latest value.
+
+The System Design volume covers both in depth.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Sending all reads to replicas, including reads right after a write.
+- Assuming replicas are never more than milliseconds behind.
+- Treating replicas as backups.
+- No retry logic during failover.
+- Running heavy analytics on a replica that also serves user traffic — it lags and slows down.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does database replication work, and what problems does it introduce?">
+
+In leader–follower replication, all writes go to the primary, which streams its change log to replicas that apply it in order. It gives high availability — a replica can be promoted if the primary fails — and lets you scale reads by routing them to replicas. Usually replication is asynchronous, so commits are fast but replicas lag behind; that causes read-your-writes bugs, where a user saves and then reads stale data from a replica, which I handle by reading from the primary for that user right after a write or by waiting for the replica to reach the write's log position. On failover, asynchronous replication can lose the last few commits, and you must prevent split brain by fencing the old primary. Replicas don't replace backups, because they replicate mistakes instantly.
+
+<Fragment slot="deeper">
+
+- **Sync vs async replication?** Durability across machines vs commit latency and availability.
+- **What is split brain?** Two nodes both acting as primary after a partition, accepting conflicting writes.
+- **How do you scale writes?** Replication doesn't — partitioning/sharding does.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Primary / replica", "The node accepting writes, and the copies that follow its changes."],
+  ["Replication lag", "How far behind the primary a replica is."],
+  ["Read-your-writes", "Guarantee that a user sees their own recent writes."],
+  ["Failover", "Promoting a replica to primary when the primary fails."],
+  ["Split brain", "Two nodes simultaneously believing they are the primary."],
+  ["Point-in-time recovery", "Restoring a database to any moment using backups plus archived logs."],
+]} />

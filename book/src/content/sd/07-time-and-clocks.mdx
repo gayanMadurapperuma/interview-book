@@ -1,0 +1,149 @@
+---
+title: Time, ordering and logical clocks
+part: Distributed fundamentals
+order: 7
+level: advanced
+summary: Machines disagree about what time it is. To order events reliably you need clocks that count causes, not seconds.
+---
+
+On one machine, "which happened first?" is easy. Across machines, it isn't: every server's clock **drifts**, synchronisation (NTP) is only approximate, and clocks can even jump **backwards**. So timestamps from different machines can't be trusted to order events. **Logical clocks** — Lamport clocks and vector clocks — solve this by counting events and messages instead of reading wall-clock time, capturing the order that actually matters: **cause and effect**.
+
+<Analogy>
+  Two people writing a diary on different continents with cheap watches. Comparing the times they wrote down won't reliably tell you who wrote first — one watch is five minutes fast. But if they exchange letters and each writes "this is a reply to your entry #12", you know for certain that the reply came after entry #12, whatever the watches said.
+</Analogy>
+
+## Why it matters
+
+"Last write wins" based on timestamps silently loses data when clocks disagree. Interviewers at senior levels ask how to order events, detect concurrent updates, or generate unique sortable IDs across machines.
+
+## Physical clocks are unreliable
+
+- **Drift**: quartz clocks gain or lose time — tens of milliseconds per day is common.
+- **NTP sync** corrects clocks periodically, with errors of milliseconds on a good network, far more on a bad one.
+- **Jumps**: a correction can move a clock backwards; leap seconds; VMs paused and resumed.
+- **Monotonic clocks** (`performance.now()`, `process.hrtime()`) never go backwards — use them for measuring **durations** on one machine, never for comparing across machines.
+
+<Diagram
+  caption="Clock skew makes timestamp ordering lie. The write that really happened second has the earlier timestamp, so last-write-wins keeps the wrong one."
+  chart={`flowchart LR
+    A["Node A (clock +40 ms fast)<br/>write x = 1 at real 10:00:00.000<br/>stamped 10:00:00.040"] --> S[("replica")]
+    B["Node B (accurate clock)<br/>write x = 2 at real 10:00:00.020<br/>stamped 10:00:00.020"] --> S
+    S --> R["last-write-wins by timestamp:<br/>keeps x = 1 ✗<br/>(the earlier write!)"]`}
+  steps={[
+    { nodes: ["A"], text: "Node A writes first, but its clock runs 40 ms fast." },
+    { nodes: ["B"], text: "Node B writes 20 ms later in real time, with an accurate clock." },
+    { nodes: ["A", "B", "S", "R"], text: "Comparing timestamps, A's write looks newer, so B's genuinely later write is silently discarded." },
+  ]}
+/>
+
+## Happened-before
+
+Leslie Lamport defined the **happened-before** relation (→): a → b if
+
+1. a and b happen on the same process and a comes first, or
+2. a is sending a message and b is receiving that message, or
+3. there's a chain: a → c and c → b.
+
+If neither a → b nor b → a, the events are **concurrent** — neither could have influenced the other, so no order between them is "correct".
+
+## Lamport clocks
+
+Each process keeps a counter:
+
+- before each event, increment it;
+- send the counter with every message;
+- on receiving, set counter = max(own, received) + 1.
+
+<Diagram
+  sequence
+  caption="Lamport timestamps. Every message carries the sender's counter; receivers jump ahead of it. Causally later events always get bigger numbers."
+  chart={`sequenceDiagram
+    participant A as Process A
+    participant B as Process B
+    participant C as Process C
+    A->>A: event (L=1)
+    A->>B: message (L=2)
+    B->>B: receive: max(0,2)+1 (L=3)
+    C->>C: event (L=1)
+    B->>C: message (L=4)
+    C->>C: receive: max(1,4)+1 (L=5)`}
+  notes={[
+    "A has a local event: its counter becomes 1.",
+    "A sends a message, stamped 2.",
+    "B receives it and sets its clock past the sender's: 3.",
+    "C, independently, has an event at 1 — concurrent with A's events.",
+    "B sends to C, stamped 4.",
+    "C jumps to 5. Anything caused by A's first event now has a larger timestamp everywhere.",
+  ]}
+/>
+
+Guarantee: if a → b then L(a) < L(b). Not the reverse: L(a) < L(b) doesn't tell you whether a caused b or they were concurrent. Lamport clocks give a **total order** (break ties with process ID) consistent with causality — useful for things like ordering operations in a replicated log.
+
+## Vector clocks
+
+A **vector clock** keeps one counter **per process**. It can tell you whether two events are ordered or **concurrent** — which is exactly what you need to detect conflicting updates.
+
+```text
+event on A:     A=[1,0,0]
+A sends to B:   B receives → B=[1,1,0]
+event on C:     C=[0,0,1]
+
+compare B=[1,1,0] and C=[0,0,1]: neither is ≥ the other in every position → concurrent → conflict!
+compare A=[1,0,0] and B=[1,1,0]: B ≥ A everywhere → A happened before B
+```
+
+Dynamo-style databases (and Riak) used vector clocks to detect concurrent writes to the same key and return **siblings** for the application to merge. The cost: vectors grow with the number of writers.
+
+## Hybrid logical clocks
+
+**Hybrid logical clocks (HLC)** combine wall-clock time with a logical counter: timestamps stay close to real time (readable, roughly sortable) but still respect causality even when clocks drift. CockroachDB and others use them. Google **Spanner** goes further with **TrueTime**: GPS and atomic clocks expose a bounded uncertainty interval, and Spanner **waits out** that uncertainty before committing, so timestamps are globally consistent.
+
+## Ordering in practice
+
+| Need | Practical tool |
+|---|---|
+| Order events for one entity | a single writer (leader/partition) assigning a sequence number; Kafka partition offsets |
+| Unique, roughly time-sortable IDs | Snowflake IDs (timestamp + machine + sequence), UUIDv7, ULID |
+| Detect concurrent edits | version numbers (optimistic locking), vector clocks |
+| Merge concurrent edits automatically | CRDTs (next chapters) |
+| Measure durations | monotonic clock |
+
+```text
+Snowflake ID (64 bits):  [41 bits ms timestamp][10 bits machine id][12 bits sequence]
+→ ~4,096 IDs per ms per machine, sortable by time, no coordination
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using `Date.now()` from different servers to decide which write wins.
+- Measuring elapsed time with wall-clock time (it can jump).
+- Assuming a later timestamp means "caused by".
+- Global auto-increment IDs across shards (a bottleneck); use Snowflake-style IDs.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Why can't you rely on timestamps to order events in a distributed system?">
+
+Each machine's clock drifts and is only approximately synchronised by NTP, and clocks can jump backwards, so a timestamp from one server can't be reliably compared with another's — last-write-wins can silently keep the older write. What usually matters is causality, Lamport's happened-before relation. Lamport clocks — counters incremented per event and advanced past any received value — guarantee that causally later events get larger numbers. Vector clocks keep a counter per node and can also tell you when two events are concurrent, which is how you detect conflicting updates. In practice I get ordering from a single writer per entity, like a leader or a Kafka partition, use Snowflake-style IDs for sortable unique IDs, and use monotonic clocks to measure durations.
+
+<Fragment slot="deeper">
+
+- **Lamport vs vector clocks?** Lamport gives an order consistent with causality; vector clocks also detect concurrency.
+- **What is TrueTime?** Spanner's clock API with bounded uncertainty; commits wait it out for global ordering.
+- **Monotonic vs wall clock?** Monotonic for durations on one machine; wall clock for human-readable time.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Clock skew", "The difference between clocks on different machines."],
+  ["Happened-before", "Lamport's causal ordering of events across processes."],
+  ["Lamport clock", "A counter giving an ordering consistent with causality."],
+  ["Vector clock", "Per-node counters that can detect concurrent events."],
+  ["Hybrid logical clock", "Wall-clock time combined with a logical counter."],
+  ["Snowflake ID", "A 64-bit ID of timestamp, machine ID and sequence; sortable and coordination-free."],
+]} />

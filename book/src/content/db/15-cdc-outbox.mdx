@@ -1,0 +1,151 @@
+---
+title: CDC, the outbox pattern and dual writes
+part: Data platform
+order: 15
+level: advanced
+summary: Saving to the database and publishing an event are two separate systems. Doing both reliably needs a pattern — writing to both directly is how data quietly diverges.
+---
+
+Modern systems rarely have just one datastore. When an order is placed, you save it to PostgreSQL **and** want to publish an `OrderPlaced` event to Kafka, update the search index and invalidate a cache. Writing to two systems from application code — a **dual write** — looks simple and is subtly broken: one write can succeed while the other fails. The **transactional outbox** and **change data capture (CDC)** solve this by making the database the single source of truth and deriving everything else from it.
+
+<Analogy>
+  A shop that must both record a sale in the ledger and tell the warehouse to ship. If the clerk writes in the ledger and then phones the warehouse, a dropped call means a recorded sale that's never shipped. The outbox is writing the shipping note **on the same ledger page** as the sale, in one go; a runner then reads new notes from the ledger and delivers them, retrying until the warehouse confirms.
+</Analogy>
+
+## Why it matters
+
+Event-driven architectures depend on this. Interviewers at senior level ask: "How do you make sure an event is published when you save the record?" The expected answer is the outbox pattern, CDC, or both — not "we publish after commit and hope".
+
+## Why dual writes fail
+
+```js
+await db.orders.insert(order);                 // 1. succeeds
+await kafka.send('orders', orderPlaced(order)); // 2. network blip → throws
+// the order exists, but nobody downstream ever hears about it
+```
+
+Swapping the order doesn't help: publish first, then the database write fails, and consumers act on an order that doesn't exist. Wrapping both in a database transaction doesn't help either — Kafka isn't part of it.
+
+<Diagram
+  caption="With a dual write there is always a window where one system has the change and the other doesn't — and a crash in that window makes it permanent."
+  chart={`flowchart LR
+    A["app"] -- "1 · INSERT order ✓" --> DB[("database")]
+    A -- "2 · publish event ✗<br/>(crash / timeout)" --> K["message broker"]
+    DB -. "has the order" .-> X["systems disagree<br/>forever"]
+    K -. "never got the event" .-> X`}
+/>
+
+## The transactional outbox
+
+Write the event into an **outbox table in the same database transaction** as the business change. Both commit or neither does. A separate **relay** process reads the outbox and publishes to the broker, retrying until it succeeds, then marks the row as sent.
+
+```sql
+BEGIN;
+INSERT INTO orders (id, customer_id, total_cents) VALUES ($1, $2, $3);
+INSERT INTO outbox (id, aggregate_id, type, payload)
+VALUES (gen_random_uuid(), $1, 'OrderPlaced', $4::jsonb);
+COMMIT;
+```
+
+<Diagram
+  caption="The outbox: one local transaction, then asynchronous, retried publishing."
+  chart={`flowchart LR
+    APP["app"] -- "one transaction:<br/>orders + outbox rows" --> DB[("database")]
+    DB --> RL["relay<br/>polls outbox or reads WAL"]
+    RL -- "publish (retry until ack)" --> K["Kafka / SQS / SNS"]
+    K --> C1["email service"]
+    K --> C2["search indexer"]
+    RL -- "mark sent" --> DB`}
+  steps={[
+    { nodes: ["APP", "DB"], text: "The order and its event are written atomically. If the transaction fails, neither exists." },
+    { nodes: ["DB", "RL"], text: "A relay picks up unsent outbox rows — by polling, or by reading the database's change log (CDC)." },
+    { nodes: ["RL", "K"], text: "It publishes each event, retrying on failure. A crash just means it retries later." },
+    { nodes: ["K", "C1", "C2"], text: "Consumers react to the event." },
+    { nodes: ["RL", "DB"], text: "Once acknowledged, the row is marked as sent (or deleted)." },
+  ]}
+/>
+
+A simple polling relay:
+
+```sql
+-- claim a batch without blocking other relay instances
+SELECT * FROM outbox
+WHERE sent_at IS NULL
+ORDER BY created_at
+LIMIT 100
+FOR UPDATE SKIP LOCKED;
+-- publish each, then: UPDATE outbox SET sent_at = now() WHERE id = ANY($1);
+```
+
+### At-least-once delivery
+
+If the relay publishes and then crashes before marking the row sent, it publishes again on restart. So delivery is **at least once**, and consumers must be **idempotent**: track processed event IDs, or make the effect naturally repeatable (`UPSERT`, "set status to shipped").
+
+```sql
+-- consumer side: process each event ID only once
+INSERT INTO processed_events (event_id) VALUES ($1) ON CONFLICT DO NOTHING RETURNING event_id;
+-- if no row returned → already handled, skip
+```
+
+## Change data capture
+
+**CDC** reads the database's own change log — PostgreSQL's WAL via logical decoding, MySQL's binlog — and turns every committed insert, update and delete into an event stream. **Debezium** (often with Kafka Connect) is the common tool; managed options include AWS DMS and many cloud database features.
+
+<Diagram
+  caption="CDC tails the database log. Every committed change flows out in commit order, without the application doing anything."
+  chart={`flowchart LR
+    APP["app writes normally"] --> DB[("PostgreSQL")]
+    DB -- "WAL (logical decoding)" --> DBZ["Debezium"]
+    DBZ --> K["Kafka topics<br/>one per table"]
+    K --> S["search index"]
+    K --> W["data warehouse"]
+    K --> CA["cache invalidation"]`}
+  flow
+/>
+
+Uses: keeping search indexes, caches and warehouses in sync; replicating between databases; and powering the outbox relay (CDC on the `outbox` table — the most robust combination).
+
+Raw table CDC exposes your **internal schema** as a public event contract — renaming a column breaks consumers. The outbox lets you publish deliberate, versioned **domain events** instead. Many teams use CDC *on* the outbox table to get both benefits.
+
+## Ordering and other details
+
+- Preserve order **per entity**: use the entity ID as the message key so all events for one order land on the same partition.
+- Events may be duplicated or arrive late; design consumers to handle it (versions, timestamps, idempotency).
+- Clean up old outbox rows; monitor relay lag.
+- Include enough data in events (or an ID plus version) for consumers to act without immediately calling back.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Publishing events after commit without an outbox ("it's only a tiny window").
+- Publishing inside the transaction before commit — consumers may see events for rolled-back data.
+- Non-idempotent consumers in an at-least-once system.
+- Exposing raw table changes as a public API contract.
+- Relays that publish out of order for the same entity.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you reliably publish an event when you save data to the database?">
+
+Writing to the database and then the message broker is a dual write — a crash between them leaves the systems inconsistent, and a database transaction can't include the broker. I use the transactional outbox: in the same transaction as the business change, insert an event row into an outbox table, so both commit atomically. A separate relay publishes unsent rows to the broker, retrying until acknowledged, then marks them sent; it can poll with `FOR UPDATE SKIP LOCKED` or use CDC, for example Debezium reading the write-ahead log. Delivery is at-least-once, so consumers are idempotent — they record processed event IDs — and I key messages by entity ID to keep per-entity ordering.
+
+<Fragment slot="deeper">
+
+- **What is CDC?** Streaming committed changes from the database's log as events.
+- **Outbox vs raw CDC?** Outbox publishes deliberate domain events; raw CDC couples consumers to table schemas.
+- **Why at-least-once?** The relay may crash after publishing but before marking sent.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Dual write", "Writing the same change to two systems separately, without atomicity."],
+  ["Transactional outbox", "Storing events in the same DB transaction as the change, then relaying them."],
+  ["Change data capture (CDC)", "Turning the database's change log into an event stream."],
+  ["Debezium", "Open-source CDC platform reading database logs into Kafka."],
+  ["At-least-once delivery", "Messages are never lost but may be delivered more than once."],
+  ["Idempotent consumer", "A consumer that produces the same result if a message is processed twice."],
+]} />

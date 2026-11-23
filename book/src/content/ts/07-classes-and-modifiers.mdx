@@ -1,0 +1,163 @@
+---
+title: Classes, access modifiers and parameter properties
+part: Classes & OOP
+order: 7
+level: core
+summary: How TypeScript types classes — public, private, protected, readonly, parameter properties, implements — and the difference between compile-time and runtime privacy.
+---
+
+TypeScript builds on JavaScript classes and adds **types for fields**, **access modifiers** (`public`, `private`, `protected`), **`readonly`**, **parameter properties** (declaring and assigning fields straight from the constructor), **abstract** classes and **`implements`** for interfaces. It's the style used by NestJS, Angular and many backend codebases. One subtlety matters a lot: TypeScript's `private` is checked only at compile time, while JavaScript's `#private` is enforced at runtime.
+
+<Analogy>
+  A class is the blueprint for a type of machine. Access modifiers are the casing: public buttons on the front, internal parts behind a panel. TypeScript's `private` is a "staff only" sticker on the panel — it stops honest people, but the panel isn't locked. JavaScript's `#private` is a welded panel.
+</Analogy>
+
+## Why it matters
+
+Backend interviews (especially for NestJS roles) expect fluent class syntax and an understanding of encapsulation. "What's the difference between `private` and `#private`?" is a favourite.
+
+## A typed class
+
+```ts
+class Account {
+  static readonly MIN_DEPOSIT = 1;          // on the class itself
+  readonly id: string;                      // set once, then read-only
+  protected balance = 0;                    // visible to subclasses
+  private history: number[] = [];           // only inside this class
+  #pin: string;                             // truly private at runtime
+
+  constructor(id: string, pin: string, public owner: string) {   // `public owner` = parameter property
+    this.id = id;
+    this.#pin = pin;
+  }
+
+  deposit(amount: number): this {
+    if (amount < Account.MIN_DEPOSIT) throw new RangeError('amount too small');
+    this.balance += amount;
+    this.history.push(amount);
+    return this;                            // `this` return type enables fluent chaining in subclasses
+  }
+
+  get total(): number { return this.balance; }
+}
+
+const a = new Account('acc_1', '1234', 'Ada');
+a.owner;        // ✓ public
+a.balance;      // ✘ compile error: protected
+a.history;      // ✘ compile error: private
+a.#pin;         // ✘ syntax error outside the class
+```
+
+## Access modifiers
+
+| Modifier | Accessible from | Enforced |
+|---|---|---|
+| `public` (default) | anywhere | — |
+| `protected` | the class and subclasses | compile time only |
+| `private` | the class only | compile time only |
+| `#name` | the class body only | **runtime** (JavaScript language feature) |
+| `readonly` | readable anywhere allowed, assignable only in declaration/constructor | compile time only |
+
+<Diagram
+  caption="TypeScript's private disappears when compiled; JavaScript's #private is still enforced by the engine."
+  chart={`flowchart LR
+    TS["TypeScript source<br/>private history<br/>#pin"] --> JS["compiled JavaScript<br/>this.history = [] (plain property!)<br/>#pin (still private)"]
+    JS --> R1["(a as any).history → works at runtime"]
+    JS --> R2["a.#pin → SyntaxError"]`}
+  steps={[
+    { nodes: ["TS"], text: "Both fields look private in the source." },
+    { nodes: ["TS", "JS"], text: "After compilation, `private history` is an ordinary property; `#pin` remains a real private field." },
+    { nodes: ["JS", "R1"], text: "Anyone can read `history` with a cast or from plain JavaScript, and it shows up in `JSON.stringify` and `Object.keys`." },
+    { nodes: ["JS", "R2"], text: "`#pin` cannot be reached from outside, by any means." },
+  ]}
+/>
+
+Use `#private` when runtime privacy matters (secrets, invariants other code mustn't touch); TypeScript `private` is fine for ordinary encapsulation and is what frameworks' dependency injection commonly uses.
+
+## Parameter properties
+
+Prefixing a constructor parameter with a modifier declares and assigns a field in one go — very common in NestJS services:
+
+```ts
+class OrdersService {
+  constructor(
+    private readonly repo: OrdersRepository,
+    private readonly payments: PaymentsClient,
+    private readonly logger: Logger,
+  ) {}
+
+  async place(input: PlaceOrderInput) {
+    const order = await this.repo.create(input);
+    this.logger.info({ orderId: order.id }, 'order placed');
+    return order;
+  }
+}
+```
+
+Note: parameter properties **generate code** (the assignments), so type-stripping tools that only erase syntax don't support them.
+
+## Implementing interfaces
+
+```ts
+interface Cache<T> {
+  get(key: string): Promise<T | undefined>;
+  set(key: string, value: T, ttlSeconds?: number): Promise<void>;
+}
+
+class RedisCache<T> implements Cache<T> {
+  constructor(private readonly client: RedisClient, private readonly prefix: string) {}
+  async get(key: string) { /* … */ return undefined; }
+  async set(key: string, value: T, ttlSeconds = 60) { /* … */ }
+}
+```
+
+`implements` only **checks** that the class matches; it doesn't change the class's type or add anything. Code that depends on `Cache<T>` rather than `RedisCache` can swap implementations — e.g. an in-memory cache in tests.
+
+## Strict property initialisation
+
+With `strictPropertyInitialization`, every field must be assigned in the constructor or have an initialiser. For fields set by a framework (an ORM, a decorator), use `!` ("definitely assigned") sparingly: `@Column() name!: string;`.
+
+## Classes are also types
+
+A class declaration creates both a **value** (the constructor function) and a **type** (the instance shape). Because typing is structural, any object with the same public shape is assignable to the class type — but private/protected members make classes nominal-ish (two classes with the same private member aren't interchangeable).
+
+```ts
+type AccountCtor = typeof Account;          // the constructor's type (static side)
+type AccountInstance = InstanceType<typeof Account>;
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Relying on TypeScript `private` for security.
+- Assuming `implements` adds methods or affects runtime.
+- Overusing `!` to bypass initialisation checks.
+- Huge classes mixing many responsibilities (see *SOLID*).
+- Using classes for plain data shapes where a type and functions would do.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What's the difference between TypeScript's private and JavaScript's #private?">
+
+TypeScript's `private` and `protected` are compile-time checks only: the compiler rejects access from outside the class (or its subclasses for protected), but after compilation they're ordinary properties — accessible via a cast or from plain JavaScript, and visible in `Object.keys` and JSON. JavaScript's `#private` fields are a language feature enforced by the engine at runtime; nothing outside the class body can read them, and they don't appear in enumeration or serialisation. I use TypeScript modifiers for normal encapsulation and dependency-injected collaborators — often as `private readonly` parameter properties — and `#private` when runtime privacy really matters.
+
+<Fragment slot="deeper">
+
+- **What are parameter properties?** Constructor parameters with modifiers that declare and assign fields.
+- **Does `implements` change the class?** No — it only checks conformance.
+- **What does `readonly` guarantee?** Compile-time prevention of reassignment; not deep immutability.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Access modifier", "`public`, `protected` or `private` visibility (compile-time)."],
+  ["`#private` field", "JavaScript private field enforced at runtime."],
+  ["Parameter property", "Constructor parameter that becomes a class field."],
+  ["`implements`", "Checks that a class satisfies an interface."],
+  ["`readonly`", "Property can't be reassigned after initialisation."],
+  ["Static member", "Belongs to the class itself, not instances."],
+]} />

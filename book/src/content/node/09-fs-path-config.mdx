@@ -1,0 +1,196 @@
+---
+title: Files, paths and configuration
+part: Core APIs
+order: 9
+level: foundation
+summary: Reading and writing files safely, building paths that work on every OS, and loading configuration the twelve-factor way.
+---
+
+Almost every Node program touches the file system, builds file paths and reads configuration. These basics have a few sharp edges: synchronous APIs in the wrong place, paths that break on Windows or let users read files they shouldn't, and secrets accidentally committed to git. This chapter covers the everyday toolkit and the habits that keep it safe.
+
+<Analogy>
+  Configuration is like the settings card handed to a hotel receptionist at the start of each shift — the desk (your code) is identical in every hotel; only the card (environment variables) changes. You never write the Wi-Fi password on the desk itself.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask about sync versus async file APIs, how you'd read a huge file, how to prevent path traversal, and how you manage configuration and secrets across environments.
+
+## Three flavours of the `fs` API
+
+```js
+// 1. promises — the default choice in modern code
+const { readFile, writeFile, mkdir } = require('node:fs/promises');
+const text = await readFile('config.json', 'utf8');
+
+// 2. callbacks — the original style
+const fs = require('node:fs');
+fs.readFile('config.json', 'utf8', (err, text) => { /* … */ });
+
+// 3. synchronous — blocks the event loop until done
+const text2 = fs.readFileSync('config.json', 'utf8');
+```
+
+<Diagram
+  caption="When each style is appropriate."
+  chart={`flowchart TB
+    Q{"When does this code run?"} --> S["Startup, CLI scripts,<br/>build tools"] --> SY["Sync is fine<br/>(nothing else to serve yet)"]
+    Q --> R["While serving requests"] --> AS{"How big is the file?"}
+    AS -- "small" --> PR["fs/promises readFile"]
+    AS -- "large or unknown" --> ST["createReadStream + pipeline"]`}
+/>
+
+- **Sync** APIs are fine during startup and in CLI tools. In a request handler they block every other request.
+- **`readFile`** loads the whole file into memory — fine for small files.
+- For large or unknown sizes, **stream** (`fs.createReadStream`).
+
+### Writing safely
+
+A crash halfway through `writeFile` can leave a truncated file. For important data, write to a temporary file and rename it — renames are atomic on the same file system:
+
+```js
+const { writeFile, rename } = require('node:fs/promises');
+
+async function writeAtomic(path, data) {
+  const tmp = `${path}.${process.pid}.tmp`;
+  await writeFile(tmp, data);
+  await rename(tmp, path);    // readers see either the old file or the new one, never half
+}
+```
+
+### Watching and other operations
+
+```js
+await mkdir('logs/2026', { recursive: true });
+await rm('tmp', { recursive: true, force: true });
+const entries = await readdir('uploads', { withFileTypes: true });
+const info = await stat('report.pdf');        // size, mtime, isFile()…
+```
+
+Avoid "check then act" sequences like `exists()` followed by `open()` — the file can change in between (a race). Just try the operation and handle the error (`ENOENT`, `EEXIST`).
+
+## Paths
+
+Use `node:path` instead of string concatenation, so separators work on every OS:
+
+```js
+const path = require('node:path');
+
+path.join('uploads', 'avatars', 'ada.png');   // 'uploads/avatars/ada.png' (or with \ on Windows)
+path.resolve('data', 'db.json');              // absolute, from the current working directory
+path.extname('photo.jpeg');                   // '.jpeg'
+path.basename('/a/b/report.pdf', '.pdf');     // 'report'
+```
+
+### Relative to what?
+
+Relative paths are resolved from the **current working directory** (`process.cwd()`), which is wherever the process was started — not where the source file is. To refer to files next to your code:
+
+```js
+// CommonJS
+const templates = path.join(__dirname, 'templates');
+// ES modules (Node 20.11+)
+const templates2 = path.join(import.meta.dirname, 'templates');
+```
+
+### Path traversal
+
+Never join user input straight into a path:
+
+```js
+// vulnerable: GET /files/..%2F..%2Fetc%2Fpasswd
+app.get('/files/:name', (req, res) => res.sendFile(path.join(UPLOADS, req.params.name)));
+```
+
+<Diagram
+  caption="Resolve the final path and check it is still inside the allowed folder before touching the disk."
+  chart={`flowchart LR
+    I["user input<br/>'../../etc/passwd'"] --> R["path.resolve(UPLOADS, input)"]
+    R --> C{"starts with<br/>UPLOADS + sep?"}
+    C -- yes --> OK["serve the file"]
+    C -- no --> NO["400 / 404"]`}
+/>
+
+```js
+const UPLOADS = path.resolve('uploads');
+
+function safePath(name) {
+  const full = path.resolve(UPLOADS, name);
+  if (!full.startsWith(UPLOADS + path.sep)) throw new Error('invalid path');
+  return full;
+}
+```
+
+Better still, don't use user-supplied names as file names at all: store files under generated IDs and keep the original name in a database.
+
+## Configuration
+
+The **twelve-factor app** guideline: keep configuration in **environment variables**, separate from code, so the same build runs in development, staging and production.
+
+```js
+// config.js — read once, validate, export a frozen object
+const { z } = require('zod');
+
+const schema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  PORT: z.coerce.number().int().default(3000),
+  DATABASE_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32),
+});
+
+const parsed = schema.safeParse(process.env);
+if (!parsed.success) {
+  console.error('Invalid configuration:', parsed.error.flatten().fieldErrors);
+  process.exit(1);               // fail fast at startup, not at 3 a.m. on first use
+}
+module.exports = Object.freeze(parsed.data);
+```
+
+<Diagram
+  caption="Config flows from the environment through one validated module. The rest of the code imports typed, checked values."
+  chart={`flowchart LR
+    ENV["Environment<br/>(.env locally, secrets manager in prod)"] --> V["config.js<br/>parse · validate · coerce types"]
+    V -- "invalid" --> X["exit(1) at startup"]
+    V -- "valid" --> APP["the rest of the app<br/>imports config"]`}
+  flow
+/>
+
+- Locally, Node 20.6+ loads a `.env` file with `node --env-file=.env app.js` (or use the `dotenv` package). **Never commit `.env`.**
+- In production, inject secrets from a secrets manager (AWS Secrets Manager, Vault, Kubernetes secrets) as environment variables or files.
+- Environment variables are always **strings** — `process.env.PORT` is `'3000'`, and `process.env.DEBUG === 'false'` is a truthy string. Validate and convert.
+- `NODE_ENV=production` makes many libraries (Express included) enable caching and disable debug behaviour.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `readFileSync` in request handlers.
+- Relative paths that break when the process starts from another directory.
+- Joining user input into file paths without checking the result.
+- Reading `process.env` all over the codebase with no validation.
+- Committing `.env` files or secrets to the repository.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you handle configuration and secrets in a Node service?">
+
+I follow twelve-factor: configuration comes from environment variables so the same artefact runs everywhere. A single config module reads `process.env` once at startup, validates and converts it with a schema — numbers, URLs, required secrets — and exits immediately if anything is missing, then exports a frozen, typed object. Locally I use a git-ignored `.env` file loaded with `--env-file`; in production secrets come from a secrets manager injected by the platform. I never log secrets, and I keep them out of the repository and the image.
+
+<Fragment slot="deeper">
+
+- **When are sync fs APIs acceptable?** At startup and in CLI tools, not while serving traffic.
+- **How do you prevent path traversal?** Resolve the path and verify it stays inside the base directory — or avoid user-supplied file names.
+- **How do you write a file safely?** Write to a temp file and rename atomically.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["`fs/promises`", "Promise-based file system API."],
+  ["Current working directory", "The directory relative paths resolve from; where the process was started."],
+  ["Path traversal", "Using `../` in input to access files outside the intended folder."],
+  ["Atomic write", "Writing to a temporary file and renaming, so readers never see a partial file."],
+  ["Twelve-factor config", "Keeping configuration in the environment, separate from code."],
+]} />

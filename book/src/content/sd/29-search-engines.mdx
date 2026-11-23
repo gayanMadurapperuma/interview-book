@@ -1,0 +1,122 @@
+---
+title: "Search engines: Elasticsearch and OpenSearch"
+part: Core components
+order: 29
+level: core
+summary: How full-text search works — inverted indexes, analysis, relevance scoring — and how to keep a search cluster in sync with your database.
+---
+
+Databases are great at "find the row with id = 42" and poor at "find products matching *wireless noise cancelling headphones*, ranked by relevance, with typo tolerance and filters by brand and price". **Search engines** such as **Elasticsearch** and its open-source fork **OpenSearch** are built for that. They store documents in an **inverted index** — a map from each word to the documents that contain it — shard it across a cluster, and score matches by relevance. They're also widely used for log analytics and observability.
+
+<Analogy>
+  The index at the back of a cookbook. Instead of reading every recipe to find ones with "garlic", you look up "garlic" and get a list of page numbers. An inverted index is that, for every word in every document — plus some cleverness about plurals, synonyms and spelling, and a way to rank which pages are most relevant.
+</Analogy>
+
+## Why it matters
+
+Search appears in e-commerce, content and admin-tool designs. Interviewers ask how search works, why not just use `LIKE '%term%'`, and — most importantly — how you keep the search index consistent with the source database.
+
+## The inverted index
+
+<Diagram
+  caption="Indexing: text is analysed into normalised terms; each term maps to the documents (and positions) containing it."
+  chart={`flowchart LR
+    D1["doc 1: 'Wireless Headphones with Noise Cancelling'"] --> AN["analyser<br/>tokenise · lowercase ·<br/>remove stop words · stem"]
+    D2["doc 2: 'Noise-cancelling wired headphone'"] --> AN
+    AN --> IDX["inverted index<br/>wireless → [1]<br/>headphon → [1, 2]<br/>nois → [1, 2]<br/>cancel → [1, 2]<br/>wire → [2]"]
+    Q["query: 'noise cancelling headphones'"] --> AN2["same analyser"] --> IDX
+    IDX --> R["matches: doc 1, doc 2<br/>ranked by BM25"]`}
+  steps={[
+    { nodes: ["D1", "D2", "AN"], text: "Each document's text goes through an **analyser**: split into tokens, lowercase, drop stop words, reduce words to stems ('cancelling' → 'cancel')." },
+    { nodes: ["AN", "IDX"], text: "The resulting **terms** are stored in the inverted index, each with the list of documents (and positions) containing it." },
+    { nodes: ["Q", "AN2", "IDX"], text: "Queries are analysed the **same way**, so 'Headphones' matches 'headphone'." },
+    { nodes: ["IDX", "R"], text: "Matching documents are combined and scored for relevance (BM25), then sorted." },
+  ]}
+/>
+
+**Relevance (BM25)** rewards terms that appear often in a document but rarely across all documents (a match on "noise-cancelling" says more than a match on "the"), and normalises for document length. Boosts (e.g. title matches count more), freshness and popularity can be blended in.
+
+## Cluster architecture
+
+- An **index** is split into **primary shards**; each has **replica shards** on other nodes for availability and read throughput.
+- Writes go to the primary shard then replicate; search queries fan out to one copy of every shard and merge results (**scatter–gather**).
+- Indexing is **near real-time**: documents become searchable after a **refresh** (default ~1 s).
+- Choose shard count up front (resharding requires reindexing); aim for shards of roughly 10–50 GB.
+
+## Features you'll use
+
+| Feature | Example |
+|---|---|
+| Full-text match with fuzziness | typo tolerance: "headphnes" |
+| Filters (exact, cached, no scoring) | `brand = Sony`, `price 50–150`, `in_stock = true` |
+| Aggregations / facets | counts per brand, price histograms |
+| Autocomplete | edge n-grams, completion suggesters |
+| Synonyms | "tv" ↔ "television" |
+| Geo search | within 5 km |
+| Vector (k-NN) search | semantic search over embeddings, hybrid with keywords |
+
+## Keeping search in sync
+
+The search engine is a **derived** store; the database stays the source of truth.
+
+<Diagram
+  caption="Never dual-write from the request. Feed the index from the database's change stream, so it can always be rebuilt and catches up after failures."
+  chart={`flowchart LR
+    APP["application"] -- "write" --> DB[("PostgreSQL<br/>source of truth")]
+    DB -- "CDC / outbox" --> K[["Kafka"]]
+    K --> IDXR["indexer<br/>(idempotent upserts by id + version)"]
+    IDXR --> ES[("OpenSearch")]
+    APP -- "search queries" --> ES
+    APP -- "fetch details by id" --> DB`}
+  steps={[
+    { nodes: ["APP", "DB"], text: "Writes go only to the database." },
+    { nodes: ["DB", "K"], text: "Changes flow out through CDC or an outbox into a stream." },
+    { nodes: ["K", "IDXR", "ES"], text: "An indexer upserts documents by ID, using a version so out-of-order updates can't overwrite newer data. Lag is usually seconds." },
+    { nodes: ["APP", "ES", "DB"], text: "Search returns IDs and display fields; authoritative details (price, stock) can be re-read from the database." },
+  ]}
+/>
+
+- **Reindexing** (mapping change, new analyser): build a new index from the source, then switch an **alias** atomically — zero downtime.
+- Search results are **eventually consistent**; design the UI accordingly.
+
+## Not a primary database
+
+Elasticsearch/OpenSearch lack multi-document transactions, have weaker durability guarantees on some failure modes, and mappings are hard to change. Keep them as a secondary index you can always rebuild.
+
+For small datasets, **PostgreSQL full-text search** (`tsvector` + GIN index) or `pg_trgm` may be enough — one less system to run. Lightweight engines like **Meilisearch** or **Typesense** are simpler for product search.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `LIKE '%term%'` on a large table for search.
+- Writing to the database and the search index separately from the request (dual writes).
+- Too many small shards (overhead) or too few huge ones (can't scale).
+- Changing mappings in place instead of reindexing via aliases.
+- Using the search cluster as the source of truth.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you add product search to an e-commerce system?">
+
+The database stays the source of truth, and I'd add OpenSearch or Elasticsearch as a derived index. Product changes flow from the database via CDC or an outbox into a stream, and an indexer upserts documents by ID with a version check, so the index catches up after failures and can always be rebuilt. Documents are analysed into an inverted index — tokenised, lowercased, stemmed, with synonyms — and queries combine full-text matching with BM25 relevance, fuzziness for typos, boosts for title matches, and filters plus aggregations for facets like brand and price. The index is sharded with replicas for scale and availability; mapping changes are done by building a new index and switching an alias. Results are eventually consistent within seconds, and authoritative fields like stock can be re-read from the database.
+
+<Fragment slot="deeper">
+
+- **What is an inverted index?** A map from terms to the documents containing them.
+- **Why not `LIKE '%x%'`?** No index use, no relevance, no stemming or typo tolerance.
+- **How do you change mappings without downtime?** Reindex into a new index and switch an alias.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Inverted index", "Map from each term to the documents that contain it."],
+  ["Analyser", "Pipeline turning text into terms: tokenise, normalise, stem."],
+  ["BM25", "Standard relevance scoring function for text search."],
+  ["Shard / replica", "Partition of an index / its copy on another node."],
+  ["Refresh", "Making recently indexed documents searchable (near real-time)."],
+  ["Index alias", "A pointer name that can be switched to a new index atomically."],
+]} />

@@ -1,0 +1,178 @@
+---
+title: ORMs, connection pools and the N+1 problem
+part: Performance
+order: 10
+level: core
+summary: "How a Node application actually talks to its database — and the two things that most often go wrong: hidden query explosions and exhausted connections."
+---
+
+A Node service doesn't open a fresh database connection per request — that would be far too slow. It keeps a **connection pool**: a small set of open connections that requests borrow and return. On top of the driver, many teams use an **ORM** (Object-Relational Mapper — Prisma, TypeORM, Sequelize, Drizzle, MikroORM) or a **query builder** (Knex, Kysely) to write queries in TypeScript instead of raw SQL. Both layers are convenient — and both hide performance traps.
+
+<Analogy>
+  A connection pool is a taxi rank with a fixed number of cabs. Passengers (requests) take a cab, make their trip (query or transaction), and return it to the rank. If trips take too long or someone keeps a cab parked while they go shopping (an open transaction waiting on an HTTP call), the queue at the rank grows — even though the city's roads (the database) are empty.
+</Analogy>
+
+## Why it matters
+
+"The database is slow" is often really "the pool is exhausted" or "the ORM is running 300 queries per request". Interviewers ask about connection pooling, pool sizing, ORM trade-offs and the N+1 problem.
+
+## Why pool connections
+
+Opening a PostgreSQL connection involves a TCP handshake, TLS, authentication and starting a backend **process** on the server (several MB of memory each). That's milliseconds per connection and real server resources. A pool pays that cost once.
+
+<Diagram
+  caption="Requests borrow a connection for the duration of a query or transaction, then return it. When all are busy, requests wait in the pool's queue."
+  chart={`flowchart LR
+    R1["request 1"] --> P["pool (max 10)"]
+    R2["request 2"] --> P
+    R3["request 3…50"] --> Q["waiting queue"]
+    Q --> P
+    P --> C1[("conn 1")]
+    P --> C2[("conn 2")]
+    P --> C3[("… conn 10")]
+    C1 --> DB[("PostgreSQL")]
+    C2 --> DB
+    C3 --> DB`}
+  steps={[
+    { nodes: ["R1", "R2", "P"], text: "Requests ask the pool for a connection." },
+    { nodes: ["P", "C1", "C2", "C3", "DB"], text: "Up to `max` connections are open to the database and reused." },
+    { nodes: ["R3", "Q"], text: "When all are checked out, further requests wait. If they wait longer than `connectionTimeoutMillis`, they fail." },
+    { nodes: ["Q", "P"], text: "As soon as a connection is returned, the next waiting request gets it." },
+  ]}
+/>
+
+```js
+const { Pool } = require('pg');
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 10,                        // per process!
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 2_000, // fail fast instead of queueing forever
+  statement_timeout: 5_000,       // server-side cap on query time
+});
+
+// single query: borrow and return automatically
+const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+```
+
+For transactions, check out one client and **always** release it (see *ACID*).
+
+## Sizing the pool
+
+More connections is not faster. A database server can only run as many queries truly in parallel as it has CPU cores and disk bandwidth; beyond that, connections just contend. A common starting formula for the **total** across all app instances: roughly `cores × 2` (plus a little for disks), then measure.
+
+The trap is **multiplication**:
+
+<Diagram
+  caption="Pool size is per process. Replicas × processes × pool size can easily exceed the database's connection limit."
+  chart={`flowchart LR
+    K["20 pods"] --> X["× 4 cluster workers"] --> Y["× pool max 20"] --> Z["= 1,600 connections"]
+    Z --> L["PostgreSQL max_connections = 200 ✗"]`}
+/>
+
+Solutions: smaller per-process pools; a **server-side pooler** like **PgBouncer** (or RDS Proxy) in transaction-pooling mode, which multiplexes many client connections onto few database connections; and for serverless functions, always use a proxy, since each function instance opens its own connections.
+
+### Symptoms of pool exhaustion
+
+- Requests time out waiting for a connection while the database CPU is low.
+- Latency rises sharply with traffic.
+- Usually caused by: transactions held open during slow external calls, leaked clients never released, or a pool much smaller than concurrency.
+
+Monitor `pool.totalCount`, `pool.idleCount` and `pool.waitingCount`.
+
+## ORMs: what they give and what they hide
+
+| Benefits | Risks |
+|---|---|
+| Type-safe queries and results (Prisma, Drizzle, Kysely) | Hidden queries: lazy loading, N+1 |
+| Migrations, schema in code | Inefficient SQL for complex queries |
+| Less boilerplate for CRUD | Leaky abstraction: you still need SQL knowledge |
+| Parameterisation by default | Over-fetching (all columns, all relations) |
+
+Most teams settle on: ORM or query builder for everyday CRUD, **raw SQL** for complex reporting queries, and **always** look at the SQL the ORM generates (enable query logging in development).
+
+## N+1 through an ORM
+
+The pattern from the previous chapter, as it usually appears:
+
+```ts
+// N+1: one query for posts, then one per post when author is accessed
+const posts = await prisma.post.findMany({ take: 50 });
+for (const post of posts) {
+  const author = await prisma.user.findUnique({ where: { id: post.authorId } });
+}
+
+// fixed: eager-load the relation
+const postsWithAuthors = await prisma.post.findMany({
+  take: 50,
+  include: { author: { select: { id: true, name: true } } },
+});
+```
+
+<Diagram
+  sequence
+  caption="With lazy loading, a loop quietly issues one query per item. Eager loading fetches the relation in one extra query (or a join)."
+  chart={`sequenceDiagram
+    participant App
+    participant DB
+    App->>DB: SELECT posts LIMIT 50
+    DB-->>App: 50 posts
+    App->>DB: SELECT user WHERE id = 1
+    App->>DB: SELECT user WHERE id = 2
+    App->>DB: … 48 more
+    Note over App,DB: eager loading instead:
+    App->>DB: SELECT users WHERE id IN (1, 2, …)`}
+  notes={[
+    "The app fetches a page of posts.",
+    "50 rows come back.",
+    "Accessing the first post's author triggers a query.",
+    "And the second…",
+    "…and 48 more. Each is fast; together they cost 50 round trips.",
+    "With eager loading (`include`), the ORM issues a single batched query for all authors.",
+  ]}
+/>
+
+In GraphQL, where resolvers fetch per field, the standard fix is **DataLoader**: it collects all IDs requested in one tick and issues a single batched query.
+
+## Other ORM pitfalls
+
+- **Transactions**: use the ORM's transaction API (`prisma.$transaction(async (tx) => …)`) and pass `tx` to every call inside — mixing in the global client runs those queries outside the transaction.
+- **Migrations in production**: review generated SQL for locking operations on big tables.
+- **Large result sets**: stream or paginate instead of `findMany()` over millions of rows.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- A new `Pool` per request (or per module import in serverless) — connection storms.
+- Not releasing clients after transactions.
+- Holding a transaction open across an HTTP call.
+- Pool size × instances exceeding `max_connections`.
+- Loops that trigger lazy loading.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you manage database connections in a Node service?">
+
+I create one connection pool per process at startup and reuse it; requests borrow a connection for a query or transaction and return it, because opening connections is expensive for both sides. I size it modestly — the database can only do so much in parallel — and remember that the total is pool size times processes times replicas, which must stay under the database's connection limit; at scale, or with serverless, I put PgBouncer or RDS Proxy in front. I set connection-acquire and statement timeouts so problems fail fast, keep transactions short with no external calls inside, always release clients in `finally`, and monitor waiting counts. With ORMs I watch the generated SQL, especially for N+1 patterns, which I fix with eager loading, joins or DataLoader-style batching.
+
+<Fragment slot="deeper">
+
+- **What does PgBouncer's transaction mode do?** Assigns a server connection only for the duration of a transaction, multiplexing many clients.
+- **Why isn't a bigger pool faster?** The database's real parallelism is limited; extra connections add contention and memory.
+- **How do you detect N+1?** Query logging or APM traces showing many near-identical queries per request.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Connection pool", "A set of reusable open database connections."],
+  ["Pool exhaustion", "All connections busy, so requests wait or time out."],
+  ["PgBouncer", "A lightweight server-side connection pooler for PostgreSQL."],
+  ["ORM", "A library mapping database rows to objects and generating SQL."],
+  ["Eager loading", "Fetching related records up front instead of lazily per item."],
+  ["DataLoader", "A batching utility that merges many per-item lookups into one query."],
+]} />

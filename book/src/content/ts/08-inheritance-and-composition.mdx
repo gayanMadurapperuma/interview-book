@@ -1,0 +1,178 @@
+---
+title: Inheritance, abstract classes and composition
+part: Classes & OOP
+order: 8
+level: core
+summary: When extends is the right tool, what abstract classes add, and why most designs are more flexible built from composed parts.
+---
+
+**Inheritance** (`extends`) lets a class reuse and specialise another class's behaviour. **Abstract classes** define a partial implementation that subclasses must complete. **Composition** builds behaviour by combining objects — a class *has* collaborators rather than *being* a subtype. TypeScript supports all three; good designs use inheritance sparingly and composition by default.
+
+<Analogy>
+  Inheritance is a family tree: a child inherits traits whether they want them or not, and a change in a grandparent affects everyone below. Composition is building with LEGO: you snap together a wheel, a motor and a seat — swap the motor for a bigger one without rebuilding the whole car.
+</Analogy>
+
+## Why it matters
+
+"Composition over inheritance" is a classic interview discussion. You'll also be asked what abstract classes are for, the difference between an abstract class and an interface, and how `super`, `override` and `protected` work.
+
+## Inheritance
+
+```ts
+class HttpError extends Error {
+  constructor(public readonly status: number, message: string, options?: ErrorOptions) {
+    super(message, options);        // must call super() before using `this`
+    this.name = new.target.name;
+  }
+}
+
+class NotFoundError extends HttpError {
+  constructor(resource: string) {
+    super(404, `${resource} not found`);
+  }
+}
+
+const e = new NotFoundError('order');
+e instanceof HttpError;   // true
+e.status;                 // 404
+```
+
+- `override` (with `noImplicitOverride`) marks methods that replace a parent's, so renaming the parent method produces an error instead of silently breaking.
+- `protected` members are available to subclasses.
+- Error hierarchies are one of the best uses of inheritance: a genuine "is-a" relationship, shallow, with stable behaviour.
+
+## Abstract classes
+
+An abstract class can't be instantiated; it provides shared code and declares **abstract** members that subclasses must implement. It's the **template method** pattern.
+
+```ts
+abstract class Exporter<T> {
+  async run(rows: T[]): Promise<string> {          // the fixed algorithm
+    const valid = rows.filter((r) => this.validate(r));
+    const body = this.format(valid);
+    return this.upload(body);
+  }
+  protected validate(_row: T): boolean { return true; }   // hook with a default
+  protected abstract format(rows: T[]): string;           // must be implemented
+  protected abstract upload(body: string): Promise<string>;
+}
+
+class CsvS3Exporter extends Exporter<Order> {
+  protected format(rows: Order[]) { return rows.map((r) => `${r.id},${r.total}`).join('\n'); }
+  protected async upload(body: string) { return s3Put('exports/orders.csv', body); }
+}
+```
+
+<Diagram
+  caption="Template method: the base class owns the algorithm; subclasses fill in the variable steps."
+  chart={`flowchart TB
+    RUN["Exporter.run()<br/>fixed steps"] --> V["validate(row)<br/>default hook"]
+    RUN --> F["format(rows)<br/>abstract"]
+    RUN --> U["upload(body)<br/>abstract"]
+    F --> CSV["CsvS3Exporter.format"]
+    U --> S3["CsvS3Exporter.upload"]
+    F --> JSN["JsonGcsExporter.format"]
+    U --> GCS["JsonGcsExporter.upload"]`}
+/>
+
+| | Abstract class | Interface |
+|---|---|---|
+| Implementation code | yes (shared methods, fields, constructor) | no |
+| Runtime existence | yes (a real class) | no (erased) |
+| Multiple | a class extends **one** | a class implements **many** |
+| Use | shared behaviour + required hooks | a contract for unrelated implementations |
+
+## The problems with deep inheritance
+
+<Diagram
+  caption="A hierarchy that seemed reasonable until a new requirement crossed its branches."
+  chart={`flowchart TB
+    N["Notifier"] --> E["EmailNotifier"]
+    N --> S["SmsNotifier"]
+    E --> RE["RetryingEmailNotifier"]
+    S --> RS["RetryingSmsNotifier"]
+    E --> BE["BatchedEmailNotifier"]
+    RE --> RBE["RetryingBatchedEmailNotifier ?!"]`}
+  steps={[
+    { nodes: ["N", "E", "S"], text: "A base class with two channels — fine so far." },
+    { nodes: ["E", "RE", "S", "RS"], text: "Adding retries means a subclass per channel." },
+    { nodes: ["E", "BE"], text: "Then batching…" },
+    { nodes: ["RE", "RBE"], text: "…and every combination needs its own class. This is the class explosion that composition avoids." },
+  ]}
+/>
+
+Problems: **fragile base class** (a change in the parent breaks subclasses), **combinatorial explosion**, subclasses inheriting things they don't need, and tight coupling to implementation details.
+
+## Composition
+
+Give a class its collaborators and let it delegate:
+
+```ts
+interface Channel { send(to: string, message: string): Promise<void> }
+
+class EmailChannel implements Channel { async send(to: string, msg: string) { /* SES */ } }
+class SmsChannel implements Channel { async send(to: string, msg: string) { /* Twilio */ } }
+
+// behaviour as wrappers (decorator pattern) — compose freely
+const withRetry = (inner: Channel, attempts = 3): Channel => ({
+  async send(to, msg) {
+    for (let i = 1; ; i++) {
+      try { return await inner.send(to, msg); }
+      catch (e) { if (i >= attempts) throw e; await sleep(100 * 2 ** i); }
+    }
+  },
+});
+
+class Notifier {
+  constructor(private readonly channels: Channel[]) {}
+  async notify(to: string, msg: string) {
+    await Promise.allSettled(this.channels.map((c) => c.send(to, msg)));
+  }
+}
+
+const notifier = new Notifier([withRetry(new EmailChannel()), new SmsChannel()]);
+```
+
+Retries, batching, logging and metrics become small wrappers that combine in any order, and tests can pass fake channels. This is also how **dependency injection** works (NestJS injects collaborators into constructors).
+
+## Guidelines
+
+- Use `extends` for genuine, stable **is-a** relationships with shallow hierarchies (errors, framework base classes you're told to extend).
+- Use **abstract classes** when several implementations share real code around required hooks.
+- Default to **interfaces + composition** for variation and cross-cutting behaviour.
+- Prefer small functions and plain objects where classes add nothing.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Deep hierarchies to share a few helper methods.
+- Forgetting `super()` (or using `this` before it).
+- Overriding methods without `override` and missing a parent rename.
+- `extends Error` without setting `name` (and, for older targets, the prototype).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="When would you use inheritance, an abstract class, or composition?">
+
+I use inheritance for genuine, stable is-a relationships with shallow hierarchies — an error hierarchy where `NotFoundError` is an `HttpError` is a good example. An abstract class fits when several implementations share real code around a fixed algorithm with required steps — the template method pattern — and, unlike an interface, it exists at runtime and holds implementation, but a class can extend only one. For most variation I prefer composition: define small interfaces like `Channel`, implement them separately, and give a class its collaborators through the constructor; cross-cutting behaviour like retries or logging becomes wrappers that combine freely. That avoids fragile base classes and the class explosion you get when features combine, and it makes testing with fakes easy.
+
+<Fragment slot="deeper">
+
+- **What is the fragile base class problem?** Changes in a parent unintentionally break subclasses.
+- **Abstract class vs interface?** Shared implementation and runtime presence vs a pure, erasable contract.
+- **What does `override` add?** An error if the method doesn't actually override a parent method.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Inheritance", "A class extending another to reuse and specialise behaviour."],
+  ["Abstract class", "A non-instantiable base class with abstract members to implement."],
+  ["Template method", "Base class defines an algorithm; subclasses fill in steps."],
+  ["Composition", "Building behaviour by combining collaborating objects."],
+  ["Decorator pattern", "Wrapping an object to add behaviour while keeping its interface."],
+  ["`override`", "Keyword asserting a method overrides a base-class method."],
+]} />

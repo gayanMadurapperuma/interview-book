@@ -1,0 +1,146 @@
+---
+title: "The building blocks: DNS, CDN, load balancers and proxies"
+part: The interview
+order: 3
+level: foundation
+summary: Everything a request touches before it reaches your code — and what each piece is for.
+---
+
+Before a request reaches your API server, it passes through a chain of infrastructure: **DNS** turns a name into an address, a **CDN** may answer it from a nearby edge server, a **load balancer** picks one of your servers, and a **reverse proxy** or **API gateway** may handle TLS, authentication and rate limiting. Knowing what each building block does lets you assemble designs quickly — and explain where latency, caching and failures happen.
+
+<Analogy>
+  Sending a parcel internationally. DNS is the address book that turns "Grandma" into a street address. The CDN is a local depot that already has copies of popular items, so most orders never leave your city. The load balancer is the sorting centre choosing which delivery van is free. The reverse proxy is the front desk at the destination building that checks ID and signs for packages.
+</Analogy>
+
+## Why it matters
+
+These components appear in every high-level design. Interviewers expect you to place them correctly and say why: "static assets via CDN", "L7 load balancer for path-based routing", "TLS terminates at the load balancer".
+
+## The path of a request
+
+<Diagram
+  sequence
+  caption="A browser loading https://shop.example.com/products/42 for the first time."
+  chart={`sequenceDiagram
+    participant B as Browser
+    participant DNS as DNS resolver
+    participant CDN as CDN edge (nearby)
+    participant LB as Load balancer
+    participant API as API server
+    B->>DNS: shop.example.com?
+    DNS-->>B: CDN edge IP (nearest)
+    B->>CDN: GET /products/42 (TLS)
+    CDN->>LB: cache miss → forward to origin
+    LB->>API: pick healthy server
+    API-->>CDN: 200 + Cache-Control
+    CDN-->>B: response (cached for next users)`}
+  notes={[
+    "The browser asks a DNS resolver for the site's address.",
+    "DNS answers with the IP of a nearby CDN edge (geo-routing).",
+    "The browser opens a TLS connection to the edge — close by, so the handshake is fast.",
+    "The edge doesn't have it cached, so it forwards to the origin.",
+    "The load balancer sends it to one healthy API server.",
+    "The API responds, with headers saying how long it may be cached.",
+    "The edge returns it and keeps a copy; the next user nearby gets it in milliseconds.",
+  ]}
+/>
+
+## DNS
+
+DNS translates names to IP addresses through a hierarchy (root → `.com` → `example.com`'s name servers). Answers are cached by resolvers according to their **TTL**.
+
+- **Record types**: `A`/`AAAA` (IP addresses), `CNAME` (alias to another name), `MX` (mail), `TXT` (verification), `NS`.
+- **Traffic steering**: managed DNS (Route 53, Cloudflare) can answer differently by geography, latency, weights (canary releases) or health (failover).
+- **Limitation**: clients and resolvers cache answers, so DNS-based failover takes at least the TTL — keep TTLs short (30–60 s) on records you may need to change quickly.
+
+## CDN
+
+A **content delivery network** is a global network of edge servers that cache content close to users.
+
+- **Static assets** (JS, CSS, images, video) are the obvious use: cached for long periods with content-hashed file names (`app.3f9a2c.js`), so new deploys never serve stale files.
+- **Dynamic content** can be cached briefly too (product pages for 60 s), controlled by `Cache-Control` headers; or not cached but still accelerated (the edge keeps warm, optimised connections to your origin).
+- **Edge compute** (Cloudflare Workers, Lambda@Edge) runs small functions at the edge: redirects, auth checks, A/B routing.
+- Also absorbs DDoS traffic and terminates TLS close to users.
+
+```http
+Cache-Control: public, max-age=31536000, immutable      # hashed static assets
+Cache-Control: public, s-maxage=60, stale-while-revalidate=300   # semi-dynamic pages
+Cache-Control: private, no-store                        # personal data
+```
+
+## Load balancers
+
+A load balancer spreads requests across many servers, removes unhealthy ones, and lets you add or remove servers without clients noticing.
+
+<Diagram
+  caption="L4 balancers route by IP and port without understanding HTTP. L7 balancers read the request and can route by path, header or host."
+  chart={`flowchart LR
+    C["clients"] --> L4["L4 load balancer<br/>(TCP / UDP)"]
+    L4 --> S1["server pool"]
+    C2["clients"] --> L7["L7 load balancer<br/>(HTTP)"]
+    L7 -- "/api/*" --> API["API servers"]
+    L7 -- "/images/*" --> IMG["image service"]
+    L7 -- "Host: admin.*" --> ADM["admin app"]`}
+/>
+
+| | Layer 4 (transport) | Layer 7 (application) |
+|---|---|---|
+| Sees | IPs and ports | full HTTP: path, headers, cookies |
+| Can | forward connections, very fast | route by path/host, terminate TLS, rewrite, retry, add headers |
+| Examples | AWS NLB, HAProxy (TCP mode) | AWS ALB, nginx, Envoy, HAProxy (HTTP) |
+
+Algorithms (round-robin, least connections, consistent hashing) and health checks are covered in *Load balancing*.
+
+## Reverse proxies and API gateways
+
+A **reverse proxy** sits in front of your servers (the client doesn't know it's there): nginx, Envoy, Caddy. It terminates TLS, compresses responses, serves static files, buffers slow clients and enforces timeouts and size limits.
+
+An **API gateway** is a reverse proxy specialised for APIs: authentication (validating JWTs), rate limiting per API key, request/response transformation, routing to many backend services, and usage analytics. Examples: Kong, AWS API Gateway, Apigee.
+
+A **forward proxy**, by contrast, sits in front of **clients** (corporate proxies, egress proxies that restrict which external hosts your services may call).
+
+## Other blocks you'll use constantly
+
+| Block | Purpose |
+|---|---|
+| **Object storage** (S3) | files, images, backups, data lake; practically unlimited and cheap |
+| **Message queue / log** (SQS, Kafka) | decouple producers and consumers, absorb spikes, async work |
+| **Cache** (Redis) | hot reads, sessions, rate limits |
+| **Search** (OpenSearch) | full-text and faceted search |
+| **Service discovery** | how services find each other's current addresses (Kubernetes DNS, Consul) |
+| **Blob upload via pre-signed URL** | clients upload directly to S3; API servers never handle the bytes |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Serving large static files or video from API servers instead of a CDN.
+- Long DNS TTLs on records used for failover.
+- Caching personalised responses in a shared CDN cache (data leaks between users).
+- Putting a single load balancer instance in the design as a new single point of failure (managed LBs are redundant; self-hosted ones need a pair).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What happens between a user typing a URL and your API handling the request?">
+
+The browser resolves the domain through DNS, which may return the address of a nearby CDN edge based on location. It opens a TLS connection to that edge. If the response is cacheable and cached, the edge answers directly; otherwise it forwards the request to our origin, typically a layer-7 load balancer, which terminates TLS or re-encrypts, picks a healthy server using its algorithm and health checks, and may route by path to different services. Often an API gateway or reverse proxy in front of the services handles authentication, rate limiting and timeouts. The API server handles the request and returns cache headers that tell the CDN and browser how long they can reuse the response.
+
+<Fragment slot="deeper">
+
+- **L4 vs L7 load balancer?** Connection-level forwarding vs HTTP-aware routing, TLS termination and retries.
+- **How do you cache dynamic pages safely?** Short `s-maxage`, `stale-while-revalidate`, and never cache personalised responses publicly.
+- **Why upload via pre-signed URLs?** Large files bypass your servers and go straight to object storage.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["DNS", "System translating domain names into IP addresses."],
+  ["CDN", "Globally distributed edge servers caching content near users."],
+  ["Load balancer", "Distributes traffic across servers and removes unhealthy ones."],
+  ["Reverse proxy", "A server in front of your servers handling TLS, buffering and routing."],
+  ["API gateway", "A reverse proxy for APIs adding auth, rate limiting and routing."],
+  ["Pre-signed URL", "A temporary URL letting a client upload or download directly from object storage."],
+]} />

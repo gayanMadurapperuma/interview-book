@@ -1,0 +1,164 @@
+---
+title: "Memory: the stack and the heap"
+part: Engine & memory
+order: 7
+level: core
+summary: Where JavaScript keeps your data, why objects are shared by reference, and how to think about memory without needing a computer-science degree.
+---
+
+JavaScript manages memory for you — you never call `malloc` or `free`. But it still helps to have a simple picture of **where** things live. The engine uses two areas: the **stack**, a small, fast, tidy area for function calls and simple values; and the **heap**, a large, flexible area for objects. Variables on the stack can hold *references* that point into the heap.
+
+<Analogy>
+  The stack is your desk: small, organised, cleared after each task. The heap is a big warehouse. You cannot fit a sofa on your desk, so you keep a sticky note on the desk that says "sofa — aisle 14". Copying the sticky note does not copy the sofa; it gives someone else directions to the same sofa.
+</Analogy>
+
+## Why it matters
+
+This picture explains a cluster of interview questions in one go: why objects are shared when assigned, why changing an array inside a function affects the caller, why `const` objects can still change, and what a memory leak actually is.
+
+## The basic picture
+
+```js
+function createOrder() {
+  const id = 7;                         // small value
+  const items = ['tea', 'cake'];        // object → heap
+  const order = { id, items };          // object → heap
+  return order;
+}
+const o = createOrder();
+```
+
+<Diagram
+  caption="Small values and references live in stack frames. Objects live on the heap. When a frame is popped, heap objects survive as long as something still points to them."
+  chart={`flowchart LR
+    subgraph Stack
+      direction TB
+      F["createOrder frame<br/>id = 7<br/>items → ⬤<br/>order → ⬤"]
+      G["global frame<br/>o → ⬤"]
+    end
+    subgraph Heap
+      direction TB
+      A["['tea', 'cake']"]
+      O["{ id: 7, items: ⬤ }"]
+    end
+    F --> A
+    F --> O
+    O --> A
+    G --> O`}
+  steps={[
+    { nodes: ["F"], text: "Calling `createOrder` pushes a frame. The number `7` is stored right in the frame." },
+    { nodes: ["F", "A"], text: "The array is an object, so it is created on the **heap**. The frame keeps only a reference to it." },
+    { nodes: ["F", "O", "A"], text: "The order object is also on the heap, and it holds a reference to the array." },
+    { nodes: ["G", "O", "A"], text: "The function returns and its frame is popped. The objects survive, because the global variable `o` still points to the order — which points to the array." },
+  ]}
+/>
+
+<Callout type="note" title="A simplified model">
+  Real engines are cleverer: V8 may keep short-lived objects in registers, store small integers specially, and give closures heap-allocated scopes. For interviews and everyday reasoning, "primitives by value, objects on the heap by reference" is the right model.
+</Callout>
+
+## Stack versus heap
+
+| | Stack | Heap |
+|---|---|---|
+| Holds | Function frames, primitive values, references | Objects, arrays, functions, closures |
+| Size | Small (fixed limit) | Large (grows as needed) |
+| Lifetime | Until the function returns | Until nothing references it |
+| Freed by | Popping the frame | The garbage collector |
+| Speed | Very fast | Slower to allocate and collect |
+
+## References in practice
+
+```js
+const a = { count: 1 };
+const b = a;        // copy the reference
+b.count++;          // follow the reference and change the object
+a.count;            // 2
+
+function reset(obj) {
+  obj.count = 0;    // changes the shared object — caller sees it
+  obj = { count: 99 }; // only changes the local reference — caller does NOT see it
+}
+reset(a);
+a.count;            // 0
+```
+
+<Diagram
+  caption="Inside reset, obj starts as a copy of the reference. Reassigning obj points the local copy somewhere else; the caller's a is untouched."
+  chart={`flowchart LR
+    a["a (caller)"] --> X["{ count: 0 }"]
+    obj["obj (inside reset)"] --> X
+    obj -. "after obj = { count: 99 }" .-> Y["{ count: 99 }<br/>new object"]`}
+  steps={[
+    { nodes: ["a", "obj", "X"], text: "Both `a` and the parameter `obj` point to the same object, so `obj.count = 0` is visible through `a`." },
+    { nodes: ["obj", "Y"], text: "`obj = { count: 99 }` only re-points the local variable. The caller's `a` still points to the original." },
+  ]}
+/>
+
+## Immutability helps
+
+Because objects are shared, bugs often come from one part of the code changing an object that another part was relying on. Two common defences:
+
+- **Do not mutate; copy.** `const next = { ...state, count: state.count + 1 }`.
+- **Freeze configuration.** `Object.freeze(config)` makes accidental writes fail (and throw in strict mode). It is shallow — nested objects need freezing too.
+
+```js
+const config = Object.freeze({ retries: 3, db: { host: 'x' } });
+config.retries = 5;     // TypeError in strict mode
+config.db.host = 'y';   // allowed! freeze is shallow
+```
+
+## Strings are primitives, even long ones
+
+A string can be megabytes long, yet it is still a primitive: immutable and compared by value. Engines store the characters on the heap internally and share them cleverly, but from your code's point of view, `s.toUpperCase()` returns a **new** string and `s` never changes.
+
+```js
+let s = 'hello';
+s[0] = 'J';        // silently ignored (TypeError in strict mode)
+s.toUpperCase();   // 'HELLO' — a new string; s is still 'hello'
+```
+
+## How much memory does my process use?
+
+In Node you can inspect the heap at runtime:
+
+```js
+const { heapUsed, heapTotal } = process.memoryUsage();
+console.log(Math.round(heapUsed / 1e6) + ' MB used of ' + Math.round(heapTotal / 1e6) + ' MB');
+```
+
+In browsers, the Memory panel in DevTools takes **heap snapshots** that show every object and what is keeping it alive. The next chapters on copying and garbage collection build on this.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Believing `const obj` cannot change. The reference cannot change; the object can.
+- Expecting reassigning a parameter to update the caller's variable.
+- Thinking `Object.freeze` is deep.
+- Assuming large strings are shared by reference and can be mutated.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Where does JavaScript store primitives and objects?">
+
+Conceptually, primitives and references live in stack frames, which are created and destroyed with each function call, while objects — including arrays and functions — live on the heap. A variable holding an object stores a reference to it, so assigning or passing that variable shares the same object. Stack memory is freed automatically when a function returns; heap memory is freed by the garbage collector once nothing can reach the object any more.
+
+<Fragment slot="deeper">
+
+- **Why can a function modify the caller's object but not reassign the caller's variable?** It receives a copy of the reference: following it reaches the shared object, but re-pointing it only changes the local copy.
+- **Does a popped frame free its objects?** Not necessarily — objects stay alive while anything else references them.
+- **How would you inspect memory?** `process.memoryUsage()` in Node, heap snapshots in DevTools.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Stack", "Fast, small memory for function frames, primitive values and references."],
+  ["Heap", "Large memory area where objects are allocated."],
+  ["Reference", "A pointer to an object on the heap."],
+  ["`Object.freeze`", "Makes an object's own properties read-only. Shallow."],
+  ["Heap snapshot", "A DevTools capture of every object in memory and what retains it."],
+]} />

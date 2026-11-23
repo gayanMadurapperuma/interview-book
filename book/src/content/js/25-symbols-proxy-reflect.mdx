@@ -1,0 +1,220 @@
+---
+title: Symbols, Proxy and Reflect
+part: Modern JavaScript
+order: 25
+level: advanced
+summary: The metaprogramming toolkit — unique keys, hooks into the language's own behaviour, and objects that intercept every operation.
+---
+
+**Metaprogramming** means writing code that changes how other code behaves. JavaScript gives you three tools for it. **Symbols** are unique values used as property keys that can never clash with other keys — and a few built-in symbols let you hook into language features like `for...of`. **Proxy** wraps an object and lets you intercept operations on it: reading, writing, deleting, calling. **Reflect** provides the default versions of those operations, so a proxy can add behaviour and then do "the normal thing".
+
+<Analogy>
+  A Proxy is like a receptionist in front of an office. Every visitor (property read, write, delete) goes through the receptionist, who can log the visit, check an ID, redirect them, or simply wave them through to the person they asked for (`Reflect`). The office itself never changes; only the route to it does.
+</Analogy>
+
+## Why it matters
+
+These features power frameworks you use every day: Vue 3 and MobX reactivity are built on Proxy; Immer uses Proxy to turn mutations into immutable updates; ORMs and validation libraries use them for magic properties. Interviewers ask about them to test depth — and "how would you build a tiny reactive store?" is a popular exercise.
+
+## Symbols
+
+```js
+const id = Symbol('id');           // the description is only for debugging
+const user = { name: 'Ada', [id]: 123 };
+
+user[id];                  // 123
+Symbol('id') === id;       // false — every symbol is unique
+Object.keys(user);         // ['name'] — symbols are hidden from normal enumeration
+JSON.stringify(user);      // '{"name":"Ada"}'
+```
+
+Symbol keys are great for attaching metadata to objects without colliding with existing or future property names. `Symbol.for('app.id')` creates a *registered* symbol shared across your whole app (and iframes) by name.
+
+### Well-known symbols
+
+The language looks for certain built-in symbols to let objects customise behaviour:
+
+| Symbol | Customises |
+|---|---|
+| `Symbol.iterator` | `for...of`, spread, destructuring |
+| `Symbol.asyncIterator` | `for await...of` |
+| `Symbol.toPrimitive` | conversion to number/string (`+obj`, `` `${obj}` ``) |
+| `Symbol.hasInstance` | `instanceof` |
+| `Symbol.toStringTag` | `Object.prototype.toString` output |
+| `Symbol.dispose` | `using` declarations (explicit resource management, newer runtimes) |
+
+```js
+class Money {
+  constructor(cents) { this.cents = cents; }
+  [Symbol.toPrimitive](hint) {
+    return hint === 'string' ? `$${(this.cents / 100).toFixed(2)}` : this.cents;
+  }
+}
+const price = new Money(1999);
+`${price}`;     // '$19.99'
+price + 1;      // 2000
+```
+
+## Proxy
+
+`new Proxy(target, handler)` returns an object that behaves like `target`, except for the operations you intercept with **traps** in `handler`.
+
+```js
+const user = { name: 'Ada', role: 'admin' };
+
+const logged = new Proxy(user, {
+  get(target, key, receiver) {
+    console.log(`read ${String(key)}`);
+    return Reflect.get(target, key, receiver);     // do the normal read
+  },
+  set(target, key, value, receiver) {
+    console.log(`write ${String(key)} = ${value}`);
+    return Reflect.set(target, key, value, receiver);
+  },
+});
+
+logged.name;          // logs "read name", returns 'Ada'
+logged.role = 'dev';  // logs "write role = dev"
+```
+
+<Diagram
+  sequence
+  caption="Every operation on the proxy goes through the handler first. Reflect performs the default behaviour on the real target."
+  chart={`sequenceDiagram
+    participant C as Your code
+    participant P as Proxy (handler)
+    participant R as Reflect
+    participant T as target object
+    C->>P: logged.name
+    P->>P: get trap: log "read name"
+    P->>R: Reflect.get(target, 'name')
+    R->>T: read name
+    T-->>C: 'Ada'`}
+  notes={[
+    "Your code reads a property on the proxy.",
+    "The `get` trap runs first — here it logs the access.",
+    "It delegates to `Reflect.get` for the default behaviour.",
+    "Reflect reads the property from the real target.",
+    "The value comes back to the caller as if nothing special happened.",
+  ]}
+/>
+
+The most useful traps: `get`, `set`, `has` (`in`), `deleteProperty`, `ownKeys` (`Object.keys`), `apply` (calling a function), `construct` (`new`).
+
+### Example: validation
+
+```js
+function strictShape(target, schema) {
+  return new Proxy(target, {
+    set(obj, key, value) {
+      if (!(key in schema)) throw new TypeError(`unknown field ${String(key)}`);
+      if (typeof value !== schema[key]) throw new TypeError(`${String(key)} must be ${schema[key]}`);
+      return Reflect.set(obj, key, value);
+    },
+  });
+}
+const config = strictShape({}, { port: 'number', host: 'string' });
+config.port = 8080;      // ok
+config.prot = 8080;      // TypeError: unknown field prot — typo caught
+```
+
+### Example: a tiny reactive store
+
+This is the idea behind Vue 3's reactivity: record which effects read which keys, and re-run them when those keys change.
+
+```js
+function reactive(obj) {
+  const deps = new Map();                 // key -> Set of effects
+  let activeEffect = null;
+
+  const proxy = new Proxy(obj, {
+    get(t, key, r) {
+      if (activeEffect) {
+        if (!deps.has(key)) deps.set(key, new Set());
+        deps.get(key).add(activeEffect);  // track: this effect depends on key
+      }
+      return Reflect.get(t, key, r);
+    },
+    set(t, key, value, r) {
+      const ok = Reflect.set(t, key, value, r);
+      deps.get(key)?.forEach((fn) => fn()); // trigger: re-run dependents
+      return ok;
+    },
+  });
+
+  function effect(fn) {
+    activeEffect = fn; fn(); activeEffect = null;
+  }
+  return { state: proxy, effect };
+}
+
+const { state, effect } = reactive({ count: 0 });
+effect(() => console.log('count is', state.count));  // logs: count is 0
+state.count++;                                        // logs: count is 1
+```
+
+<Diagram
+  caption="Reactivity in two moves: get traps record dependencies, set traps trigger them."
+  chart={`flowchart LR
+    E["effect()<br/>reads state.count"] -- "get trap" --> TR["track:<br/>count → effect"]
+    S["state.count++"] -- "set trap" --> TG["trigger:<br/>re-run effects for count"]
+    TR --> DEP[("deps map")]
+    DEP --> TG
+    TG --> E`}
+  steps={[
+    { nodes: ["E", "TR"], text: "Running the effect reads `state.count`. The `get` trap notices and records the dependency." },
+    { nodes: ["TR", "DEP"], text: "The dependency map now says: whenever `count` changes, re-run this effect." },
+    { nodes: ["S", "TG", "DEP"], text: "Writing `state.count` hits the `set` trap, which looks up who depends on `count`…" },
+    { nodes: ["TG", "E"], text: "…and re-runs them. That is the whole trick behind Vue 3, MobX and similar libraries." },
+  ]}
+/>
+
+## Reflect
+
+`Reflect` has one method per proxy trap, each performing the **default** behaviour and returning sensible results (for example, `Reflect.set` returns `true`/`false` instead of throwing). Always forward with `Reflect` inside traps, and pass the `receiver` argument so getters on the target see the correct `this`.
+
+```js
+Reflect.has(obj, 'x');          // like 'x' in obj
+Reflect.ownKeys(obj);           // all own keys, including symbols
+Reflect.apply(fn, thisArg, args);
+Reflect.construct(Class, args);
+```
+
+## Costs and limits
+
+- Proxies are slower than plain objects; avoid them on very hot paths.
+- A proxy is **not** the same object as its target (`proxy !== target`), which can confuse identity checks and `WeakMap` keys.
+- Built-ins with internal slots (`Map`, `Date`, private `#fields`) do not work transparently through a proxy — methods called with the proxy as `this` throw. You need extra handling.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Returning `undefined` from a `set` trap — in strict mode, a falsy return throws a `TypeError`. Return `true` or `Reflect.set(...)`.
+- Forgetting `receiver`, which breaks getters and inheritance.
+- Using symbols for privacy — `Object.getOwnPropertySymbols` reveals them. Use `#private` for real privacy.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is a Proxy, and where have you seen it used?">
+
+A Proxy wraps a target object and lets you intercept fundamental operations — property reads and writes, `in`, deletes, `Object.keys`, function calls, `new` — through trap functions in a handler. Inside a trap you add behaviour and then use `Reflect`, which mirrors each trap with the default operation, to carry on normally. It is used for validation, logging, default values, and most notably reactivity: Vue 3 and MobX track which properties an effect reads in the `get` trap and re-run it from the `set` trap. Immer uses proxies to record mutations on a draft and produce an immutable copy.
+
+<Fragment slot="deeper">
+
+- **Why use `Reflect` in traps?** It performs the default behaviour correctly, including `receiver` handling, and returns booleans instead of throwing.
+- **What are well-known symbols?** Built-in symbols such as `Symbol.iterator` and `Symbol.toPrimitive` that let objects customise language behaviour.
+- **Downsides of Proxy?** Performance, identity differences, and built-ins with internal slots.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Symbol", "A unique primitive value, often used as a non-colliding property key."],
+  ["Well-known symbol", "A built-in symbol (e.g. `Symbol.iterator`) that customises language behaviour."],
+  ["Proxy", "A wrapper object that intercepts operations on a target via traps."],
+  ["Trap", "A handler function such as `get` or `set` that intercepts one kind of operation."],
+  ["Reflect", "Built-in object providing the default implementation of every trap."],
+]} />

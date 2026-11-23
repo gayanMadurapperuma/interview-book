@@ -1,0 +1,134 @@
+---
+title: The fallacies of distributed computing
+part: Distributed fundamentals
+order: 4
+level: foundation
+summary: Eight comfortable assumptions about networks that are all false — and the design habits that follow once you stop believing them.
+---
+
+As soon as a system has two machines talking over a network, it's a **distributed system**, and a whole class of new failures appears. In the 1990s, engineers at Sun Microsystems listed eight assumptions that newcomers make — the **fallacies of distributed computing**. Every one of them is false, and most production outages in distributed systems trace back to one of them.
+
+<Analogy>
+  Planning a group trip by text message. You assume every message arrives, arrives quickly, arrives in order, and that silence means "no reply yet" rather than "phone died". Anyone who has organised a group dinner knows none of that is guaranteed — and the plan has to work anyway.
+</Analogy>
+
+## Why it matters
+
+Interviewers love candidates who think about failure. Mentioning timeouts, retries, idempotency and partial failure — unprompted — is a strong signal. This chapter is the "why" behind most of the patterns in this volume.
+
+## The eight fallacies
+
+<Diagram
+  caption="Each fallacy, and the habit it should give you."
+  chart={`flowchart LR
+    F1["1 · The network is reliable"] --> H1["timeouts, retries,<br/>idempotency"]
+    F2["2 · Latency is zero"] --> H2["fewer round trips,<br/>batching, caching"]
+    F3["3 · Bandwidth is infinite"] --> H3["compress, paginate,<br/>don't over-fetch"]
+    F4["4 · The network is secure"] --> H4["TLS everywhere,<br/>zero trust"]
+    F5["5 · Topology doesn't change"] --> H5["service discovery,<br/>no hard-coded IPs"]
+    F6["6 · There is one administrator"] --> H6["clear ownership,<br/>observability"]
+    F7["7 · Transport cost is zero"] --> H7["count cross-zone<br/>and egress costs"]
+    F8["8 · The network is homogeneous"] --> H8["standard protocols,<br/>versioned contracts"]`}
+/>
+
+### 1. The network is reliable
+
+Packets get lost, connections reset, switches fail, a cloud zone goes dark. A request can fail **before** the server received it, **while** it was processing, or **after** it finished but before the response arrived — and from the caller's side, those three look identical: a timeout.
+
+<Diagram
+  sequence
+  caption="The ambiguity of a timeout: did the payment happen or not? The caller can't tell."
+  chart={`sequenceDiagram
+    participant C as Order service
+    participant P as Payment service
+    C->>P: charge $50 (request)
+    P->>P: charges the card ✓
+    P--xC: response lost in the network
+    C->>C: timeout — success? failure? unknown
+    C->>P: retry charge $50 → charged twice?`}
+  notes={[
+    "The order service asks the payment service to charge a card.",
+    "The payment succeeds.",
+    "The response is lost on the way back.",
+    "From the caller's view, this looks exactly like a failure.",
+    "A naive retry charges the customer twice. The fix is an idempotency key, so the retry returns the original result.",
+  ]}
+/>
+
+Habits: every remote call has a **timeout**; retries are safe only for **idempotent** operations (or with idempotency keys); design for **partial failure**.
+
+### 2. Latency is zero
+
+A function call takes nanoseconds; a network call in the same datacentre takes about half a millisecond, and across continents 100+ ms. Ten sequential remote calls in a request add up. Habits: batch, parallelise, cache, avoid "chatty" APIs that need many round trips, and colocate services that talk a lot.
+
+### 3. Bandwidth is infinite
+
+Sending a 5 MB JSON payload to a mobile client on a weak connection, or replicating a large dataset across regions, is slow and costly. Habits: paginate, compress, select only needed fields, stream large data.
+
+### 4. The network is secure
+
+Assume traffic can be observed or tampered with, even inside your VPC. Habits: TLS between services (often mutual TLS via a service mesh), authentication on internal APIs, least privilege — "zero trust".
+
+### 5. Topology doesn't change
+
+Servers come and go constantly: autoscaling, deploys, failures, Kubernetes rescheduling. IP addresses change. Habits: service discovery, DNS or a load balancer in front of everything, no hard-coded addresses, health checks.
+
+### 6. There is one administrator
+
+Your request crosses systems owned by other teams, cloud providers and third parties, each with their own changes, maintenance windows and limits. Habits: clear contracts and ownership, observability across boundaries (distributed tracing), graceful handling of dependency failures.
+
+### 7. Transport cost is zero
+
+Serialising data costs CPU; cloud providers charge for data crossing zones and leaving regions. A chatty architecture can produce a surprising bill. Habits: keep chatty components in the same zone, measure egress.
+
+### 8. The network is homogeneous
+
+Different clients, OS versions, protocols, and versions of your own services coexist. Habits: standard protocols (HTTP, gRPC), versioned and backwards-compatible APIs, tolerant readers that ignore unknown fields.
+
+## Partial failure is the defining problem
+
+In a single process, things mostly either work or crash completely. In a distributed system, **some parts fail while others keep running**, and you often can't tell which. Most of the patterns in this book exist because of that:
+
+| Pattern | Handles |
+|---|---|
+| Timeouts | slow or silent peers |
+| Retries with backoff + jitter | transient failures |
+| Idempotency keys | ambiguous outcomes after retries |
+| Circuit breakers, bulkheads | failing dependencies dragging you down |
+| Replication, quorums | machine and zone failures |
+| Sagas, outbox | multi-service operations without distributed locks |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Remote calls without timeouts.
+- Treating a timeout as "the operation failed" — it might have succeeded.
+- Retrying non-idempotent operations.
+- Designing service-to-service calls as if they were local function calls (chatty, sequential).
+- Plain HTTP between internal services because "it's inside the VPC".
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What makes distributed systems hard?">
+
+Mainly partial failure and uncertainty. Over a network, messages can be lost, delayed, duplicated or reordered, machines can fail independently, and a timeout doesn't tell you whether the remote operation happened. The classic fallacies capture this — assuming the network is reliable, latency is zero, bandwidth infinite, the topology fixed. So I design every remote call with a timeout, retry only idempotent operations, or use idempotency keys, use circuit breakers so failing dependencies don't cascade, replicate for machine failures, and avoid chatty synchronous chains by batching or going asynchronous. I also assume the network isn't secure, so internal traffic is encrypted and authenticated.
+
+<Fragment slot="deeper">
+
+- **Why is a timeout ambiguous?** The request may have been processed with only the response lost.
+- **What is an idempotency key?** A client-supplied unique ID letting the server recognise retries and return the original result.
+- **What is a chatty API?** One requiring many round trips to complete a task.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Distributed system", "Multiple machines cooperating over a network."],
+  ["Partial failure", "Some components failing while others continue, often without clear signals."],
+  ["Idempotent", "Safe to perform more than once with the same effect."],
+  ["Service discovery", "How services find the current network location of other services."],
+  ["Zero trust", "Not trusting traffic based on network location; authenticate everything."],
+]} />

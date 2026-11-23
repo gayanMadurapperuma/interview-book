@@ -1,0 +1,227 @@
+---
+title: Values, types and variables
+part: Foundations
+order: 1
+level: foundation
+summary: Every piece of data in JavaScript is either a primitive or an object. Knowing which one you are holding explains most surprising behaviour.
+---
+
+Everything a program works with — a name, a price, a list of orders — is a **value**. JavaScript sorts every value into one of two families: **primitives** (simple, unchangeable values like `42` or `"hello"`) and **objects** (containers that hold other values). Almost every confusing thing about copying, comparing and passing data around comes back to this one split.
+
+<Analogy>
+  A primitive is like a number written on a sticky note: if you copy it, you get your own note, and changing yours never changes mine. An object is like a shared Google Doc: copying the *link* gives both of us access to the same document, so an edit by one person is seen by both.
+</Analogy>
+
+## Why it matters
+
+Interviewers use questions like "what does `typeof null` return?" or "why did changing this array change that one too?" to check that you understand how JavaScript stores data. The same knowledge prevents real bugs: accidentally mutating shared state, comparing objects with `===`, or treating `0` as "missing".
+
+## The eight types
+
+JavaScript has **seven primitive types** and **one object type**.
+
+<Diagram
+  caption="Seven primitive types, and one object type that covers everything else — including arrays and functions."
+  chart={`flowchart TB
+    V["Every value"] --> P["Primitive<br/>immutable, compared by value"]
+    V --> O["Object<br/>mutable, compared by reference"]
+    P --> s["string<br/>'hi'"]
+    P --> n["number<br/>42, 3.14, NaN"]
+    P --> b["boolean<br/>true / false"]
+    P --> u["undefined"]
+    P --> nl["null"]
+    P --> bi["bigint<br/>10n"]
+    P --> sy["symbol<br/>Symbol('id')"]
+    O --> ob["plain object { }"]
+    O --> ar["array [ ]"]
+    O --> fn["function"]
+    O --> ot["Date, Map, Set, …"]`}
+/>
+
+| Type | Example | Notes |
+|---|---|---|
+| `string` | `'hello'`, `` `hi ${name}` `` | Text. Immutable — string methods return new strings. |
+| `number` | `42`, `3.14`, `-0`, `NaN`, `Infinity` | One type for integers and decimals (64-bit floating point). |
+| `bigint` | `9007199254740993n` | Whole numbers of any size. Cannot be mixed with `number` in maths. |
+| `boolean` | `true`, `false` | |
+| `undefined` | `undefined` | "No value was ever given." The default for missing things. |
+| `null` | `null` | "Intentionally empty." You set it yourself. |
+| `symbol` | `Symbol('id')` | A unique identifier, often used as a hidden object key. |
+| `object` | `{}`, `[]`, `function () {}` | Everything else. |
+
+### Checking a type with `typeof`
+
+```js
+typeof 'hi'          // 'string'
+typeof 42            // 'number'
+typeof 10n           // 'bigint'
+typeof true          // 'boolean'
+typeof undefined     // 'undefined'
+typeof Symbol()      // 'symbol'
+typeof {}            // 'object'
+typeof []            // 'object'   ← arrays are objects
+typeof function(){}  // 'function' ← special case, still an object
+typeof null          // 'object'   ← a famous bug from 1995
+```
+
+Two results surprise people. `typeof []` is `'object'`, so use `Array.isArray(value)` to detect arrays. And `typeof null` is `'object'` because of a bug in the very first JavaScript engine that can never be fixed without breaking old websites. To check for null, compare directly: `value === null`.
+
+## Primitives are copied, objects are shared
+
+This is the single most important idea in the chapter.
+
+```js
+let a = 10;
+let b = a;     // b gets its own copy of 10
+b = 20;
+console.log(a); // 10 — unchanged
+
+const x = { score: 10 };
+const y = x;   // y gets a copy of the *reference*, not the object
+y.score = 20;
+console.log(x.score); // 20 — both names point to the same object
+```
+
+<Diagram
+  caption="Assigning a primitive copies the value. Assigning an object copies only the reference (the arrow), so both variables reach the same object."
+  chart={`flowchart LR
+    subgraph Variables
+      a["a = 10"]
+      b["b = 20"]
+      x["x"]
+      y["y"]
+    end
+    subgraph Heap["Heap (object memory)"]
+      O["{ score: 20 }"]
+    end
+    x --> O
+    y --> O`}
+  steps={[
+    { nodes: ["a"], text: "`a` holds the number 10 directly." },
+    { nodes: ["a", "b"], text: "`let b = a` copies the value. Changing `b` to 20 leaves `a` alone." },
+    { nodes: ["x", "O"], text: "`x` does not hold the object — it holds a *reference* (an address) pointing to it." },
+    { nodes: ["x", "y", "O"], text: "`const y = x` copies the reference. Now two arrows point at **one** object, so `y.score = 20` is visible through `x` too." },
+  ]}
+/>
+
+The same rule applies when you pass values to functions. A function receiving an object can change that object for everyone.
+
+```js
+function addBonus(player) {
+  player.score += 5;   // changes the caller's object
+}
+const p = { score: 10 };
+addBonus(p);
+console.log(p.score);  // 15
+```
+
+<Callout type="note">
+  People sometimes say "objects are passed by reference". More precisely, JavaScript always passes **a copy of what the variable holds**. For an object, what it holds is a reference — so the function gets a copy of the reference. That is why reassigning the parameter (`player = {}`) does **not** affect the caller, but changing a property (`player.score = 0`) does.
+</Callout>
+
+## Comparing values
+
+`===` (strict equality) compares primitives by **value** and objects by **identity** — "is this the very same object?"
+
+```js
+'abc' === 'abc'        // true  — same value
+{ a: 1 } === { a: 1 }  // false — two different objects
+const o = { a: 1 };
+o === o                // true  — the same object
+```
+
+To compare two objects by their contents you must compare their fields yourself, or use a helper (for example `JSON.stringify` for simple data, or a library function like Lodash `isEqual`).
+
+## Declaring variables: `const`, `let`, `var`
+
+| Keyword | Can reassign? | Scope | Use it… |
+|---|---|---|---|
+| `const` | No | Block `{ }` | by default |
+| `let` | Yes | Block `{ }` | when the value must change (counters, loops) |
+| `var` | Yes | Whole function | not in new code |
+
+```js
+const user = { name: 'Ada' };
+user.name = 'Grace';   // allowed: we change the object, not the variable
+user = {};             // TypeError: Assignment to constant variable.
+```
+
+`const` means the **variable** cannot point somewhere else. It does **not** make the object inside frozen. To prevent changes to the object itself, use `Object.freeze(user)` (which is shallow — nested objects are still changeable).
+
+<Diagram
+  caption="const locks the arrow, not the box it points to."
+  chart={`flowchart LR
+    U["const user"] == "locked" ==> B["{ name: 'Grace' }<br/>contents can change"]
+    U -. "user = { } ✗" .-> N["new object"]`}
+/>
+
+## `undefined` vs `null`
+
+Both mean "no value", but they are used differently:
+
+- `undefined` is what JavaScript gives you automatically: a variable declared but not assigned, a missing object property, a function that returns nothing, a missing argument.
+- `null` is what **you** assign on purpose to say "this is empty right now".
+
+```js
+let a;               // undefined
+const obj = {};
+obj.missing          // undefined
+function f() {}
+f()                  // undefined
+
+let selectedUser = null;   // nothing selected yet — a deliberate choice
+```
+
+A handy check for "is it either one?" is `value == null` — the one place where loose equality is commonly accepted.
+
+## Numbers have limits
+
+All `number` values are 64-bit floating point. That brings two classic surprises:
+
+```js
+0.1 + 0.2              // 0.30000000000000004
+0.1 + 0.2 === 0.3      // false
+
+Number.MAX_SAFE_INTEGER   // 9007199254740991
+9007199254740992 === 9007199254740993  // true (!) — precision ran out
+```
+
+For money, store whole cents (`1999` instead of `19.99`) or use a decimal library. For very large IDs (like database `BIGINT` keys or tweet IDs), use `bigint` or keep them as strings.
+
+`NaN` ("not a number") is the result of a failed calculation such as `Number('abc')`. It is the only value not equal to itself: `NaN === NaN` is `false`. Test for it with `Number.isNaN(x)`.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using `typeof x === 'object'` to detect an object — it is also true for `null` and arrays.
+- Thinking `const` makes an object read-only. It only stops reassignment.
+- Comparing objects or arrays with `===` and expecting a content comparison.
+- Doing money maths with decimals. `0.1 + 0.2` is not `0.3`.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What types does JavaScript have, and how are primitives different from objects?">
+
+JavaScript has seven primitive types — string, number, bigint, boolean, undefined, null and symbol — and everything else is an object, including arrays and functions. Primitives are immutable and are compared and copied by value. Objects are mutable, and variables hold a *reference* to them, so assigning or passing an object shares it rather than copying it. That is why mutating an object inside a function changes it for the caller, and why two objects with the same contents are not `===`.
+
+<Fragment slot="deeper">
+
+- **Why is `typeof null` `'object'`?** A bug in the first implementation that is kept for backwards compatibility. Check with `=== null`.
+- **How do you detect an array?** `Array.isArray(value)`.
+- **Is JavaScript pass-by-reference?** It is pass-by-value, where the value of an object variable happens to be a reference.
+- **How do you safely handle large integers?** `bigint`, or strings for IDs; `Number.isSafeInteger` tells you if a number is exact.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Primitive", "A simple immutable value: string, number, bigint, boolean, undefined, null or symbol."],
+  ["Object", "A mutable collection of properties. Arrays, functions, dates and maps are all objects."],
+  ["Reference", "The address of an object in memory. Object variables hold references, not the objects themselves."],
+  ["Strict equality (`===`)", "Compares primitives by value and objects by identity, without converting types."],
+  ["`NaN`", "\"Not a number\" — the result of invalid maths. Not equal to anything, including itself."],
+  ["`bigint`", "A primitive for arbitrarily large whole numbers, written with an `n` suffix."],
+]} />

@@ -1,0 +1,182 @@
+---
+title: Typing functions
+part: Foundations
+order: 6
+level: core
+summary: Parameters, return types, optional and rest arguments, function types, overloads, typing this, and generic functions — everything about functions in the type system.
+---
+
+Functions are the main building blocks of JavaScript, so most of TypeScript's value comes from typing them well: precise **parameters**, honest **return types**, **function types** for callbacks, **overloads** when one function behaves differently for different inputs, and **generics** when a function should work for many types while preserving the relationship between input and output.
+
+<Analogy>
+  A function's type is a vending machine's label: "insert coins (number), press a button (one of these codes), receive a drink (Drink)". A generic function is a machine that hands back exactly what you put in, gift-wrapped: put in a book, get a wrapped book; put in a mug, get a wrapped mug — the label says "whatever you insert, you get that back".
+</Analogy>
+
+## Why it matters
+
+Interviewers often ask you to type a utility function (`groupBy`, `debounce`, `pick`), explain overloads vs unions, or fix a callback type. Well-typed functions are what make the rest of a codebase safe.
+
+## The basics
+
+```ts
+function createUser(name: string, age?: number, ...tags: string[]): User {
+  return { name, age, tags };
+}
+
+const greet = (name: string): string => `Hi ${name}`;
+
+function connect({ host = 'localhost', port = 5432 }: { host?: string; port?: number } = {}) {}
+```
+
+- `age?: number` — optional (type is `number | undefined`); optional parameters come after required ones.
+- Default values (`port = 5432`) make a parameter optional and infer its type.
+- `...tags: string[]` — rest parameters are arrays (or tuples).
+- Annotate return types on exported functions: it documents intent and catches accidental changes.
+
+## Function types
+
+```ts
+type Comparator<T> = (a: T, b: T) => number;
+type Handler = (req: Request, res: Response) => Promise<void>;
+
+interface Middleware {
+  (req: Request, next: () => Promise<void>): Promise<void>;   // call signature
+  displayName?: string;                                         // plus properties
+}
+
+function sortBy<T>(items: T[], cmp: Comparator<T>): T[] { return [...items].sort(cmp); }
+```
+
+**Callback parameters can be fewer**: a function that takes fewer parameters is assignable where more are offered (`[1,2].forEach((n) => …)` ignores index and array). And a callback typed to return `void` may return anything — the result is simply ignored.
+
+## Overloads
+
+When the **return type depends on the argument types** in a way a union can't express, declare several signatures above one implementation:
+
+```ts
+function parse(input: string): Record<string, unknown>;
+function parse(input: Buffer): Record<string, unknown>;
+function parse(input: string, asArray: true): unknown[];
+function parse(input: string | Buffer, asArray?: boolean): unknown {
+  const text = typeof input === 'string' ? input : input.toString('utf8');
+  const value = JSON.parse(text);
+  return asArray ? [].concat(value) : value;
+}
+
+parse('{"a":1}');          // Record<string, unknown>
+parse('[1,2]', true);      // unknown[]
+```
+
+<Diagram
+  caption="Overloads are checked top to bottom; callers only see the overload signatures, never the implementation signature."
+  chart={`flowchart TB
+    C["call: parse('[1]', true)"] --> O1{"matches overload 1?<br/>(input: string)"}
+    O1 -- "no: extra argument" --> O2{"overload 2?<br/>(input: Buffer)"}
+    O2 -- "no" --> O3{"overload 3?<br/>(string, true)"}
+    O3 -- "yes" --> R["return type: unknown[]"]`}
+  steps={[
+    { nodes: ["C", "O1"], text: "The compiler tries each overload in order." },
+    { nodes: ["O1", "O2"], text: "Overload 1 accepts one argument, but we passed two." },
+    { nodes: ["O2", "O3"], text: "Overload 2 needs a Buffer." },
+    { nodes: ["O3", "R"], text: "Overload 3 matches, so the result is `unknown[]`. Put more specific overloads first." },
+  ]}
+/>
+
+Prefer **union parameters** or **generics** when they're enough; overloads are for genuinely different input→output mappings. Conditional return types are an alternative but harder to implement without casts.
+
+## Generic functions
+
+Generics capture the relationship between inputs and outputs.
+
+```ts
+function first<T>(items: readonly T[]): T | undefined {
+  return items[0];
+}
+first([1, 2, 3]);        // number | undefined — T inferred as number
+first(['a']);            // string | undefined
+
+function groupBy<T, K extends PropertyKey>(items: T[], key: (item: T) => K): Record<K, T[]> {
+  const out = {} as Record<K, T[]>;
+  for (const item of items) (out[key(item)] ??= []).push(item);
+  return out;
+}
+const byStatus = groupBy(orders, (o) => o.status);   // Record<'paid' | 'pending' | …, Order[]>
+```
+
+The *Generics* chapter covers constraints and defaults in depth.
+
+## Typing `this`
+
+A fake first parameter named `this` declares what `this` must be:
+
+```ts
+interface Counter { count: number; increment(this: Counter): void }
+
+function onClick(this: HTMLButtonElement, e: MouseEvent) {
+  this.disabled = true;           // `this` is the button
+}
+button.addEventListener('click', onClick);
+
+const { increment } = counter;
+increment();                      // ✘ compile error: 'this' context of type 'void' is not assignable
+```
+
+With `noImplicitThis` (part of `strict`), using `this` where its type is unknown is an error — catching the classic "lost `this`" bug at compile time.
+
+## Async functions and errors
+
+```ts
+async function loadUser(id: string): Promise<User> {
+  const res = await fetch(`/api/users/${id}`);
+  if (!res.ok) throw new HttpError(res.status);
+  return UserSchema.parse(await res.json());
+}
+```
+
+- An `async` function's return type is always `Promise<T>`.
+- TypeScript doesn't track which errors a function throws; `catch (e)` gives `unknown` (with `useUnknownInCatchVariables`) — narrow before use: `if (e instanceof HttpError)`.
+- Use result types (see *Unions and narrowing*) when callers must handle expected failures.
+
+## Assertion signatures and type predicates
+
+```ts
+function isNonEmpty<T>(arr: T[]): arr is [T, ...T[]] { return arr.length > 0; }
+function assertIsString(v: unknown): asserts v is string {
+  if (typeof v !== 'string') throw new TypeError('expected string');
+}
+```
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using `Function` or `any` for callbacks instead of a specific function type.
+- Overloads whose implementation signature is incompatible, or most-general overload first.
+- Generic parameters that appear only once (`<T>(x: T): void` gives nothing over `unknown`).
+- Methods passed as callbacks without typing `this` or binding.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you type a generic utility function like groupBy, and when do you use overloads?">
+
+For `groupBy` I'd use two type parameters: `T` for the item type and `K extends PropertyKey` for the key, taking `items: T[]` and a key function `(item: T) => K`, and returning `Record<K, T[]>`. Both are inferred from the call, so grouping orders by status gives a record keyed by the status literals with arrays of orders. Generics preserve the relationship between input and output types that `any` or `unknown` would lose. Overloads are for when the return type depends on the arguments in ways a union can't express — say, a parse function that returns an array when passed `true` — with specific signatures first and one compatible implementation that callers don't see. Where a union parameter is enough, I avoid overloads.
+
+<Fragment slot="deeper">
+
+- **Why is a callback returning a value assignable to `() => void`?** `void` there means "result ignored", so any return is allowed.
+- **How do you type `this`?** A leading `this:` parameter; `noImplicitThis` enforces it.
+- **What type is a `catch` variable?** `unknown` under strict settings — narrow before use.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Function type", "A type describing parameters and return, e.g. `(a: T) => U`."],
+  ["Optional parameter", "Parameter marked `?`; its type includes `undefined`."],
+  ["Overload", "One of several call signatures for a single implementation."],
+  ["Generic function", "Function parameterised by types, inferred at the call site."],
+  ["`this` parameter", "Fake first parameter declaring the type of `this`."],
+  ["Type predicate", "Return type `x is T` that narrows when true."],
+]} />

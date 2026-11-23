@@ -1,0 +1,156 @@
+---
+title: Profiling, diagnostics and observability
+part: Production
+order: 15
+level: advanced
+summary: When a Node service is slow, leaking or crashing, guessing wastes days. Logs, metrics, traces, CPU profiles and heap snapshots tell you exactly where to look.
+---
+
+Production problems usually show up as a vague symptom — "p99 latency doubled", "memory keeps growing", "pods restart every few hours". Fixing them requires **evidence**. **Observability** is your service's ability to explain itself from the outside: **logs** (what happened), **metrics** (how much and how often), and **traces** (where the time went across services). When those point at one process, **profilers** — CPU profiles and heap snapshots — show the exact functions and objects responsible.
+
+<Analogy>
+  A doctor diagnosing a patient. Metrics are the vital signs on the monitor (temperature, heart rate). Logs are the patient's diary of symptoms. Traces are following one meal through the whole digestive system. A CPU profile or heap snapshot is the X-ray — you take one when the vital signs tell you roughly where to look.
+</Analogy>
+
+## Why it matters
+
+Senior interviews include "the service is slow — how do you investigate?" They want a method: start broad with metrics and traces, narrow to a process, then use the right profiler. They also want to know what you'd measure in a Node service specifically, such as event-loop delay.
+
+## The investigation path
+
+<Diagram
+  caption="Move from cheap, always-on signals to expensive, targeted tools."
+  chart={`flowchart LR
+    SYM["Symptom<br/>slow · errors · memory · crashes"] --> MET["Metrics<br/>which endpoint, when, how much?"]
+    MET --> TR["Traces<br/>which hop or query is slow?"]
+    TR --> LOG["Logs<br/>what happened in that request?"]
+    LOG --> PROF{"Inside the Node process?"}
+    PROF -- "CPU high / loop lag" --> CPU["CPU profile<br/>flame graph"]
+    PROF -- "memory grows" --> HEAP["Heap snapshots<br/>compare + retainers"]
+    PROF -- "hangs / waits" --> ASYNC["Async traces,<br/>pool + connection stats"]`}
+  steps={[
+    { nodes: ["SYM", "MET"], text: "Start with metrics: which endpoints, which instances, since when? Did a deploy coincide?" },
+    { nodes: ["MET", "TR"], text: "Distributed traces show which part of a slow request takes the time — your code, the database, another service." },
+    { nodes: ["TR", "LOG"], text: "Logs correlated by request/trace ID show the details of specific failing requests." },
+    { nodes: ["LOG", "PROF", "CPU"], text: "If time is spent inside Node itself and CPU or event-loop delay is high, take a CPU profile." },
+    { nodes: ["PROF", "HEAP"], text: "If memory grows steadily, compare heap snapshots to find what is retained." },
+    { nodes: ["PROF", "ASYNC"], text: "If the process is idle but slow, it's waiting — on a saturated thread pool, a connection pool, or a slow dependency." },
+  ]}
+/>
+
+## Logs: structured, correlated, levelled
+
+```js
+const pino = require('pino');
+const logger = pino({ level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization', '*.password'] });
+
+app.use((req, res, next) => {
+  req.log = logger.child({ reqId: req.headers['x-request-id'] ?? crypto.randomUUID() });
+  next();
+});
+
+req.log.info({ orderId, durationMs }, 'order placed');
+```
+
+- **Structured** (JSON) logs can be searched and aggregated; string concatenation can't.
+- Attach a **request/trace ID** to every line so you can follow one request.
+- Use **levels** (debug/info/warn/error/fatal) and **redact** secrets and personal data.
+- Use an async, fast logger (pino) — synchronous console logging under load can itself become a bottleneck.
+
+## Metrics: what to measure in Node
+
+| Metric | Why |
+|---|---|
+| Request rate, error rate, latency (p50/p95/p99) per route | the "RED" signals users feel |
+| **Event-loop delay** (p99) | Node-specific: high = something blocks the main thread |
+| Heap used / RSS over time | leaks show as a rising floor |
+| GC pause time and frequency | heavy allocation, memory pressure |
+| Active handles / requests | connection and timer leaks |
+| DB pool: in use, waiting | pool exhaustion looks like slowness |
+| Outbound call latency and errors per dependency | which dependency is hurting you |
+
+`prom-client` exposes default Node metrics (including event-loop lag and GC) for Prometheus; OpenTelemetry exports metrics and traces to most vendors.
+
+## Traces
+
+A **distributed trace** follows one request across services. Each unit of work is a **span** with a start, duration and attributes; spans nest to form a timeline. OpenTelemetry's Node SDK auto-instruments `http`, `fetch`, Express, popular database drivers and queues, propagating a `traceparent` header between services.
+
+<Diagram
+  caption="A trace makes the slow part obvious: here, one SQL query is most of the request."
+  chart={`flowchart TB
+    A["GET /checkout — 820 ms"] --> B["auth middleware — 12 ms"]
+    A --> C["load cart (Redis) — 4 ms"]
+    A --> D["price items (inventory svc) — 90 ms"]
+    A --> E["INSERT order (Postgres) — 640 ms ⚠"]
+    A --> F["publish event (SQS) — 30 ms"]`}
+/>
+
+## CPU profiles and flame graphs
+
+When CPU or event-loop delay is high, profile:
+
+```bash
+node --cpu-prof server.js              # writes a .cpuprofile on exit; open in Chrome DevTools
+node --inspect server.js               # attach chrome://inspect → Performance / Profiler tab
+npx clinic flame -- node server.js     # generates a flame graph under load
+```
+
+In a **flame graph**, each bar is a function; width is time spent in it (including its children). Look for **wide** bars near the top of stacks — that's your hot code. Typical findings: JSON serialisation of huge objects, regex, synchronous crypto, inefficient loops, logging in hot paths.
+
+## Memory: heap snapshots
+
+```js
+// trigger from an admin endpoint or signal, under realistic load
+const v8 = require('node:v8');
+process.on('SIGUSR2', () => {
+  const file = v8.writeHeapSnapshot();
+  logger.info({ file }, 'heap snapshot written');
+});
+```
+
+Take two or three snapshots some minutes apart, load them in Chrome DevTools' Memory tab, use **Comparison** to see what grew, and follow **Retainers** to find what keeps it alive. (Snapshots pause the process and can be large — do this on one instance, not the whole fleet.) Volume I's *Garbage collection* chapter covers the usual leak patterns.
+
+`node --heapsnapshot-near-heap-limit=2` writes snapshots automatically just before an out-of-memory crash.
+
+## Other built-in tools
+
+- **Diagnostic reports**: `node --report-on-fatalerror` writes a JSON report (stack, heap stats, handles, environment) when the process crashes.
+- **`--trace-warnings`**, **`--trace-deprecation`**: find where warnings come from.
+- **`perf_hooks`**: `performance.now()`, `monitorEventLoopDelay`, and `PerformanceObserver` for GC events.
+- **`diagnostics_channel`**: libraries publish events (e.g. undici request start/end) that you can subscribe to without monkey-patching.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Optimising before measuring.
+- Only average latency on dashboards — averages hide the slow tail; use percentiles.
+- Unstructured logs with no request ID.
+- Logging secrets or full request bodies.
+- Profiling locally with toy data and missing the production hot path.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="A Node service's latency has doubled. How do you investigate?">
+
+I start broad: dashboards for rate, errors and p95/p99 latency per route, and check whether it correlates with a deploy, traffic change or a dependency. Distributed traces show whether the time is in our code, the database or another service. For Node specifically I check event-loop delay: if it's high, something is blocking the main thread, and I take a CPU profile under load and read the flame graph for wide frames. If event-loop delay is fine but requests are slow, the process is waiting — on a saturated DB or thread pool, a connection pool, or a slow dependency — which pool and outbound-call metrics reveal. If memory is climbing too, I compare heap snapshots and follow the retainers.
+
+<Fragment slot="deeper">
+
+- **What is event-loop delay?** How late timers fire; the key indicator of main-thread blocking.
+- **How do you read a flame graph?** Width is time; look for wide frames, especially your own code near the top.
+- **Logs vs metrics vs traces?** Events with detail; aggregated numbers over time; per-request timelines across services.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Observability", "Understanding a system's internal state from its external outputs: logs, metrics, traces."],
+  ["Span", "One timed unit of work within a distributed trace."],
+  ["Percentile (p99)", "The value below which 99% of observations fall; shows tail latency."],
+  ["Flame graph", "A visualisation of CPU profiles where width represents time."],
+  ["Heap snapshot", "A full dump of objects in memory, used to find leaks."],
+  ["Event-loop delay", "Latency between when a timer should fire and when it does."],
+]} />

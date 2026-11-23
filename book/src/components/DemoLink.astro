@@ -1,0 +1,12 @@
+---
+import { withBase } from '../lib/subjects';
+import { scenarioMeta } from '../demos/catalog';
+interface Props { id: string }
+const meta = scenarioMeta(Astro.props.id);
+---
+{meta && (
+  <a class="demo-link" href={withBase(`/demos/${meta.id}/`)}>
+    <span class="dl-play" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M3 1.8v8.4L10 6z" fill="currentColor"/></svg></span>
+    <span class="dl-text"><span class="caps">Live demo · step through it</span><b>{meta.title}</b><span class="dl-blurb">{meta.blurb}</span></span>
+  </a>
+)}

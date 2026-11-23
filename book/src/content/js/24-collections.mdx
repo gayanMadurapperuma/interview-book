@@ -1,0 +1,190 @@
+---
+title: Map, Set, WeakMap and friends
+part: Modern JavaScript
+order: 24
+level: core
+summary: Purpose-built collections that beat plain objects and arrays for lookups, uniqueness and memory-safe caching.
+---
+
+For years, JavaScript developers used plain objects as dictionaries and arrays as lists of unique items. Both work, with caveats. **`Map`** is a dedicated key–value store where keys can be any type. **`Set`** holds unique values with fast membership checks. **`WeakMap`** and **`WeakSet`** hold objects *weakly*, so they never stop those objects from being garbage-collected. Typed arrays round out the family for raw binary data.
+
+<Analogy>
+  An object used as a dictionary is like a filing cabinet that can only label drawers with strings, and already has some drawers you didn't add (inherited ones). A `Map` is a proper locker room: any kind of tag works as a key, it knows exactly how many lockers are used, and it remembers the order you filled them. A `WeakMap` is a coat check that throws your ticket away if you leave the building.
+</Analogy>
+
+## Why it matters
+
+Choosing the right collection changes performance from O(n) to O(1) — interviewers notice when you deduplicate with a `Set` instead of nested loops, or count with a `Map`. `WeakMap` comes up in memory-leak discussions.
+
+## `Map` versus plain object
+
+```js
+const visits = new Map();
+visits.set('/home', 10);
+visits.set('/about', 3);
+visits.get('/home');        // 10
+visits.has('/pricing');     // false
+visits.size;                // 2
+visits.delete('/about');
+
+for (const [path, count] of visits) console.log(path, count);  // insertion order
+```
+
+| | Plain object `{}` | `Map` |
+|---|---|---|
+| Key types | strings and symbols only (numbers become strings) | **any** value, including objects |
+| Inherited keys | yes (`toString`, `constructor`…) unless `Object.create(null)` | none |
+| Size | `Object.keys(o).length` (O(n)) | `map.size` (O(1)) |
+| Iteration order | mostly insertion, but integer-like keys go first | always insertion order |
+| Frequent add/delete | slower in V8 | optimised for it |
+| JSON | works directly | needs conversion |
+
+Use objects for fixed-shape records (`{ id, name, email }`) and `Map` for dynamic dictionaries, caches and lookups keyed by objects.
+
+```js
+// counting words: Map makes it clean
+const counts = new Map();
+for (const word of text.split(/\s+/)) {
+  counts.set(word, (counts.get(word) ?? 0) + 1);
+}
+```
+
+## `Set`: unique values
+
+```js
+const tags = new Set(['js', 'node', 'js']);
+tags.size;            // 2
+tags.add('ts');
+tags.has('node');     // true — O(1), unlike array.includes which is O(n)
+
+const unique = [...new Set([3, 1, 3, 2, 1])];   // [3, 1, 2]
+```
+
+<Diagram
+  caption="Checking membership: an array scans every element; a Set (and Map) jumps straight to the answer through hashing."
+  chart={`flowchart LR
+    subgraph Array["array.includes(x) — O(n)"]
+      direction LR
+      a1["check 1"] --> a2["check 2"] --> a3["check 3"] --> a4["… up to n"]
+    end
+    subgraph SetBox["set.has(x) — O(1)"]
+      direction LR
+      h["hash(x)"] --> b["bucket"] --> r["found / not found"]
+    end`}
+/>
+
+Modern runtimes (2025) also add set operations directly:
+
+```js
+const a = new Set([1, 2, 3]);
+const b = new Set([2, 3, 4]);
+a.union(b);          // {1, 2, 3, 4}
+a.intersection(b);   // {2, 3}
+a.difference(b);     // {1}
+a.isSubsetOf(b);     // false
+```
+
+### Equality for keys
+
+`Map` and `Set` use **SameValueZero**: like `===`, but `NaN` equals `NaN`. Objects are compared by **identity**, so two different objects with the same contents are two different keys.
+
+```js
+const s = new Set([{ id: 1 }, { id: 1 }]);
+s.size;   // 2 — different objects
+```
+
+## `WeakMap` and `WeakSet`
+
+A `WeakMap` only accepts **objects** (or non-registered symbols) as keys, and holds them weakly: if nothing else references the key object, the entry can disappear during garbage collection.
+
+```js
+const clickCounts = new WeakMap();
+
+function onClick(el) {
+  clickCounts.set(el, (clickCounts.get(el) ?? 0) + 1);
+}
+// when an element is removed from the page and dropped everywhere else,
+// its count is cleaned up automatically — no leak
+```
+
+<Diagram
+  caption="A Map keeps its keys alive. A WeakMap does not: when the key object becomes unreachable elsewhere, the entry is collected."
+  chart={`flowchart LR
+    R(("roots")) -. "no more references" .-> E["DOM element<br/>(removed)"]
+    M["Map"] == "strong ref keeps it alive" ==> E
+    W["WeakMap"] -. "weak ref — does not" .-> E`}
+/>
+
+Trade-offs: a `WeakMap` is **not iterable** and has no `size` (its contents depend on when the GC runs). It supports only `get`, `set`, `has`, `delete`.
+
+Common uses:
+
+- metadata or caches attached to objects you don't own (DOM nodes, request objects),
+- private data per instance (the pre-`#private` pattern),
+- memoising functions whose argument is an object.
+
+`WeakRef` (a weak reference to a single object) and `FinalizationRegistry` (a callback after an object is collected) exist too, but collection timing is unpredictable. Use them only for caches, never for correctness.
+
+## Typed arrays and `ArrayBuffer`
+
+For raw binary data — files, network packets, images, audio, WebAssembly — JavaScript has fixed-length, fixed-type arrays backed by an `ArrayBuffer` of bytes.
+
+```js
+const buf = new ArrayBuffer(8);        // 8 raw bytes
+const bytes = new Uint8Array(buf);     // view them as 8 unsigned bytes
+const floats = new Float32Array(buf);  // or as 2 float32 numbers (same memory!)
+
+bytes[0] = 255;
+const pixels = new Uint8ClampedArray(width * height * 4);  // RGBA canvas data
+```
+
+Node's `Buffer` is a subclass of `Uint8Array`. A `DataView` lets you read mixed types with explicit byte order (endianness).
+
+## Choosing a collection
+
+<Diagram
+  caption="A quick decision guide."
+  chart={`flowchart TB
+    Q{"What are you storing?"} --> L["An ordered list<br/>(duplicates OK)"] --> ARR["Array"]
+    Q --> U["Unique values,<br/>fast 'is it in here?'"] --> SET["Set"]
+    Q --> KV["Key → value lookups"] --> K{"Keys are objects<br/>you don't own?"}
+    K -- yes --> WM["WeakMap"]
+    K -- no --> F{"Fixed shape record?"}
+    F -- yes --> OBJ["Plain object"]
+    F -- no --> MAP["Map"]
+    Q --> BIN["Raw bytes / numbers"] --> TA["Typed array / Buffer"]`}
+/>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using an object as a dictionary with user-supplied keys — a key like `__proto__` or `constructor` can cause bugs or prototype pollution. Use `Map` or `Object.create(null)`.
+- `JSON.stringify(map)` gives `{}`. Convert first: `Object.fromEntries(map)`.
+- Expecting two equal-looking objects to be the same `Map`/`Set` key.
+- Trying to iterate a `WeakMap`.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="When would you use a Map instead of an object, and what is a WeakMap for?">
+
+I use a plain object for fixed-shape records and a `Map` for dynamic key–value data: a `Map` accepts any key type including objects, has no inherited keys, keeps insertion order, gives `size` in constant time and is optimised for frequent additions and deletions. A `Set` is for unique values with constant-time membership checks. A `WeakMap` holds its object keys weakly, so attaching data to an object — a DOM node, a request — never prevents that object from being garbage-collected; the trade-off is that it cannot be iterated or sized.
+
+<Fragment slot="deeper">
+
+- **How do you deduplicate an array?** `[...new Set(arr)]` — O(n).
+- **What equality do `Map`/`Set` use?** SameValueZero: `===` except `NaN` equals `NaN`.
+- **Why can't you iterate a `WeakMap`?** Its contents depend on garbage-collection timing, which would make results non-deterministic.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["`Map`", "Key–value collection with keys of any type and insertion-ordered iteration."],
+  ["`Set`", "Collection of unique values with O(1) membership checks."],
+  ["`WeakMap`", "Map with object keys held weakly; entries vanish when keys are collected."],
+  ["SameValueZero", "The equality used by `Map`, `Set` and `includes`: like `===` but `NaN` equals itself."],
+  ["Typed array", "Fixed-type numeric view over an `ArrayBuffer` of raw bytes."],
+]} />

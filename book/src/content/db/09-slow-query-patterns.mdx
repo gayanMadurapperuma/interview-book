@@ -1,0 +1,180 @@
+---
+title: The recurring slow-query patterns
+part: Performance
+order: 9
+level: core
+summary: Most slow queries are one of about eight familiar shapes. Learn to recognise them and you can fix most performance problems on sight.
+---
+
+After you've looked at enough slow queries, you notice they repeat. A large `OFFSET`. A `LIKE` with a leading wildcard. A function wrapped around an indexed column. `SELECT *` pulling megabytes nobody uses. This chapter is a field guide to those patterns, each with the reason it's slow and the usual fix.
+
+<Analogy>
+  A mechanic doesn't rediscover how cars work for every breakdown. They recognise the sounds: that squeal is the brake pads, that knock is the timing. Recognising query patterns works the same way — the plan's "sound" tells you the fix.
+</Analogy>
+
+## Why it matters
+
+Interviewers love "what's wrong with this query?" — especially deep pagination and N+1. In real systems, fixing these patterns often turns seconds into milliseconds without new hardware.
+
+## 1. Deep pagination with OFFSET
+
+```sql
+SELECT * FROM posts ORDER BY created_at DESC LIMIT 20 OFFSET 100000;
+```
+
+The database must find and **throw away** 100,000 rows to return 20. Page 5,000 is far slower than page 1, and rows shift between pages if new posts arrive.
+
+**Fix — keyset (cursor) pagination**: remember where the last page ended and continue from there.
+
+```sql
+SELECT * FROM posts
+WHERE (created_at, id) < ($1, $2)      -- values from the last row of the previous page
+ORDER BY created_at DESC, id DESC
+LIMIT 20;
+```
+
+<Diagram
+  caption="OFFSET reads and discards everything before the page. A cursor seeks straight to the right place in the index."
+  chart={`flowchart LR
+    subgraph OFF["OFFSET 100000"]
+      direction LR
+      o1["read 100,000 rows"] --> o2["discard them"] --> o3["return 20"]
+    end
+    subgraph KEY["Keyset cursor"]
+      direction LR
+      k1["seek index to<br/>(created_at, id)"] --> k2["read 20"] --> k3["return 20"]
+    end
+    OFF ~~~ KEY`}
+/>
+
+Cost: constant per page with an index on `(created_at, id)`. Trade-off: no "jump to page 5,000" — which is usually fine (infinite scroll, API cursors).
+
+## 2. Functions or casts on indexed columns
+
+```sql
+WHERE lower(email) = 'ada@x.com'
+WHERE date(created_at) = '2026-11-23'
+WHERE id::text = '42'
+```
+
+The index stores `email`, not `lower(email)`, so it can't be used. **Fix**: compare the bare column (`created_at >= '2026-11-23' AND created_at < '2026-11-24'`), or create an **expression index** (`ON users (lower(email))`), or store normalised data.
+
+## 3. Leading wildcards
+
+```sql
+WHERE name LIKE '%smith%'
+```
+
+A B-tree is sorted from the first character; a leading `%` means any position, so it scans everything. **Fix**: a trigram index (`pg_trgm` with GIN) for substring search, or real full-text search (`tsvector`, OpenSearch) for words.
+
+## 4. SELECT * and fat rows
+
+Fetching every column moves more data from disk, over the network and into memory — especially wide `text`/`jsonb` columns — and prevents index-only scans. **Fix**: select only the columns you need.
+
+## 5. Missing index on a foreign key or filter
+
+The most common cause of all: `WHERE customer_id = ?` or a join on `orders.customer_id` with no index on `customer_id`. Also deleting a parent row with `ON DELETE CASCADE` scans the child table if its foreign key isn't indexed. **Fix**: index foreign keys used in joins and filters.
+
+## 6. The N+1 query problem
+
+Load a list, then run one more query **per item**:
+
+```js
+const posts = await db.query('SELECT * FROM posts LIMIT 50');                 // 1 query
+for (const p of posts.rows) {
+  p.author = (await db.query('SELECT * FROM users WHERE id = $1', [p.author_id])).rows[0]; // + 50
+}
+```
+
+<Diagram
+  caption="N+1: one query for the list plus one per row. Batching turns 51 round trips into 2."
+  chart={`flowchart TB
+    subgraph N1["N + 1"]
+      direction LR
+      a1["SELECT posts (1)"] --> a2["SELECT user 1"] --> a3["SELECT user 2"] --> a4["… × 50"]
+    end
+    subgraph B["Batched"]
+      direction LR
+      b1["SELECT posts (1)"] --> b2["SELECT users WHERE id = ANY($ids) (1)"]
+    end
+    N1 ~~~ B`}
+/>
+
+Each query may take only 1 ms, but 51 round trips plus their network latency add up — and it grows with the page size. **Fix**: a `JOIN`, a single `WHERE id = ANY($1)` batch, ORM eager loading (`include`), or a DataLoader in GraphQL. The next chapter covers ORMs specifically.
+
+## 7. COUNT(*) on big tables
+
+`SELECT count(*) FROM events` must visit every row (with MVCC, there's no stored total). **Fix**: avoid exact counts in UIs ("1,000+ results"), use estimates (`pg_class.reltuples`), or maintain a counter table updated in the same transaction.
+
+## 8. OR conditions and NOT IN
+
+```sql
+WHERE customer_id = $1 OR email = $2       -- may not use either index well
+WHERE id NOT IN (SELECT user_id FROM bans) -- wrong with NULLs, often slow
+```
+
+**Fix**: `UNION ALL` of two indexed queries, or rely on bitmap-OR plans; replace `NOT IN` with `NOT EXISTS`.
+
+## 9. Huge transactions and unbatched writes
+
+Updating 10 million rows in one statement holds locks for minutes, bloats the table and stalls replicas.
+
+```sql
+-- batch it: repeat until 0 rows updated
+UPDATE orders SET archived = true
+WHERE id IN (
+  SELECT id FROM orders WHERE created_at < '2024-01-01' AND NOT archived LIMIT 5000
+);
+```
+
+The reverse is also slow: inserting 10,000 rows one statement at a time. Use multi-row `INSERT … VALUES (…), (…)`, `COPY`, or `unnest` arrays.
+
+## 10. Implicit type conversions
+
+Comparing a `text` column with a number, or a `varchar` with a parameter of a different collation, can force a conversion per row and prevent index use. Make parameter types match column types.
+
+## Summary table
+
+| Pattern | Symptom in EXPLAIN | Fix |
+|---|---|---|
+| Deep OFFSET | many rows read, few returned | keyset pagination |
+| Function on column | Seq Scan with Filter | bare column or expression index |
+| `LIKE '%x'` | Seq Scan | trigram/full-text index |
+| Missing FK index | Seq Scan inside a join loop | index the FK |
+| N+1 | many tiny identical queries in logs | join / batch / eager load |
+| `COUNT(*)` | full scan | estimate or counter table |
+| Giant update | long locks, replica lag | batch in chunks |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Adding indexes without checking whether the query can use them.
+- Optimising the slowest single query instead of the one with the most **total** time.
+- Testing performance on a tiny dataset.
+- Paginating APIs with OFFSET at scale.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Why is OFFSET pagination slow, and what would you do instead?">
+
+With `LIMIT 20 OFFSET 100000`, the database has to produce and discard the first hundred thousand rows in sort order to return twenty, so each page gets slower the deeper you go, and rows shift between pages when new data arrives. I'd switch to keyset or cursor pagination: sort by a unique, indexed key such as `(created_at, id)`, return the last row's values as an opaque cursor, and fetch the next page with `WHERE (created_at, id) < (cursor) ORDER BY … LIMIT 20`. With a matching index, every page costs the same. The trade-off is no random page jumps, which most feeds and APIs don't need.
+
+<Fragment slot="deeper">
+
+- **What is the N+1 problem?** One query for a list plus one per item; fix with joins, batching or eager loading.
+- **Why can't `lower(email) = ?` use an index on `email`?** The index stores raw values; use an expression index.
+- **How do you update millions of rows safely?** In batches, in short transactions.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Keyset pagination", "Paginating with a cursor based on the last row's sort key instead of OFFSET."],
+  ["N+1 problem", "One query for a list plus one query per item."],
+  ["Expression index", "An index on the result of an expression like `lower(email)`."],
+  ["Trigram index", "An index enabling fast substring and similarity search."],
+  ["Batching", "Grouping many small operations into fewer large ones."],
+]} />

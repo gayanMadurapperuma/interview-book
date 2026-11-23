@@ -1,0 +1,244 @@
+---
+title: async and await
+part: Asynchrony
+order: 20
+level: core
+summary: Write asynchronous code that reads top to bottom. Underneath it is still promises — and knowing that lets you avoid the slow-loop trap.
+demo: js-async-await
+---
+
+`async` and `await` let you write promise-based code that **looks** like ordinary, synchronous code. An `async` function always returns a promise. Inside it, `await somePromise` pauses that function until the promise settles, then gives you its value (or throws its error). While the function is paused, the rest of the program keeps running — nothing is blocked.
+
+<Analogy>
+  `await` is like putting a bookmark in a book when the phone rings. You stop reading *this* book, deal with other things, and when you come back you open it at exactly the bookmark, with everything you remembered still in your head. The rest of the house didn't stop while you were away.
+</Analogy>
+
+## Why it matters
+
+Nearly all modern JavaScript and Node code uses `async/await`. Interviewers check that you understand it is still promise-based: what an async function returns, how errors flow, where it pauses, and — very often — why `await` inside a loop can make code many times slower than it needs to be.
+
+## The basics
+
+```js
+async function getUserName(id) {
+  const res = await fetch(`/api/users/${id}`);  // pause until the response arrives
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const user = await res.json();                 // pause until the body is parsed
+  return user.name;                              // fulfils the returned promise
+}
+
+getUserName(7).then((name) => console.log(name));
+// or, inside another async function / ES module:
+const name = await getUserName(7);
+```
+
+The same code with plain promises:
+
+```js
+function getUserName(id) {
+  return fetch(`/api/users/${id}`)
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then((user) => user.name);
+}
+```
+
+Rules to remember:
+
+1. An `async` function **always returns a promise**. `return x` fulfils it with `x`; `throw e` rejects it with `e`.
+2. `await p` pauses the function until `p` settles, then evaluates to its value — or **throws** its rejection reason.
+3. The function runs **synchronously up to the first `await`**. Everything after an `await` resumes later as a microtask.
+4. `await` on a non-promise wraps it in a resolved promise. It still yields one microtask tick.
+
+## What happens when you call one
+
+<Diagram
+  sequence
+  caption="The caller gets a pending promise straight away and keeps going. The async function resumes later when the awaited promise settles."
+  chart={`sequenceDiagram
+    participant C as Caller
+    participant L as load()
+    participant API as fetchUser
+    C->>L: load(7)
+    L->>L: log "1: entering load"
+    L->>API: fetchUser(7)
+    L-->>C: pending promise p
+    C->>C: log "2" and "3"
+    API-->>L: resolves (100 ms later)
+    L->>L: resume after await, log "4"
+    L-->>C: p fulfils → .then logs "5"`}
+  notes={[
+    "The caller invokes `load(7)`. The body starts immediately.",
+    "Code before the first `await` runs synchronously.",
+    "`fetchUser` starts the request.",
+    "`await` suspends `load`. The caller receives a pending promise right away.",
+    "The caller continues — it was never blocked.",
+    "Later, the awaited promise resolves.",
+    "`load` resumes exactly where it paused, as a microtask, with its local variables intact.",
+    "Returning fulfils `p`, which triggers the caller's `.then`.",
+  ]}
+/>
+
+<DemoLink id="js-async-await" />
+
+## Error handling
+
+Rejected promises turn into thrown errors at the `await`, so ordinary `try/catch` works:
+
+```js
+async function loadDashboard() {
+  try {
+    const user = await getUser();
+    const stats = await getStats(user.id);
+    return render(user, stats);
+  } catch (err) {
+    showError(err.message);         // catches failures from either await
+  } finally {
+    hideSpinner();
+  }
+}
+```
+
+Two important details:
+
+- `try/catch` only catches promises you **await**. A promise you start but do not await escapes the `try`.
+- `return await p` inside a `try` is different from `return p`: with `await`, a rejection is caught by that `try`'s `catch`; without it, the rejection skips the `catch` and goes to the caller.
+
+```js
+async function a() {
+  try { return fetchThing(); }        // rejection NOT caught here
+  catch { return 'fallback'; }
+}
+async function b() {
+  try { return await fetchThing(); }  // rejection caught here
+  catch { return 'fallback'; }
+}
+```
+
+## The slow-loop trap: sequential versus parallel
+
+`await` pauses until the current operation finishes before starting the next. If the operations do not depend on each other, that wastes time.
+
+```js
+// sequential: total ≈ sum of all durations
+for (const id of ids) {
+  const user = await fetchUser(id);
+  users.push(user);
+}
+
+// parallel: total ≈ the slowest one
+const users = await Promise.all(ids.map((id) => fetchUser(id)));
+```
+
+<Diagram
+  caption="Three 300 ms requests. Awaiting in a loop lays them end to end; starting them together and awaiting once overlaps them."
+  chart={`flowchart TB
+    subgraph Seq["await in a loop — 900 ms"]
+      direction LR
+      s1["request 1<br/>0–300"] --> s2["request 2<br/>300–600"] --> s3["request 3<br/>600–900"]
+    end
+    subgraph Par["Promise.all — 300 ms"]
+      direction LR
+      p1["request 1<br/>0–300"]
+      p2["request 2<br/>0–300"]
+      p3["request 3<br/>0–300"]
+    end
+    Seq ~~~ Par`}
+/>
+
+<DemoLink id="js-await-in-loops" />
+
+Use the sequential form only when each step genuinely needs the previous result, or when you must limit load on a server. For large lists, run in parallel **with a concurrency limit**, so you don't fire 10,000 requests at once:
+
+```js
+async function mapWithLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;                       // claim the next index
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+const users = await mapWithLimit(ids, 10, fetchUser);   // at most 10 in flight
+```
+
+### Start early, await late
+
+When two things are independent, start both, then await both:
+
+```js
+const userPromise = getUser();       // starts now
+const configPromise = getConfig();   // starts now, in parallel
+const user = await userPromise;
+const config = await configPromise;
+```
+
+Be careful with this pattern: if `configPromise` rejects while you are still awaiting `userPromise`, it is briefly unhandled. `Promise.all([getUser(), getConfig()])` avoids that.
+
+## `forEach` does not wait
+
+`Array.prototype.forEach` ignores the promises returned by an async callback:
+
+```js
+ids.forEach(async (id) => {
+  await save(id);
+});
+console.log('done');   // printed before any save finishes, and errors are unhandled
+```
+
+Use `for...of` (sequential) or `Promise.all(ids.map(...))` (parallel) instead.
+
+## Top-level `await`
+
+In ES modules (and Node `.mjs` files or `"type": "module"` packages) you can use `await` at the top level:
+
+```js
+// config.mjs
+export const config = await loadConfig();
+```
+
+Modules that import `config.mjs` wait until it has finished. That is convenient for startup code, but a slow top-level await delays everything that depends on the module.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Awaiting in a loop when the operations are independent.
+- Using `forEach` with an `async` callback.
+- Forgetting that an `async` function returns a promise (`if (isValid())` with an async `isValid` is always truthy!).
+- Not awaiting a promise inside `try`, so its error escapes.
+- Firing unlimited parallel requests — use a concurrency limit.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does async/await work under the hood?">
+
+`async/await` is syntax over promises. An `async` function always returns a promise; returning fulfils it and throwing rejects it. The body runs synchronously until the first `await`; at that point the function is suspended — its local state is saved — and control returns to the caller with a pending promise. When the awaited promise settles, the function resumes as a microtask, either with the value or by throwing the rejection, so normal `try/catch` works. Conceptually it is a generator driven by promise resolution. The main performance pitfall is awaiting independent work sequentially in a loop, which I fix with `Promise.all` and a concurrency limit.
+
+<Fragment slot="deeper">
+
+- **`return await` vs `return`?** Inside `try`, only `return await` lets the local `catch` handle a rejection.
+- **Why doesn't `forEach` work with async callbacks?** It ignores returned promises.
+- **What does `await` on a non-promise do?** Wraps it in a resolved promise; it still yields a microtask tick.
+- **How would you limit concurrency?** A small worker pool pulling from a shared index, or a library such as `p-limit`.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["`async` function", "A function that always returns a promise and may use `await`."],
+  ["`await`", "Pauses an async function until a promise settles; evaluates to its value or throws its reason."],
+  ["Suspension", "The paused state of an async function, with its local variables preserved."],
+  ["Continuation", "The rest of an async function after an `await`, scheduled as a microtask."],
+  ["Concurrency limit", "A cap on how many async operations run at the same time."],
+  ["Top-level `await`", "Using `await` directly in an ES module's top-level code."],
+]} />

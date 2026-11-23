@@ -1,0 +1,132 @@
+---
+title: Queueing theory and Little's Law
+part: Performance & reliability
+order: 14
+level: advanced
+summary: Why latency explodes as a system approaches full capacity — and the one equation that lets you size pools, queues and servers.
+---
+
+Every server, thread pool, connection pool and message queue behaves like a checkout line: work **arrives**, waits in a **queue**, gets **served**. **Queueing theory** studies these lines. Two results are worth knowing by heart. **Little's Law** links throughput, latency and concurrency in any stable system. And the **utilisation curve** shows that waiting time doesn't grow steadily as load increases — it shoots up as you approach 100% busy.
+
+<Analogy>
+  A supermarket with one till. If customers arrive every 2 minutes and each takes 1 minute to serve, the line is usually short. At one customer every 1.1 minutes, the cashier is busy 90% of the time — and because arrivals are random, small bursts pile up and the queue gets long. At one per minute, the line never recovers from any burst and grows without limit.
+</Analogy>
+
+## Why it matters
+
+This explains why a service at 70% CPU is fine and at 95% is on fire, why autoscaling targets ~60–70% utilisation, why pool sizes and queue limits matter, and how to estimate concurrency from traffic. Senior interviewers love candidates who can use Little's Law on the spot.
+
+## Little's Law
+
+> **L = λ × W**
+> average number in the system = arrival rate × average time in the system
+
+It holds for any stable system, regardless of the arrival pattern.
+
+<Diagram
+  caption="Little's Law applied to a service: requests arriving per second × how long each stays = how many are inside at once."
+  chart={`flowchart LR
+    IN["arrivals<br/>λ = 2,000 req/s"] --> SYS["system<br/>each request stays<br/>W = 50 ms"]
+    SYS --> OUT["departures"]
+    SYS -. "in flight at any moment:<br/>L = 2,000 × 0.05 = 100" .-> L["100 concurrent requests"]`}
+  flow
+/>
+
+Uses:
+
+- **Concurrency needed**: 2,000 req/s × 0.05 s = **100** requests in flight. If each needs a DB connection for 20 ms: 2,000 × 0.02 = **40** connections busy on average — size the pool with headroom above that.
+- **Throughput limit**: a pool of 20 connections with 50 ms queries can serve at most 20 / 0.05 = **400** queries/s. Beyond that, requests queue.
+- **Queue wait**: if a queue holds 10,000 messages and consumers process 500/s, a new message waits about **20 s**.
+- **Diagnosing**: if in-flight requests rise while throughput stays flat, latency (W) is rising — something downstream slowed.
+
+## Utilisation and the hockey stick
+
+**Utilisation** ρ = arrival rate ÷ service capacity. For a simple single-server queue with random arrivals (M/M/1), the average time in the system is:
+
+> W = service time ÷ (1 − ρ)
+
+| Utilisation ρ | Waiting multiplier 1 / (1 − ρ) |
+|---|---|
+| 50% | 2× service time |
+| 70% | 3.3× |
+| 80% | 5× |
+| 90% | 10× |
+| 95% | 20× |
+| 99% | 100× |
+
+<Diagram
+  caption="Latency versus utilisation. Fine and flat at first, then the 'knee', then near-vertical. Tail latency (p99) climbs even earlier than the average."
+  chart={`xychart-beta
+    title "Response time vs utilisation (service time = 10 ms)"
+    x-axis "utilisation %" [10, 30, 50, 60, 70, 80, 85, 90, 95, 98]
+    y-axis "avg response time (ms)" 0 --> 500
+    line [11, 14, 20, 25, 33, 50, 67, 100, 200, 500]`}
+/>
+
+Why? With random arrivals, bursts happen. At low utilisation, the server catches up between bursts. Near 100%, there's no idle time to absorb any burst, so queues grow and drain slowly. **Variance** makes it worse: irregular arrivals or very uneven request costs push the curve up further.
+
+Practical consequences:
+
+- **Don't plan for 100%.** Aim for 50–70% on critical resources so bursts don't explode latency.
+- A small capacity loss near the knee (one server out of ten failing at 85% load) can tip you into collapse.
+- Reducing **variance** (smoothing traffic, splitting slow requests onto a separate pool) improves latency as much as adding capacity.
+
+## Queues must be bounded
+
+An unbounded queue in front of an overloaded system doesn't prevent failure — it delays it and adds latency to everything. By the time requests are served, their clients have timed out and retried, adding more load.
+
+<Diagram
+  caption="When arrivals exceed capacity, an unbounded queue grows forever. Bounded queues plus load shedding keep latency sane for the work you do accept."
+  chart={`flowchart LR
+    A["arrivals 1,200/s"] --> Q{"queue full?"}
+    Q -- "no" --> BQ["bounded queue<br/>(e.g. 500 items)"]
+    BQ --> S["service<br/>capacity 1,000/s"]
+    Q -- "yes" --> SHED["shed load:<br/>429 / 503 fast,<br/>client backs off"]`}
+/>
+
+Patterns:
+
+- **Bound** queues and pools; reject quickly when full (`429 Too Many Requests` / `503`).
+- **Timeouts and deadlines**: drop work whose client has already given up.
+- **Backpressure**: signal producers to slow down (TCP flow control, stream `highWaterMark`, consumer-driven pulls).
+- **LIFO under overload** or adaptive policies: serve recent requests whose clients are still waiting.
+
+## Multiple servers
+
+Pooling servers behind one queue (M/M/c) is much better than separate queues per server: one queue never leaves a server idle while another has a line (that's why banks use a single snake queue). It's also why load balancers that pick the **least-loaded** server (or "power of two choices") beat random assignment.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Capacity planning for 100% utilisation.
+- Unbounded queues and thread/connection pools.
+- Retrying immediately into an overloaded system (amplifies load).
+- Looking only at average latency; the tail explodes first.
+- Sizing connection pools without Little's Law (far too small or far too large).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Why does latency spike when a service gets close to full capacity?">
+
+Because of queueing. Requests arrive randomly, so there are bursts; when the service has idle time it absorbs them, but as utilisation approaches 100% there's no slack, queues build and drain slowly. For a simple queue, response time is service time divided by one minus utilisation — at 50% it's 2×, at 90% 10×, at 99% 100× — and tail latency rises even earlier. So I plan for 50–70% utilisation, keep queues and pools bounded and shed load quickly when full instead of queueing forever, and use timeouts so we don't process work nobody is waiting for. Little's Law — concurrency equals arrival rate times latency — lets me size things: 2,000 requests per second at 50 ms means about 100 in flight.
+
+<Fragment slot="deeper">
+
+- **State Little's Law.** L = λW: items in system = arrival rate × time in system.
+- **Why one shared queue over per-server queues?** No server idles while another has a backlog.
+- **What is load shedding?** Rejecting excess work quickly to protect latency for accepted work.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Little's Law", "L = λW: concurrency equals throughput times latency."],
+  ["Utilisation", "Fraction of time a resource is busy: arrival rate ÷ capacity."],
+  ["Knee of the curve", "The point where latency starts rising steeply with load."],
+  ["Bounded queue", "A queue with a maximum size that rejects work when full."],
+  ["Load shedding", "Deliberately rejecting requests to stay within capacity."],
+  ["Backpressure", "Signalling producers to slow down when consumers can't keep up."],
+]} />

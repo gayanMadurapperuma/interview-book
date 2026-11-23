@@ -1,0 +1,186 @@
+---
+title: "Backend patterns: DTOs, validation, Result types and typed APIs"
+part: Config & practice
+order: 17
+level: advanced
+summary: Putting it together in a TypeScript service — schemas as the single source of truth, layered types, typed errors, typed database access and end-to-end typed APIs.
+---
+
+TypeScript pays off most in backend services when types follow data from the **edge** (HTTP requests, messages, environment) through the **domain** (business logic) to **storage** and back out — without being redefined by hand at each step. The patterns that make this work: **runtime schemas** that produce static types, separate **DTOs** for transport and **domain types** for logic, **typed errors and Result types** for expected failures, **type-safe database access**, and **shared contracts** so clients get typed APIs for free.
+
+<Analogy>
+  A factory production line with quality control at the loading dock. Raw materials (requests) are inspected once at the dock (validation) and stamped with a certificate (a trusted type). From then on, every station on the line trusts the stamp, and each station's output is labelled for the next. No station has to re-check everything, and nothing uninspected reaches the line.
+</Analogy>
+
+## Why it matters
+
+Interviewers want to know how you structure a typed backend: where validation happens, how you avoid duplicating types, how errors are modelled, and how you keep client and server in sync. These are everyday design decisions on TypeScript teams.
+
+## The flow of types through a service
+
+<Diagram
+  caption="Validate once at each boundary; derive types from schemas; keep transport, domain and persistence shapes distinct."
+  chart={`flowchart LR
+    REQ["HTTP request<br/>(unknown)"] --> V["schema.parse<br/>→ CreateOrderDto"]
+    V --> SVC["domain service<br/>Order, Money, OrderId"]
+    SVC --> REPO["repository<br/>typed SQL / ORM"]
+    REPO --> DB[("database rows")]
+    SVC --> MAP["mapper<br/>Order → OrderResponseDto"]
+    MAP --> RES["HTTP response"]
+    ENV["process.env"] --> CFG["config schema<br/>→ Config"]
+    CFG --> SVC`}
+  steps={[
+    { nodes: ["REQ", "V"], text: "Incoming data is `unknown` until a runtime schema validates it. The schema produces the DTO type — one definition, both runtime and compile time." },
+    { nodes: ["V", "SVC"], text: "The domain works with richer types: branded IDs, money in cents, discriminated unions for states." },
+    { nodes: ["SVC", "REPO", "DB"], text: "Repositories translate between domain types and rows, using a typed query builder or ORM." },
+    { nodes: ["SVC", "MAP", "RES"], text: "An explicit mapper produces the response DTO, so internal fields never leak by accident." },
+    { nodes: ["ENV", "CFG", "SVC"], text: "Configuration is another boundary: validated once at startup into a typed, frozen object." },
+  ]}
+/>
+
+## Schemas as the single source of truth
+
+```ts
+import { z } from 'zod';
+
+export const CreateOrderDto = z.object({
+  customerId: z.string().startsWith('cus_'),
+  items: z.array(z.object({
+    sku: z.string().min(1),
+    quantity: z.number().int().min(1).max(100),
+  })).min(1),
+  couponCode: z.string().max(32).optional(),
+}).strict();
+
+export type CreateOrderDto = z.infer<typeof CreateOrderDto>;
+```
+
+The same schema validates requests at runtime, provides the static type, and can generate **OpenAPI** documentation (`zod-openapi`) or JSON Schema. Alternatives: valibot, ArkType, TypeBox (JSON Schema-first, used by Fastify), class-validator DTOs in NestJS.
+
+```ts
+app.post('/orders', async (req, res) => {
+  const parsed = CreateOrderDto.safeParse(req.body);
+  if (!parsed.success) return res.status(422).json({ errors: parsed.error.flatten() });
+  const order = await orders.place(parsed.data, req.user);
+  res.status(201).json(toOrderResponse(order));
+});
+```
+
+## DTOs, domain types and mappers
+
+Keep three kinds of shape separate:
+
+| Kind | Purpose | Example |
+|---|---|---|
+| **DTO** (transport) | what goes over the wire; versioned, stable | `CreateOrderDto`, `OrderResponseDto` |
+| **Domain** | business rules; rich types | `Order` with `OrderId`, `Money`, `OrderStatus` union |
+| **Persistence** | how it's stored | `orders` row with `total_cents`, `status` text |
+
+Mapping between them is a few small functions — a price worth paying so the database schema, API contract and business logic can evolve independently.
+
+```ts
+export function toOrderResponse(o: Order): OrderResponseDto {
+  return {
+    id: o.id,
+    status: o.status.kind,
+    total: { amount: o.total.cents, currency: o.total.currency },
+    createdAt: o.createdAt.toISOString(),
+  };   // passwordHash, internal flags, etc. can't leak: they're not in the DTO type
+}
+```
+
+## Typed errors and Result types
+
+Throwing is fine for unexpected failures. For **expected** business outcomes — out of stock, card declined, coupon expired — a Result type makes callers handle them:
+
+```ts
+type Result<T, E> = { ok: true; value: T } | { ok: false; error: E };
+
+type PlaceOrderError =
+  | { type: 'OUT_OF_STOCK'; sku: string }
+  | { type: 'COUPON_INVALID'; code: string }
+  | { type: 'PAYMENT_DECLINED'; reason: string };
+
+async function placeOrder(dto: CreateOrderDto): Promise<Result<Order, PlaceOrderError>> { /* … */ }
+
+const r = await placeOrder(dto);
+if (!r.ok) {
+  switch (r.error.type) {
+    case 'OUT_OF_STOCK':     return res.status(409).json({ code: r.error.type, sku: r.error.sku });
+    case 'COUPON_INVALID':   return res.status(422).json({ code: r.error.type });
+    case 'PAYMENT_DECLINED': return res.status(402).json({ code: r.error.type });
+  }
+}
+```
+
+The compiler ensures every error case is mapped to a response. Libraries like `neverthrow` or Effect provide richer Result tooling.
+
+## Type-safe database access
+
+| Approach | Types come from | Examples |
+|---|---|---|
+| Schema-first ORM | a schema file generates a client | Prisma |
+| TypeScript-first ORM / query builder | table definitions in TS | Drizzle, Kysely, MikroORM |
+| SQL-first | real SQL queries are analysed against the DB | pgTyped, Slonik with zod, sqlc |
+
+Each gives typed results without hand-written row interfaces. Whatever you choose, still validate data from **other** systems (JSON columns, external APIs) at runtime.
+
+## End-to-end typed APIs
+
+Keep client and server in sync without copying types:
+
+- **Shared package** in a monorepo exporting schemas and DTO types used by both.
+- **OpenAPI → generated client** (openapi-typescript, orval) for any client language.
+- **tRPC**: TypeScript-only RPC where the client imports the server router's *type*; changing a procedure's input instantly errors in the frontend.
+- **GraphQL codegen**: typed operations from the schema and queries.
+
+<Diagram
+  caption="Three ways to share contracts between server and clients."
+  chart={`flowchart TB
+    S["server schemas / router"] --> A["shared types package<br/>(monorepo)"]
+    S --> B["OpenAPI spec → generated clients<br/>(any language)"]
+    S --> C["tRPC: client imports router type<br/>(TypeScript only)"]
+    A --> CL["web / mobile / services"]
+    B --> CL
+    C --> CL`}
+/>
+
+## Testing types
+
+For tricky generic utilities, test the types themselves: Vitest's `expectTypeOf(fn).returns.toEqualTypeOf<Order>()` or `tsd`. And keep `tsc --noEmit` in CI.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Trusting `req.body as CreateOrderDto` without validation.
+- Hand-written interfaces duplicating schemas, which drift apart.
+- Returning ORM entities directly as API responses (leaking fields, coupling clients to tables).
+- Throwing generic `Error`s for expected business outcomes, then string-matching messages.
+- Sharing a database model type with the frontend.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you structure types in a TypeScript backend so they stay correct and in sync?">
+
+I treat every boundary as untrusted: HTTP bodies, queue messages and environment variables are `unknown` until a runtime schema such as zod validates them, and the static type is inferred from that schema, so there's one definition that also generates OpenAPI docs. Inside, the domain uses richer types — branded IDs, money in integer cents, discriminated unions for states — and repositories use a typed ORM or query builder like Drizzle, Kysely or Prisma, so rows are typed without hand-written interfaces. Responses go through explicit mappers to response DTOs, so internal fields can't leak. Expected business failures are modelled as Result types with a discriminated error union, which the compiler forces handlers to map to HTTP statuses. Clients get types from a shared package, a generated OpenAPI client, or tRPC, and CI runs `tsc --noEmit` and type tests.
+
+<Fragment slot="deeper">
+
+- **Why separate DTO and domain types?** API contracts, business rules and storage evolve independently.
+- **Exceptions vs Result types?** Exceptions for unexpected failures; Results for expected, typed outcomes.
+- **What is tRPC's trade-off?** Superb TypeScript DX, but TypeScript clients only.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["DTO", "Data transfer object: the shape of data crossing a boundary."],
+  ["Schema inference", "Deriving a static type from a runtime validation schema."],
+  ["Mapper", "Function converting between domain, persistence and transport shapes."],
+  ["Result type", "A union representing success or a typed failure."],
+  ["tRPC", "TypeScript RPC framework sharing router types with clients."],
+  ["Type test", "A test asserting static types, e.g. with `expectTypeOf`."],
+]} />

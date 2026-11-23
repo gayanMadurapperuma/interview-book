@@ -1,0 +1,105 @@
+/* ---------- callouts ---------- */
+.callout, .analogy {
+  --c: var(--note); --cbg: var(--note-bg);
+  margin: 1.6em 0 1.8em;
+  padding: 0.95em 1.2em 0.4em;
+  border-left: 3px solid var(--c);
+  background: var(--cbg);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.94em;
+}
+.callout-pitfall { --c: var(--pitfall); --cbg: var(--pitfall-bg); }
+.callout-tip { --c: var(--tip); --cbg: var(--tip-bg); }
+.analogy { --c: var(--analogy); --cbg: var(--analogy-bg); }
+.callout-title {
+  margin: 0 0 0.35em !important;
+  font-family: var(--font-ui); font-size: 11.5px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--c);
+}
+.callout-body > :last-child { margin-bottom: 0.65em; }
+.callout-body pre { background: var(--bg) !important; }
+.analogy .callout-body { font-style: italic; }
+.analogy .callout-body code, .analogy .callout-body b { font-style: normal; }
+
+/* ---------- interview answer ---------- */
+.interview {
+  margin: 2em 0;
+  padding: 1.3em 1.4em 0.6em;
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  position: relative;
+}
+.interview::before {
+  content: ''; position: absolute; left: 1.4em; right: 1.4em; top: -1px; height: 2px;
+  background: var(--subj, var(--accent));
+}
+.iv-label {
+  margin: 0 0 0.3em !important;
+  font-family: var(--font-ui); font-size: 11.5px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+}
+.iv-q { font-size: 1.08em; font-weight: 600; color: var(--ink); margin: 0 0 0.8em !important; line-height: 1.45; }
+.iv-a > :last-child { margin-bottom: 0.9em; }
+.iv-deeper { border-top: 1px dashed var(--rule-strong); margin: 0 -1.4em; padding: 0.7em 1.4em 0.4em; }
+.iv-deeper summary {
+  cursor: pointer; list-style: none;
+  font-family: var(--font-ui); font-size: 13px; font-weight: 600; color: var(--accent);
+}
+.iv-deeper summary::-webkit-details-marker { display: none; }
+.iv-deeper summary::before { content: '+'; display: inline-block; width: 1.1em; font-weight: 500; }
+.iv-deeper[open] summary::before { content: '–'; }
+.iv-deeper > div { padding-top: 0.6em; }
+
+/* ---------- key terms ---------- */
+.keyterms { margin: 1.2em 0 1.6em; padding: 0; display: grid; gap: 0; }
+.keyterms > div {
+  display: grid; grid-template-columns: minmax(150px, 30%) 1fr; gap: 1.2em;
+  padding: 0.7em 0; border-bottom: 1px solid var(--rule);
+}
+.keyterms > div:first-child { border-top: 1px solid var(--rule); }
+.keyterms dt { font-weight: 620; color: var(--ink); font-size: 0.93em; }
+.keyterms dd { margin: 0; font-size: 0.93em; color: var(--text); }
+@media (max-width: 600px) { .keyterms > div { grid-template-columns: 1fr; gap: 0.2em; } }
+
+/* ---------- output ---------- */
+.output {
+  margin: -1.1em 0 1.6em;
+  border: 1px solid var(--rule); border-top: 0;
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: var(--bg-raised);
+  padding: 0.6em 1.2em 0.7em;
+  position: relative;
+}
+.out-label {
+  display: block; margin-bottom: 0.2em;
+  font-family: var(--font-ui); font-size: 10.5px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint);
+}
+.output pre {
+  margin: 0 !important; padding: 0 !important; border: 0 !important; background: none !important;
+  font-size: 0.8em; color: var(--ink);
+}
+.output pre::before { display: none; }
+.prose pre:has(+ .output) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; margin-bottom: 1.1em; }
+
+/* ---------- demo link ---------- */
+.demo-link {
+  display: flex; gap: 14px; align-items: flex-start;
+  margin: 1.8em 0; padding: 1em 1.2em;
+  border: 1px solid var(--rule-strong); border-radius: 8px;
+  background: var(--bg-raised);
+  text-decoration: none !important; color: var(--text) !important;
+  font-family: var(--font-ui);
+  transition: border-color 0.15s, transform 0.15s var(--ease);
+}
+.demo-link:hover { border-color: var(--subj, var(--accent)); }
+.dl-play {
+  flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--subj, var(--accent)); color: var(--bg); margin-top: 2px;
+}
+.dl-text { display: flex; flex-direction: column; gap: 2px; }
+.dl-text b { color: var(--ink); font-size: 15px; }
+.dl-blurb { font-size: 13.5px; color: var(--muted); line-height: 1.45; }
+
+.mmd-error { font-size: 12px; color: var(--pitfall); white-space: pre-wrap; }

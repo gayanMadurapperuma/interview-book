@@ -1,0 +1,150 @@
+---
+title: RabbitMQ and message routing
+part: Core components
+order: 25
+level: core
+summary: A classic message broker built around exchanges, bindings and queues — flexible routing, per-message acknowledgements, retries and priorities.
+---
+
+**RabbitMQ** is a general-purpose **message broker** implementing the AMQP protocol. Where Kafka is a log you read from, RabbitMQ is a post office that **routes** each message into one or more **queues**, delivers it to a consumer, and deletes it once the consumer **acknowledges** it. Its strength is flexible routing (by exact key, pattern or broadcast), per-message acknowledgement and redelivery, priorities, delays and dead-lettering — ideal for task queues and command-style messaging between services.
+
+<Analogy>
+  A post office sorting room. Senders drop letters at a counter (the exchange) with an address label (routing key). Sorting rules (bindings) put each letter into the right pigeonholes (queues) — one, several, or every pigeonhole for a circular. Postal workers (consumers) take a letter, deliver it, and only then throw away the receipt (ack). If a worker drops a letter, it goes back into the pigeonhole.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask when you'd pick RabbitMQ over Kafka or SQS, how exchanges route messages, and how to build retries and dead-letter handling. Many companies run it for background jobs and inter-service commands.
+
+## Exchanges, bindings, queues
+
+Producers never send directly to a queue; they publish to an **exchange** with a **routing key**. **Bindings** connect exchanges to queues with rules.
+
+<Diagram
+  caption="The four exchange types. The exchange decides which queues receive a copy of each message."
+  chart={`flowchart LR
+    P["producer<br/>routing key: order.eu.created"] --> D["direct exchange<br/>exact key match"]
+    P --> T["topic exchange<br/>pattern: order.*.created, order.#"]
+    P --> F["fanout exchange<br/>every bound queue"]
+    P --> H["headers exchange<br/>match on headers"]
+    D --> Q1[["queue: billing"]]
+    T --> Q2[["queue: eu-orders"]]
+    T --> Q3[["queue: audit"]]
+    F --> Q3
+    F --> Q4[["queue: analytics"]]`}
+/>
+
+| Exchange | Routes to | Use for |
+|---|---|---|
+| **Direct** | queues bound with the exact routing key | task routing by type (`resize-image`) |
+| **Topic** | queues whose binding pattern matches (`*` one word, `#` any) | selective event subscriptions (`order.*.created`) |
+| **Fanout** | every bound queue | broadcast/pub-sub |
+| **Headers** | match on message headers | rare; complex attribute routing |
+
+## Consuming and acknowledgements
+
+<Diagram
+  sequence
+  caption="Manual acknowledgements with prefetch: the broker sends a limited number of unacked messages; a nack or a dropped connection requeues them."
+  chart={`sequenceDiagram
+    participant Q as Queue
+    participant C as Consumer (prefetch 10)
+    Q->>C: deliver msg 1 … 10
+    C->>C: process msg 1
+    C->>Q: ack 1 → deleted
+    Q->>C: deliver msg 11
+    C->>Q: nack msg 2 (requeue=false)
+    Q->>Q: msg 2 → dead-letter exchange`}
+  notes={[
+    "The broker pushes up to the prefetch limit of unacknowledged messages to the consumer.",
+    "The consumer processes one.",
+    "It acknowledges; the broker deletes the message.",
+    "A slot freed up, so another message is delivered.",
+    "Processing failed permanently; the consumer rejects without requeue.",
+    "The queue's dead-letter exchange receives it for inspection or delayed retry.",
+  ]}
+/>
+
+```js
+// amqplib
+await ch.prefetch(10);                                 // at most 10 unacked per consumer
+await ch.consume('billing', async (msg) => {
+  try {
+    await handle(JSON.parse(msg.content.toString()));
+    ch.ack(msg);
+  } catch (err) {
+    ch.nack(msg, false, false);                       // to dead-letter queue
+  }
+});
+```
+
+- **Prefetch** controls fairness and memory: low values spread work evenly across consumers.
+- If a consumer's connection dies, its unacked messages are **requeued** → at-least-once; consumers must be idempotent.
+- **Publisher confirms** let producers know the broker has safely stored a message.
+
+## Reliability features
+
+- **Durable queues + persistent messages** survive broker restarts.
+- **Quorum queues** (Raft-replicated across nodes) are the modern choice for high availability; classic mirrored queues are deprecated.
+- **Dead-letter exchanges** catch rejected, expired or overflowing messages.
+- **Retries with delay**: a retry queue with a TTL that dead-letters back to the main queue, or the delayed-message plugin.
+- **Priorities, TTLs, max length** per queue.
+- **Streams**: RabbitMQ also offers an append-only, replayable "stream" queue type, borrowing Kafka-like semantics for some cases.
+
+<Diagram
+  caption="A common retry pattern: failed messages wait in a TTL queue, then flow back; after N attempts they park in a final DLQ."
+  chart={`flowchart LR
+    W["work queue"] --> C["consumer"]
+    C -- "fail, attempt below 3" --> R["retry queue<br/>TTL 30 s"]
+    R -- "expires → dead-letter back" --> W
+    C -- "fail, attempt 3" --> DLQ["parking-lot DLQ<br/>(manual review)"]
+    C -- "ok → ack" --> DONE["done"]`}
+/>
+
+## RabbitMQ vs Kafka
+
+| | RabbitMQ | Kafka |
+|---|---|---|
+| Model | smart broker routes, consumers ack and messages are deleted | dumb log, consumers track offsets, messages retained |
+| Routing | rich (exchanges, patterns) | by topic + key only |
+| Replay | no (except streams) | yes |
+| Ordering | per queue, weakened by multiple consumers/requeues | per partition |
+| Throughput | tens of thousands/s per node | hundreds of thousands to millions/s |
+| Per-message features | priorities, delays, TTL, per-message ack | none per message |
+| Best for | task queues, RPC-style commands, complex routing | event streams, CDC, analytics, replay |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Auto-ack mode: messages are lost if the consumer crashes mid-processing.
+- No prefetch limit: one consumer hoards messages, memory spikes.
+- Requeueing failing messages forever (a "poison message" loop) instead of dead-lettering.
+- Using RabbitMQ as a long-term event store or for replay.
+- Huge queue backlogs: RabbitMQ is happiest with queues that stay short.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="When would you use RabbitMQ rather than Kafka?">
+
+RabbitMQ is a smart broker: producers publish to exchanges, bindings route each message to one or more queues by exact key, pattern or broadcast, and consumers acknowledge individual messages, after which they're deleted. It gives per-message features — acknowledgements and redelivery, prefetch for fair dispatch, priorities, TTLs, delayed retries and dead-letter exchanges — so it suits task queues and command-style messaging with complex routing. Kafka is a retained, partitioned log: ordering per partition, consumers tracking offsets, replay and very high throughput, which suits event streaming, CDC and analytics. So for background jobs with retries and routing I'd lean RabbitMQ or SQS; for an event backbone that many services read and replay, Kafka. In RabbitMQ I'd use quorum queues, publisher confirms, manual acks with idempotent consumers, and a DLQ.
+
+<Fragment slot="deeper">
+
+- **Direct vs topic vs fanout exchange?** Exact key, pattern match, broadcast.
+- **What does prefetch do?** Caps unacknowledged messages per consumer for fair, bounded dispatch.
+- **How do you implement delayed retries?** A TTL retry queue that dead-letters back, or the delayed-message plugin.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Exchange", "Receives published messages and routes them to queues."],
+  ["Binding", "A rule linking an exchange to a queue, possibly with a key pattern."],
+  ["Routing key", "Label used by exchanges to route messages."],
+  ["Acknowledgement", "Consumer signal that a message was processed and can be deleted."],
+  ["Prefetch", "Maximum unacknowledged messages delivered to a consumer."],
+  ["Quorum queue", "Raft-replicated queue type for high availability."],
+]} />

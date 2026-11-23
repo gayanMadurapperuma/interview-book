@@ -1,0 +1,180 @@
+---
+title: Streams, buffers and backpressure
+part: Core APIs
+order: 7
+level: core
+summary: Process data piece by piece instead of all at once — with constant memory, whatever the size. Backpressure is how a slow consumer tells a fast producer to wait.
+demo: node-stream-backpressure
+---
+
+A **stream** is data that arrives (or leaves) in **pieces over time**, rather than all at once. Instead of loading a 4 GB file into memory and then sending it, you read a small chunk, send it, read the next chunk, and so on — so memory use stays small and the first bytes go out immediately. **Buffers** are the chunks: fixed-size blocks of raw bytes. **Backpressure** is the mechanism that stops a fast producer from overwhelming a slow consumer.
+
+<Analogy>
+  Streams are a garden hose instead of buckets. With buckets, you have to fill a whole bucket before carrying it, and you need a bucket as big as the water. With a hose, water flows continuously, and the hose only ever holds a little. Backpressure is the nozzle: if the person at the end closes it a bit, the water backs up and the tap side slows down — nothing bursts.
+</Analogy>
+
+## Why it matters
+
+Streams are how Node handles big files, uploads, proxies, compression and HTTP bodies efficiently. Interviewers ask about the four stream types, `pipe` vs `pipeline`, and especially backpressure — ignoring it is how file servers run out of memory.
+
+## Buffers
+
+A `Buffer` is a fixed-length sequence of bytes (a subclass of `Uint8Array`). Files and sockets deal in bytes, not strings.
+
+```js
+const b = Buffer.from('héllo', 'utf8');
+b.length;                 // 6 bytes (é takes 2 bytes in UTF-8)
+b.toString('hex');        // '68c3a96c6c6f'
+b.toString('base64');     // 'aMOpbGxv'
+Buffer.alloc(1024);       // 1 KB of zeros
+Buffer.concat([b1, b2]);
+```
+
+When text is split across chunks, a multi-byte character can be cut in half. Use `setEncoding('utf8')` on readable streams or a `StringDecoder`, rather than calling `toString()` on each chunk.
+
+## Four kinds of stream
+
+<Diagram
+  caption="Readable streams produce data, writable streams consume it, duplex streams do both independently, and transform streams modify data as it passes through."
+  chart={`flowchart LR
+    R["Readable<br/>fs.createReadStream<br/>http request (server)"] --> T["Transform<br/>zlib.createGzip<br/>crypto hash"]
+    T --> W["Writable<br/>fs.createWriteStream<br/>http response (server)"]
+    D["Duplex<br/>TCP socket<br/>(read and write independently)"]`}
+  flow
+/>
+
+| Type | Examples |
+|---|---|
+| **Readable** | `fs.createReadStream`, incoming HTTP request (`req`), `process.stdin` |
+| **Writable** | `fs.createWriteStream`, outgoing HTTP response (`res`), `process.stdout` |
+| **Duplex** | TCP sockets (`net.Socket`) |
+| **Transform** | `zlib.createGzip()`, `crypto.createHash` (as a stream), CSV parsers |
+
+## Backpressure
+
+Each stream has an internal buffer with a limit called **`highWaterMark`** (16 KB for byte streams by default). When you write faster than the destination can accept:
+
+1. `writable.write(chunk)` still accepts the chunk and buffers it, but **returns `false`** once the buffer reaches the limit — a signal: "please stop".
+2. The producer should pause until the writable emits **`'drain'`**, meaning the buffer has emptied.
+
+<Diagram
+  caption="Backpressure: the writable's return value and the drain event pace the producer to the consumer's speed."
+  chart={`flowchart LR
+    P["Producer<br/>(fast disk read)"] -- "write(chunk)" --> B["Writable buffer<br/>limit: highWaterMark"]
+    B -- "flushes at its own pace" --> C["Consumer<br/>(slow client network)"]
+    B -. "write() → false: stop!" .-> P
+    B -. "'drain': go again" .-> P`}
+  steps={[
+    { nodes: ["P", "B", "C"], text: "The producer writes chunks. The writable buffers them and hands them to the slow consumer as fast as it can." },
+    { nodes: ["B", "P"], text: "Once the buffer passes `highWaterMark`, `write()` returns **false**. A correct producer pauses." },
+    { nodes: ["B", "C"], text: "The consumer drains the buffer at its own speed." },
+    { nodes: ["B", "P"], text: "When the buffer is empty, the writable emits **`'drain'`** and the producer resumes. Memory stays bounded." },
+  ]}
+/>
+
+If you ignore the `false`, nothing is lost — the writable keeps buffering — so the bug is silent until memory runs out. Serving a 2 GB file to a slow mobile client this way puts the whole 2 GB in your process.
+
+<DemoLink id="node-stream-backpressure" />
+
+## Use `pipeline`
+
+You rarely need to handle `write()`/`'drain'` by hand. `stream.pipeline` connects streams with backpressure, forwards errors, and destroys every stream on failure (closing file descriptors):
+
+```js
+const { pipeline } = require('node:stream/promises');
+const fs = require('node:fs');
+const zlib = require('node:zlib');
+
+await pipeline(
+  fs.createReadStream('access.log'),
+  zlib.createGzip(),
+  fs.createWriteStream('access.log.gz'),
+);
+```
+
+The older `readable.pipe(writable)` also handles backpressure, but it does **not** forward errors or clean up the other streams when one fails — a common source of leaked file descriptors. Prefer `pipeline`.
+
+### Streaming an HTTP response
+
+```js
+const { pipeline } = require('node:stream/promises');
+
+app.get('/download/:name', async (req, res) => {
+  res.setHeader('Content-Type', 'application/octet-stream');
+  try {
+    await pipeline(fs.createReadStream(safePath(req.params.name)), res);
+  } catch (err) {
+    // client disconnected or file missing; pipeline already destroyed the streams
+    req.log.warn({ err }, 'download aborted');
+  }
+});
+```
+
+## Writing your own transform
+
+```js
+const { Transform } = require('node:stream');
+
+const upperCase = new Transform({
+  transform(chunk, encoding, callback) {
+    callback(null, chunk.toString().toUpperCase());   // push the transformed chunk
+  },
+});
+
+await pipeline(process.stdin, upperCase, process.stdout);
+```
+
+## Reading streams with `for await`
+
+Readable streams are async iterable, which is often the simplest way to consume them — and backpressure is automatic, because the next chunk isn't read until your loop body finishes:
+
+```js
+let lines = 0;
+for await (const chunk of fs.createReadStream('big.csv', { encoding: 'utf8' })) {
+  lines += chunk.split('\n').length - 1;
+}
+```
+
+## Object mode
+
+Streams can carry JavaScript objects instead of bytes (`{ objectMode: true }`), which is handy for processing records (database rows, parsed CSV lines) in a pipeline. In object mode, `highWaterMark` counts objects (default 16), not bytes.
+
+## Web Streams
+
+Node also implements the standard **Web Streams** API (`ReadableStream`, `WritableStream`, `TransformStream`), which `fetch` uses. `Readable.fromWeb()` and `Readable.toWeb()` convert between the two worlds.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Ignoring `write()`'s return value in a loop.
+- Using `.pipe()` without error handling — the source keeps a file descriptor open when the destination fails.
+- `fs.readFile` (whole file into memory) for large files instead of a stream.
+- Calling `toString()` on each chunk and corrupting multi-byte characters.
+- No `'error'` handler on a stream — an unhandled stream error crashes the process.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What are streams in Node, and what is backpressure?">
+
+Streams process data incrementally in chunks, so memory stays constant regardless of size and output can start before input finishes. There are readable, writable, duplex and transform streams — files, HTTP requests and responses, sockets, gzip. Backpressure is how a slow consumer slows down a fast producer: when a writable's buffer exceeds its `highWaterMark`, `write()` returns false and the producer should wait for the `'drain'` event. Ignoring it doesn't lose data, it just buffers everything in memory until the process runs out. In practice I use `stream.pipeline`, which handles backpressure, propagates errors and destroys all streams on failure — unlike `.pipe()`, which doesn't clean up on errors.
+
+<Fragment slot="deeper">
+
+- **What's `highWaterMark`?** The buffer threshold (16 KB for bytes, 16 objects in object mode) at which backpressure kicks in.
+- **Why is `pipeline` better than `pipe`?** Error propagation and cleanup.
+- **How does `for await` handle backpressure?** It only pulls the next chunk after the loop body completes.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Stream", "An abstraction for data processed incrementally in chunks."],
+  ["Buffer", "A fixed-size chunk of raw bytes."],
+  ["Backpressure", "Flow control that slows a producer to match a consumer's speed."],
+  ["`highWaterMark`", "The buffered amount at which a stream signals backpressure."],
+  ["`'drain'`", "Event signalling that a writable's buffer has emptied."],
+  ["`pipeline`", "Connects streams with backpressure, error forwarding and cleanup."],
+]} />

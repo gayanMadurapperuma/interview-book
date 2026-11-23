@@ -1,0 +1,149 @@
+---
+title: "Workloads: Pods, Deployments, StatefulSets, Jobs"
+part: Kubernetes core
+order: 4
+level: core
+summary: The objects that run your code — and which one to choose for stateless APIs, databases, per-node agents and batch work.
+---
+
+Kubernetes runs containers inside **Pods**, but you rarely create pods directly. Instead you use a **workload controller** that creates and manages pods for you: a **Deployment** for stateless services, a **StatefulSet** for things that need stable identity and storage, a **DaemonSet** for one pod per node, and **Jobs/CronJobs** for work that runs to completion. Choosing the right one — and understanding how rolling updates work — is the core of running applications on Kubernetes.
+
+<Analogy>
+  Staffing a restaurant. A Deployment is a pool of interchangeable waiters: if one goes home, any replacement will do. A StatefulSet is the head chef, sous-chef and pastry chef: each has a named role and their own station that must be there when they return. A DaemonSet is one security guard per building. A Job is a caterer hired to cook one banquet and leave; a CronJob is a cleaner who comes every night.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask what a pod is, Deployment vs StatefulSet, how a rolling update avoids downtime, and how to run scheduled jobs. These choices determine availability during deploys and how state is handled.
+
+## Pods
+
+A **Pod** is the smallest deployable unit: one or more containers that share a network namespace (same IP, talk over `localhost`) and can share volumes. Pods are **ephemeral** — they get a new IP when recreated, and they're never "repaired", only replaced.
+
+- Usually **one main container per pod**.
+- **Sidecars** add helpers in the same pod: a service-mesh proxy, a log shipper.
+- **Init containers** run to completion before the main container starts (wait for a dependency, run migrations, fetch config).
+
+## The workload types
+
+<Diagram
+  caption="Which controller to use."
+  chart={`flowchart TB
+    Q{"What are you running?"} --> SL["Stateless service<br/>(API, web app, worker)"] --> DEP["Deployment"]
+    Q --> SF["Needs stable identity<br/>+ its own disk<br/>(databases, Kafka, ZooKeeper)"] --> STS["StatefulSet"]
+    Q --> PN["One copy on every node<br/>(log/metrics agent, CNI)"] --> DS["DaemonSet"]
+    Q --> BT["Runs to completion<br/>(migration, report, backfill)"] --> JOB["Job"]
+    Q --> SC["On a schedule"] --> CJ["CronJob"]`}
+/>
+
+| Controller | Pods are | Identity | Storage | Example |
+|---|---|---|---|---|
+| **Deployment** | interchangeable replicas | random names (`api-7d9f…`) | usually none (shared external services) | REST API, queue workers |
+| **StatefulSet** | ordered, stable | `db-0`, `db-1`, `db-2` with stable DNS | one PersistentVolume per pod, kept across restarts | PostgreSQL, Kafka, Elasticsearch |
+| **DaemonSet** | one per (matching) node | per node | node-local | Fluent Bit, node exporter |
+| **Job** | run until success | — | — | DB migration, data export |
+| **CronJob** | creates Jobs on a schedule | — | — | nightly report, cleanup |
+
+In practice, many teams run databases as **managed services** (RDS, Cloud SQL) rather than StatefulSets, and keep Kubernetes for stateless workloads.
+
+## Deployments and rolling updates
+
+A Deployment manages **ReplicaSets** — one per version of the pod template. Changing the image creates a new ReplicaSet and gradually shifts pods from old to new.
+
+<Diagram
+  caption="A rolling update with maxSurge 1 and maxUnavailable 0: a new pod must become Ready before an old one is removed, so capacity never drops."
+  chart={`flowchart LR
+    S0["v1 v1 v1"] --> S1["v1 v1 v1 + v2 (starting)"]
+    S1 --> S2["v1 v1 v2 ✓ (one v1 removed)"]
+    S2 --> S3["v1 v2 v2 ✓"]
+    S3 --> S4["v2 v2 v2 ✓"]`}
+  steps={[
+    { nodes: ["S0"], text: "Three replicas of v1 are serving traffic." },
+    { nodes: ["S0", "S1"], text: "A new image is applied. With `maxSurge: 1`, one extra v2 pod is created." },
+    { nodes: ["S1", "S2"], text: "Only when v2 passes its **readiness probe** is one v1 pod terminated (gracefully, via SIGTERM). `maxUnavailable: 0` means capacity never drops below 3." },
+    { nodes: ["S2", "S3", "S4"], text: "Repeat until all pods run v2. If new pods never become ready, the rollout stalls instead of taking the service down." },
+  ]}
+/>
+
+```yaml
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+```
+
+```bash
+kubectl rollout status deployment/orders-api
+kubectl rollout undo deployment/orders-api        # back to the previous ReplicaSet
+```
+
+Rolling updates rely on **readiness probes** and **graceful shutdown** being correct; otherwise users see errors during every deploy. For more control — **canary** (send 5% of traffic to v2 first) or **blue-green** (switch all traffic at once, instant rollback) — use tools like Argo Rollouts or Flagger.
+
+## StatefulSets in more detail
+
+- Pods are created in order (`db-0`, then `db-1`…) and keep their names and DNS (`db-0.db.default.svc.cluster.local`) across rescheduling.
+- `volumeClaimTemplates` give each pod its **own** PersistentVolume that follows it.
+- Requires a **headless Service** for stable network identities.
+- Scaling down doesn't delete volumes (data safety).
+
+## Jobs and CronJobs
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: nightly-report }
+spec:
+  schedule: "0 2 * * *"           # 02:00 every day
+  concurrencyPolicy: Forbid       # don't start if the previous run is still going
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: report
+              image: registry.example.com/reports@sha256:…
+              args: ["node", "dist/jobs/nightly-report.js"]
+```
+
+Jobs must be **idempotent** — they may be retried or (rarely) run twice.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Creating bare pods (nothing recreates them when they die).
+- Deployments for stateful systems that need stable storage per replica.
+- Rolling updates without readiness probes, or with `maxUnavailable` taking capacity down.
+- Running database migrations in every app pod's startup (race conditions) — use a Job or a single migration step.
+- CronJobs that overlap or aren't idempotent.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What's the difference between a Deployment and a StatefulSet, and how does a rolling update work?">
+
+A pod is the smallest unit — containers sharing a network namespace and volumes — and it's disposable. A Deployment manages interchangeable, stateless replicas through ReplicaSets, one per version: when the pod template changes, it creates new pods and removes old ones gradually, controlled by maxSurge and maxUnavailable, and only removes old pods once new ones pass their readiness probes, so with maxUnavailable 0 there's no capacity loss; you can roll back to the previous ReplicaSet. A StatefulSet is for workloads needing stable identity and storage — pods get ordinal names and stable DNS like `db-0`, are created in order, and each gets its own persistent volume that follows it — which suits databases and Kafka. DaemonSets run one pod per node for agents, and Jobs and CronJobs run work to completion.
+
+<Fragment slot="deeper">
+
+- **What are init containers and sidecars?** Pre-start setup containers; helper containers running alongside the main one.
+- **How do you do a canary on Kubernetes?** Argo Rollouts/Flagger or a service mesh splitting traffic by weight.
+- **Why must jobs be idempotent?** They may be retried after failures.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Pod", "One or more co-located containers sharing network and storage."],
+  ["Deployment", "Manages stateless replicas and rolling updates via ReplicaSets."],
+  ["StatefulSet", "Manages pods with stable names, ordering and per-pod storage."],
+  ["DaemonSet", "Runs a pod on every (matching) node."],
+  ["Job / CronJob", "Run-to-completion workloads, once or on a schedule."],
+  ["Rolling update", "Gradually replacing old pods with new ones without downtime."],
+]} />

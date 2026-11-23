@@ -1,0 +1,105 @@
+---
+title: The CAP theorem, precisely
+part: Distributed fundamentals
+order: 5
+level: core
+summary: When the network splits, a replicated system must choose between answering everyone and answering correctly. That's all CAP says — and it's still useful.
+---
+
+The **CAP theorem** says that a distributed data store can't guarantee all three of **Consistency**, **Availability** and **Partition tolerance** at the same time. Because network partitions **will** happen, the real meaning is narrower and more practical: **when a network partition occurs, the system must choose between consistency and availability.** When there is no partition, you can have both.
+
+<Analogy>
+  Two bank branches that share account balances over a phone line. The line goes dead. A customer walks into branch A to withdraw money. Branch A can either refuse ("I can't confirm your balance with branch B right now") — staying **consistent** but not **available** — or hand over the cash based on its possibly stale copy — staying **available** but risking an inconsistent balance (the customer might withdraw at branch B too). It can't do both until the line is restored.
+</Analogy>
+
+## Why it matters
+
+CAP is one of the most-mentioned and most-misused ideas in system design interviews. Saying "we'll pick AP" for a whole system is a red flag; explaining what happens to **specific operations** during a partition is what impresses.
+
+## The three terms, precisely
+
+- **Consistency** (in CAP) means **linearisability**: every read returns the most recent write, as if there were a single copy of the data. (This is *not* the "C" in ACID.)
+- **Availability** means every request to a non-failed node gets a non-error response — eventually, with no time bound.
+- **Partition tolerance** means the system keeps operating even when messages between nodes are lost.
+
+## The choice during a partition
+
+<Diagram
+  caption="A partition separates two replicas. A client writes to one side; another reads from the other side. Each system must pick."
+  chart={`flowchart LR
+    C1["client 1<br/>write x = 2"] --> N1[("node 1<br/>x = 2")]
+    N1 -. "✂ partition<br/>cannot replicate" .- N2[("node 2<br/>x = 1 (stale)")]
+    C2["client 2<br/>read x"] --> N2
+    N2 --> CP["CP: refuse or wait<br/>(error / timeout)"]
+    N2 --> AP["AP: answer x = 1<br/>(stale but available)"]`}
+  steps={[
+    { nodes: ["C1", "N1"], text: "Client 1 writes x = 2 to node 1." },
+    { nodes: ["N1", "N2"], text: "The network between the nodes is cut, so the write can't reach node 2." },
+    { nodes: ["C2", "N2"], text: "Client 2 reads x from node 2. Node 2 can't know whether its value is current." },
+    { nodes: ["N2", "CP"], text: "**CP**: node 2 refuses (or waits) until it can confirm the latest value. Correct, but unavailable for this client." },
+    { nodes: ["N2", "AP"], text: "**AP**: node 2 answers with what it has — x = 1. Available, but stale. The replicas reconcile after the partition heals." },
+  ]}
+/>
+
+| Choice | Behaviour during a partition | Typical systems | Good for |
+|---|---|---|---|
+| **CP** | minority side rejects writes (and maybe reads) | etcd, ZooKeeper, Consul, Spanner, single-primary SQL with sync replication | locks, leader election, balances, inventory, config |
+| **AP** | all sides keep accepting requests; conflicts resolved later | Cassandra, DynamoDB (default reads), Riak, DNS, CRDT-based apps | shopping carts, likes, presence, timelines, caches |
+
+## Common misunderstandings
+
+1. **"Pick two of three."** You can't "drop" partition tolerance in a distributed system — networks partition whether you like it or not. A system that isn't partition-tolerant just behaves unpredictably when it happens. The real choice is C or A **during** a partition.
+2. **"CA systems."** A single-node database is "CA" only because it isn't distributed. Once you add a replica, CAP applies.
+3. **"The whole system is CP or AP."** Choices are per operation. An e-commerce site can be AP for browsing and recommendations, and CP for payment and stock reservation.
+4. **"AP means no consistency."** AP systems usually provide **eventual consistency** and often tunable consistency per request.
+5. **"CAP says how fast."** CAP says nothing about latency in normal operation — that's what PACELC adds (next chapter).
+
+## Designing with CAP
+
+Ask, per feature: **what is worse — a short outage, or a wrong answer?**
+
+<Diagram
+  caption="Different parts of one product can make different choices."
+  chart={`flowchart TB
+    P["During a partition…"] --> W{"Is a wrong / stale answer<br/>worse than an error?"}
+    W -- "yes: money, stock, uniqueness, locks" --> CP["Prefer consistency<br/>(reject, retry later)"]
+    W -- "no: feeds, likes, carts, views" --> AP["Prefer availability<br/>(serve stale, reconcile)"]`}
+/>
+
+- Selling the last concert ticket twice: worse than a brief error → **CP**.
+- A "like" count off by a few for a minute: harmless → **AP**.
+- Shopping cart: Amazon's Dynamo paper famously chose AP — never lose an "add to cart"; merge conflicting carts (sometimes resurrecting a deleted item, a known trade-off).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Saying "we choose AP" for an entire system without naming operations.
+- Confusing CAP consistency (linearisability) with ACID consistency (constraints).
+- Claiming a system is "CA".
+- Ignoring that partitions are often partial and short — design for both the event and the recovery (conflict resolution).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Explain the CAP theorem.">
+
+CAP says that in a replicated data store, when a network partition separates replicas, you have to choose between consistency — every read sees the latest write, linearisability — and availability — every request still gets a non-error response. Partitions are a fact of life, so it's not "pick two of three"; it's what each operation does during a partition. A CP choice makes the side that can't reach a majority refuse or wait, which is right for things like payments, inventory or locks. An AP choice keeps serving possibly stale data and reconciles afterwards, which suits feeds, likes or carts. Outside partitions you can have both, and the everyday trade-off is between latency and consistency, which PACELC describes.
+
+<Fragment slot="deeper">
+
+- **Why can't you choose CA?** Partitions happen in any distributed system; you can't opt out.
+- **Is DynamoDB CP or AP?** Configurable per read: eventually consistent (AP-leaning) by default, strongly consistent reads available.
+- **CAP consistency vs ACID consistency?** Linearisability across replicas vs constraints holding within a database.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Network partition", "A communication break between groups of nodes."],
+  ["Linearisability", "Every operation appears to take effect instantly at one point, with reads seeing the latest write."],
+  ["CP", "During a partition, prefer consistency: some requests fail."],
+  ["AP", "During a partition, prefer availability: possibly stale answers."],
+  ["Eventual consistency", "Replicas converge to the same value once updates stop."],
+]} />

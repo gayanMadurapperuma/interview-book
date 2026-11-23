@@ -1,0 +1,152 @@
+---
+title: Security fundamentals and threat modelling
+part: Foundations
+order: 1
+level: foundation
+summary: The vocabulary and habits of secure design — what we protect, from whom, and the principles that hold up when something inevitably goes wrong.
+---
+
+Security is about protecting **assets** (data, money, accounts, availability) from **threats** (people or events that could harm them) by reducing **vulnerabilities** (weaknesses they could exploit). It isn't a feature you bolt on at the end; it's a way of designing. Three ideas carry most of the weight: the **CIA triad** (what we protect), **threat modelling** (thinking like an attacker before they do), and a few durable **principles** — least privilege, defence in depth, secure defaults.
+
+<Analogy>
+  Securing a house. You decide what's valuable (jewellery, passports, the family), who might want it (burglars, a nosy neighbour), and how they'd get in (an unlocked window, a spare key under the mat). Then you add layers — locks, an alarm, a safe — so that one failure (a forgotten window) isn't the end of the story.
+</Analogy>
+
+## Why it matters
+
+Every senior interview expects security awareness in designs: authentication, authorisation, data protection, abuse prevention. Interviewers listen for whether you consider threats unprompted and can name concrete controls.
+
+## The CIA triad
+
+<Diagram
+  caption="The three properties security protects. Most attacks target one of them."
+  chart={`flowchart TB
+    C["Confidentiality<br/>only authorised people can read data<br/>(encryption, access control)"]
+    I["Integrity<br/>data isn't altered undetected<br/>(signatures, checksums, audit logs)"]
+    A["Availability<br/>the system works when needed<br/>(redundancy, rate limits, DDoS protection)"]
+    C --- I --- A --- C`}
+/>
+
+Related properties: **authentication** (who are you?), **authorisation** (what may you do?), **non-repudiation** (you can't deny you did it — signed audit trails) and **privacy** (using personal data only as agreed and allowed).
+
+## Threat modelling
+
+Ask four questions (Adam Shostack's framework):
+
+1. **What are we building?** Draw the system: components, data flows, **trust boundaries** (where data crosses from less trusted to more trusted zones).
+2. **What can go wrong?** Use a checklist like **STRIDE**.
+3. **What are we going to do about it?** Mitigate, accept, transfer, or avoid each threat.
+4. **Did we do a good job?** Review, test, revisit when the design changes.
+
+<Diagram
+  caption="A data-flow diagram with trust boundaries. Every arrow crossing a boundary is a place to authenticate, validate and log."
+  chart={`flowchart LR
+    subgraph Internet["Untrusted: internet"]
+      U["browser / mobile"]
+      ATT["attacker"]
+    end
+    subgraph DMZ["Edge"]
+      CDN["CDN / WAF"]
+      GW["API gateway"]
+    end
+    subgraph Internal["Trusted network"]
+      API["API service"]
+      DB[("database")]
+      Q[["queue"]]
+    end
+    subgraph Third["Third parties"]
+      PAY["payment provider"]
+    end
+    U --> CDN --> GW --> API --> DB
+    API --> Q
+    API --> PAY
+    ATT -.-> CDN`}
+  steps={[
+    { nodes: ["U", "ATT", "CDN"], text: "The internet → edge boundary: anyone, including attackers, can send anything. TLS, WAF rules, rate limits." },
+    { nodes: ["CDN", "GW", "API"], text: "Edge → internal: authenticate requests, validate input, enforce authorisation." },
+    { nodes: ["API", "DB", "Q"], text: "Inside: least-privilege credentials, encryption, parameterised queries. Don't assume 'internal' means 'safe'." },
+    { nodes: ["API", "PAY"], text: "Calls to third parties: verify certificates, sign and verify webhooks, minimise data shared." },
+  ]}
+/>
+
+### STRIDE
+
+| Threat | Violates | Example | Typical mitigations |
+|---|---|---|---|
+| **S**poofing | authentication | stolen session, forged webhook | MFA, signed tokens, HMAC webhooks |
+| **T**ampering | integrity | changing a price in a request, editing data in transit | server-side validation, TLS, signatures |
+| **R**epudiation | non-repudiation | "I never made that transfer" | audit logs, signed records |
+| **I**nformation disclosure | confidentiality | IDOR exposing other users' data, verbose errors | authorisation checks, encryption, minimal responses |
+| **D**enial of service | availability | request floods, expensive queries | rate limits, quotas, timeouts, autoscaling, CDN |
+| **E**levation of privilege | authorisation | user becomes admin via mass assignment | least privilege, allow-listed fields, RBAC checks |
+
+## Core principles
+
+<Diagram
+  caption="Defence in depth: several independent layers, so one failure isn't a breach."
+  chart={`flowchart LR
+    ATK["attack"] --> L1["network: WAF, rate limits"]
+    L1 --> L2["identity: strong auth, MFA"]
+    L2 --> L3["app: validation, authorisation"]
+    L3 --> L4["data: encryption, least-privilege DB user"]
+    L4 --> L5["detection: logs, alerts, audit"]
+    L5 --> ASSET[("asset")]`}
+  flow
+/>
+
+- **Least privilege**: every user, service and key gets only the access it needs, for only as long as needed.
+- **Defence in depth**: multiple layers; assume any one can fail.
+- **Secure by default**: closed unless explicitly opened (deny-by-default authorisation, private buckets, strict CORS).
+- **Minimise attack surface**: fewer endpoints, dependencies, open ports and stored data.
+- **Don't trust input**: validate everything crossing a trust boundary; encode on output.
+- **Fail securely**: errors deny access and reveal nothing internal.
+- **Zero trust**: authenticate and authorise every request, even inside the network.
+- **Don't roll your own crypto**: use vetted libraries and managed services.
+- **Keep it simple and observable**: you can't secure what you don't understand or can't see.
+
+## Security in the development lifecycle
+
+| Stage | Practice |
+|---|---|
+| Design | threat model new features and changes to trust boundaries |
+| Code | secure coding standards, code review, linters |
+| Build | SAST (static analysis), dependency scanning (SCA), secret scanning |
+| Test | DAST, penetration tests, abuse-case tests |
+| Deploy | IaC scanning, least-privilege roles, signed artefacts |
+| Run | logging, monitoring, alerting, incident response, patching |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Treating the internal network as trusted.
+- Security reviewed only right before launch.
+- Relying on a single control (just a firewall, just auth).
+- Collecting and keeping data you don't need.
+- Security through obscurity as the main defence.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you approach security when designing a new system?">
+
+I start with a lightweight threat model: what assets we protect — personal data, payments, accounts, availability — who might attack them, and a data-flow diagram showing trust boundaries, because every boundary crossing needs authentication, input validation and logging. I walk through STRIDE — spoofing, tampering, repudiation, information disclosure, denial of service, elevation of privilege — and pick concrete mitigations for each relevant threat. Then I apply the standing principles: least privilege for users, services and keys; defence in depth with several independent layers; deny by default; minimal attack surface and data collection; zero trust between services; and vetted libraries rather than custom crypto. Finally, I make sure we can detect and respond — audit logs, alerts and an incident process — and revisit the model when the design changes.
+
+<Fragment slot="deeper">
+
+- **What is the CIA triad?** Confidentiality, integrity, availability.
+- **What is a trust boundary?** A point where data passes between components with different trust levels.
+- **What does zero trust mean?** No implicit trust from network location; verify every request.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["CIA triad", "Confidentiality, integrity and availability."],
+  ["Threat model", "Structured analysis of what can go wrong and how to mitigate it."],
+  ["STRIDE", "Threat categories: spoofing, tampering, repudiation, disclosure, DoS, elevation."],
+  ["Trust boundary", "Where data or control crosses between differently trusted zones."],
+  ["Least privilege", "Granting only the minimum access necessary."],
+  ["Defence in depth", "Multiple independent layers of security controls."],
+]} />

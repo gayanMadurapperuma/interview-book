@@ -1,0 +1,168 @@
+---
+title: "Messaging models: queues, pub/sub and logs"
+part: Architecture
+order: 21
+level: core
+summary: Three ways to pass messages between services — work queues, publish/subscribe and replayable logs — and when each one fits.
+---
+
+Asynchronous messaging lets services communicate without waiting on each other. A producer hands a message to a **broker**; consumers process it when they can. That decouples availability (the consumer can be down for a while), absorbs traffic spikes, and lets one event trigger many reactions. There are three main models: **work queues** (each message processed by one worker), **publish/subscribe** (each message delivered to every interested subscriber) and **logs** (an ordered, replayable record that many consumers read at their own pace).
+
+<Analogy>
+  A **queue** is a ticket rail in a kitchen: each order ticket is taken by exactly one cook. **Pub/sub** is a radio broadcast: everyone tuned in hears every announcement, and if you weren't listening, you missed it. A **log** is a newspaper archive: every edition is kept in order, and each reader keeps a bookmark — new readers can start from last week, or from the very first issue.
+</Analogy>
+
+## Why it matters
+
+Almost every system design uses a queue or a log somewhere — for background jobs, fan-out, event-driven integration, or smoothing load. Interviewers ask which model to use, the difference between SQS and Kafka, ordering guarantees, and how to handle failures and duplicates.
+
+## The three models
+
+<Diagram
+  caption="Queue: one consumer per message. Pub/sub: every subscriber gets a copy. Log: messages persist; each consumer group tracks its own position."
+  chart={`flowchart TB
+    subgraph Q["Work queue (SQS, RabbitMQ queue)"]
+      direction LR
+      P1["producer"] --> QQ[["queue"]]
+      QQ --> W1["worker 1"]
+      QQ --> W2["worker 2"]
+    end
+    subgraph PS["Pub/sub (SNS, Redis pub/sub)"]
+      direction LR
+      P2["publisher"] --> T(("topic"))
+      T --> S1["subscriber A<br/>(copy)"]
+      T --> S2["subscriber B<br/>(copy)"]
+    end
+    subgraph LG["Log (Kafka, Kinesis)"]
+      direction LR
+      P3["producer"] --> L[["partitioned log<br/>retained for days"]]
+      L --> G1["consumer group: billing<br/>offset 1,204"]
+      L --> G2["consumer group: analytics<br/>offset 980"]
+    end`}
+/>
+
+| | Work queue | Pub/sub | Log |
+|---|---|---|---|
+| Each message goes to | one consumer | every subscriber | every consumer group (one member per partition) |
+| After processing | deleted | gone (unless subscriber queues persist) | **kept** until retention expires |
+| Replay | no | no | yes — rewind the offset |
+| Ordering | best-effort (FIFO variants exist) | none | **per partition** |
+| Scaling consumers | add workers | add subscribers | add partitions + consumers |
+| Examples | SQS, RabbitMQ, BullMQ | SNS, Google Pub/Sub, Redis pub/sub | Kafka, Kinesis, Redpanda, Pulsar |
+| Good for | background jobs, task distribution | fan-out notifications | event streaming, CDC, analytics, rebuilding state |
+
+A very common AWS pattern combines them: **SNS topic → one SQS queue per subscribing service** — pub/sub fan-out, with each service getting a durable queue of its own.
+
+## Work queues in detail
+
+<Diagram
+  sequence
+  caption="A work queue with visibility timeout: a message is hidden while a worker processes it, deleted on success, and reappears if the worker dies."
+  chart={`sequenceDiagram
+    participant P as Producer
+    participant Q as Queue
+    participant W as Worker
+    P->>Q: send(resize image 42)
+    W->>Q: receive
+    Q-->>W: message (hidden for 30 s)
+    W->>W: process
+    W->>Q: delete (ack)
+    Note over Q,W: if the worker crashes, the message reappears after 30 s`}
+  notes={[
+    "The producer enqueues a job and moves on.",
+    "A worker polls for work.",
+    "It receives the message, which becomes invisible to other workers for the visibility timeout.",
+    "The worker does the job.",
+    "It deletes the message to acknowledge success. Crash before this, and another worker gets it later — at-least-once delivery.",
+  ]}
+/>
+
+Essentials:
+
+- **Acknowledge after processing**, so failures lead to redelivery (and make handlers idempotent).
+- **Dead-letter queue (DLQ)**: after N failed attempts, move the message aside for inspection instead of retrying forever ("poison message").
+- **Visibility timeout** longer than the processing time (extend it for long jobs).
+- Scale workers on **queue depth** or age of the oldest message.
+
+## Logs in detail (Kafka)
+
+A Kafka **topic** is split into **partitions**. Each partition is an append-only, ordered log; each message gets an increasing **offset**. Messages with the same **key** go to the same partition, so they're ordered relative to each other.
+
+<Diagram
+  caption="A topic with three partitions. A consumer group splits partitions among its members; each member reads its partitions in order and commits offsets."
+  chart={`flowchart LR
+    PR["producer<br/>key = orderId"] --> P0[["partition 0: 0 1 2 3 4 …"]]
+    PR --> P1[["partition 1: 0 1 2 …"]]
+    PR --> P2[["partition 2: 0 1 2 3 …"]]
+    P0 --> C1["consumer 1"]
+    P1 --> C1
+    P2 --> C2["consumer 2"]`}
+  steps={[
+    { nodes: ["PR", "P0", "P1", "P2"], text: "The producer hashes each message's key to a partition. All events for order 1042 land in the same partition, in order." },
+    { nodes: ["P0", "P1", "C1"], text: "In one consumer group, each partition is assigned to exactly one member. Consumer 1 reads partitions 0 and 1." },
+    { nodes: ["P2", "C2"], text: "Consumer 2 reads partition 2. Max parallelism = number of partitions." },
+    { nodes: ["P0", "P1", "P2"], text: "Messages stay after being read. Another group (say, analytics) reads the same partitions independently, at its own offsets — or replays from the beginning." },
+  ]}
+/>
+
+Key points:
+
+- **Ordering is per partition**, not per topic. Choose keys so related events share a partition.
+- **Parallelism** is capped by the partition count; plan it ahead (increasing partitions changes key → partition mapping).
+- **Consumer lag** (latest offset − committed offset) is the key health metric.
+- **Retention** (days, or forever with compaction) allows replaying history, rebuilding read models, and adding new consumers that start from the past. **Log compaction** keeps only the latest message per key — a changelog of current state.
+
+## Choosing
+
+<Diagram
+  caption="Rules of thumb."
+  chart={`flowchart TB
+    Q{"What do you need?"} --> J["Distribute background jobs,<br/>each done once"] --> SQS["Work queue<br/>(SQS, RabbitMQ, BullMQ)"]
+    Q --> F["Notify several services<br/>of an event"] --> SNS["Pub/sub → queue per service<br/>(SNS + SQS)"]
+    Q --> S["High-volume event stream,<br/>ordering per key, replay,<br/>multiple independent readers"] --> K["Log (Kafka / Kinesis)"]
+    Q --> RT["Ephemeral real-time fan-out<br/>(presence, live updates)"] --> RP["Redis pub/sub,<br/>WebSocket gateway"]`}
+/>
+
+## Message design
+
+- Include a unique **message ID** (for dedup), an **event type**, a **schema version**, a timestamp and the entity **key**.
+- Prefer **business events** ("PaymentCaptured") over commands disguised as events.
+- Keep payloads reasonably small; put large blobs in object storage and send a reference.
+- Use a schema registry (Avro, Protobuf, JSON Schema) for evolution.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Non-idempotent consumers on at-least-once brokers.
+- No dead-letter queue — one bad message blocks a partition or retries forever.
+- Expecting global ordering across a Kafka topic.
+- Too few partitions to scale consumers later.
+- Using pub/sub without persistence for events that must not be lost.
+- Publishing events without an outbox.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What's the difference between a queue like SQS and a log like Kafka?">
+
+A work queue distributes messages so each is processed by one consumer and then deleted — ideal for background jobs — with visibility timeouts for redelivery and dead-letter queues for poison messages. A log like Kafka keeps messages in ordered, partitioned, append-only logs for a retention period; consumers track their own offsets, so several consumer groups read the same events independently and can replay history. Ordering is guaranteed within a partition, so I key messages by entity ID, and parallelism is bounded by the number of partitions. Pub/sub, like SNS, broadcasts each message to all current subscribers, and is often combined with a queue per subscriber for durability. All of these are typically at-least-once, so consumers must be idempotent.
+
+<Fragment slot="deeper">
+
+- **How do you keep events for one order in order in Kafka?** Use the order ID as the key so they share a partition.
+- **What is consumer lag?** How far a consumer group is behind the latest offset.
+- **What is a DLQ for?** Isolating messages that repeatedly fail so they don't block or loop.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Work queue", "Each message is consumed by one worker, then removed."],
+  ["Publish/subscribe", "Each message is delivered to all subscribers of a topic."],
+  ["Log", "A persistent, ordered, replayable sequence of messages."],
+  ["Partition", "An ordered shard of a log topic; the unit of ordering and parallelism."],
+  ["Consumer group", "Consumers sharing a topic's partitions, each partition read by one member."],
+  ["Dead-letter queue", "Where messages go after repeated processing failures."],
+]} />

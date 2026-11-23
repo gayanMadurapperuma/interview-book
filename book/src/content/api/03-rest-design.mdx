@@ -1,0 +1,173 @@
+---
+title: Designing REST APIs
+part: REST
+order: 3
+level: core
+summary: Resources, URLs, methods, status codes and error formats — the conventions that make a REST API predictable enough to use without reading the docs.
+---
+
+**REST** (Representational State Transfer) is an architectural style for APIs built on HTTP. You model your domain as **resources** — orders, customers, invoices — each with a URL, and you act on them with standard HTTP **methods**. Responses are **representations** (usually JSON) of those resources. A well-designed REST API is consistent and predictable: once you've seen two endpoints, you can guess the rest.
+
+<Analogy>
+  A well-organised filing system. Each drawer is a collection (`/orders`), each folder in it a resource (`/orders/1042`), and sub-folders hold related items (`/orders/1042/items`). You don't need a different procedure for every folder: "open", "add", "replace", "remove" work the same everywhere.
+</Analogy>
+
+## Why it matters
+
+"Design the REST API for X" is one of the most common interview tasks, and API reviews are part of daily work. Interviewers look for resource modelling, correct methods and status codes, consistent errors, and handling of real-world cases like actions, relationships and long-running operations.
+
+## Resources and URLs
+
+<Diagram
+  caption="URLs name things (nouns); methods say what to do with them."
+  chart={`flowchart LR
+    C["/customers<br/>collection"] --> CI["/customers/7<br/>item"]
+    CI --> CO["/customers/7/orders<br/>sub-collection"]
+    O["/orders"] --> OI["/orders/1042"]
+    OI --> OIT["/orders/1042/items"]
+    OI --> OA["/orders/1042/cancel<br/>action (POST)"]`}
+/>
+
+Conventions:
+
+- **Plural nouns** for collections: `/orders`, `/orders/{id}`.
+- **Nest** only for true ownership, and only one level deep: `/orders/{id}/items` ✓; `/customers/7/orders/1042/items/3/notes` ✗ — use `/orders/1042` directly.
+- **Lowercase, hyphenated** path segments: `/payment-methods`.
+- **No verbs** in paths for CRUD — the method is the verb. `POST /createOrder` ✗ → `POST /orders` ✓.
+- **Actions** that aren't CRUD: model as a sub-resource with POST (`POST /orders/1042/cancel`) or as a state change (`PATCH /orders/1042 {"status":"cancelled"}`). Either is fine — be consistent.
+- **Query parameters** for filtering, sorting, pagination, field selection: `GET /orders?status=paid&sort=-created_at&limit=20`.
+
+## Methods applied
+
+| Request | Meaning | Success |
+|---|---|---|
+| `GET /orders` | list (filtered, paginated) | 200 |
+| `POST /orders` | create; server assigns ID | 201 + `Location` |
+| `GET /orders/1042` | read one | 200 / 404 |
+| `PUT /orders/1042` | replace entirely (client sends full representation) | 200 / 204 |
+| `PATCH /orders/1042` | partial update | 200 |
+| `DELETE /orders/1042` | delete | 204 (repeat: 204 or 404) |
+
+**PATCH formats**: a simple **JSON Merge Patch** (`{"status":"paid"}` — send changed fields, `null` deletes) suits most APIs; **JSON Patch** (`[{"op":"replace","path":"/status","value":"paid"}]`) handles arrays and precise operations.
+
+## Representations
+
+```json
+{
+  "id": "ord_1042",
+  "status": "paid",
+  "customer": { "id": "cus_7", "name": "Ada Lovelace" },
+  "items": [{ "sku": "KB-1", "quantity": 1, "unitPrice": { "amount": 4999, "currency": "GBP" } }],
+  "total": { "amount": 4999, "currency": "GBP" },
+  "createdAt": "2026-11-23T10:15:00Z"
+}
+```
+
+- Consistent casing (camelCase or snake_case — pick one).
+- **ISO 8601 UTC** timestamps.
+- **Money** as integer minor units plus currency, never floats.
+- Prefixed or opaque IDs (`ord_…`) avoid leaking counts and confusion between types.
+- Return the created/updated resource so clients don't need a second request.
+- Expand related resources on request: `?expand=customer` instead of always embedding or always forcing extra calls.
+
+## Errors
+
+One consistent error format across the whole API. **RFC 9457 Problem Details** is a good standard:
+
+```http
+HTTP/1.1 422 Unprocessable Content
+Content-Type: application/problem+json
+
+{
+  "type": "https://api.example.com/errors/validation",
+  "title": "Validation failed",
+  "status": 422,
+  "detail": "2 fields are invalid",
+  "errors": [
+    { "field": "items[0].quantity", "code": "min", "message": "must be at least 1" },
+    { "field": "email", "code": "format", "message": "must be a valid email" }
+  ],
+  "requestId": "req_8f2a…"
+}
+```
+
+<Diagram
+  caption="Choosing a status code for an error."
+  chart={`flowchart TB
+    E{"what went wrong?"} --> A{"authenticated?"}
+    A -- no --> S401["401 Unauthorized"]
+    A -- yes --> P{"allowed?"}
+    P -- no --> S403["403 Forbidden<br/>(or 404 to hide existence)"]
+    P -- yes --> X{"resource exists?"}
+    X -- no --> S404["404 Not Found"]
+    X -- yes --> V{"input valid?"}
+    V -- "malformed" --> S400["400 Bad Request"]
+    V -- "fails rules" --> S422["422 Unprocessable"]
+    V -- yes --> CF{"conflicts with<br/>current state?"}
+    CF -- yes --> S409["409 Conflict / 412"]
+    CF -- no --> S500["our bug → 500"]`}
+/>
+
+Never leak stack traces or SQL; include a request ID so support can find the logs.
+
+## Relationships and HATEOAS
+
+**HATEOAS** (hypermedia as the engine of application state) means responses include links to related resources and allowed actions:
+
+```json
+{ "id": "ord_1042", "status": "pending",
+  "_links": { "self": "/orders/ord_1042", "cancel": "/orders/ord_1042/cancel", "customer": "/customers/cus_7" } }
+```
+
+It's the top level of the **Richardson Maturity Model** (0: one endpoint, RPC-style; 1: resources; 2: HTTP methods and status codes; 3: hypermedia). Most real-world "REST" APIs sit at level 2, which is fine — but links for pagination and related resources are genuinely useful.
+
+## Designing from use cases
+
+<Diagram
+  caption="Work outward from what clients need, not inward from database tables."
+  chart={`flowchart LR
+    UC["Use cases<br/>'customer places order',<br/>'admin refunds order'"] --> RES["Resources & relationships"]
+    RES --> EP["Endpoints + methods"]
+    EP --> SCH["Request/response schemas<br/>(OpenAPI)"]
+    SCH --> REV["Review: consistency,<br/>errors, security, evolution"]`}
+  flow
+/>
+
+Exposing database tables 1:1 leaks internal structure and couples clients to your schema. Design the API as a product.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Verbs in URLs, or a different style per endpoint.
+- Deep nesting of URLs.
+- Using GET to change state, or POST for everything.
+- `200 OK` with error bodies; generic `500` for validation errors.
+- Exposing internal IDs, column names or stack traces.
+- Floats for money; local times without zones.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Design a REST API for an order management system.">
+
+I'd model resources from the use cases: customers, orders, order items, payments and refunds. Collections use plural nouns — `/orders` — with `POST /orders` to create, returning 201 with a Location header, `GET /orders/{id}` to read, `PATCH` for partial updates and `DELETE` where it makes sense; non-CRUD actions like cancelling become `POST /orders/{id}/cancel`. Lists support filtering, sorting and cursor pagination through query parameters, and related data can be expanded on request. Representations use consistent casing, ISO timestamps in UTC and money as integer minor units with a currency. Errors follow one format, such as RFC 9457 problem details, with precise status codes — 400, 401, 403, 404, 409, 422, 429 — and a request ID, never internals. Creates accept an idempotency key, and the contract is documented in OpenAPI.
+
+<Fragment slot="deeper">
+
+- **PUT vs PATCH?** Full replacement (idempotent) vs partial update.
+- **How do you model actions?** Sub-resource POST (`/cancel`) or a state change via PATCH — consistently.
+- **What is the Richardson Maturity Model?** Levels from RPC to resources, HTTP verbs, and hypermedia.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Resource", "A named domain entity with a URL."],
+  ["Representation", "The serialized form (usually JSON) of a resource."],
+  ["Collection", "A resource containing other resources, e.g. `/orders`."],
+  ["Problem Details", "RFC 9457 standard JSON format for HTTP API errors."],
+  ["HATEOAS", "Including links to related resources and actions in responses."],
+  ["Richardson Maturity Model", "Levels of REST adoption: resources, verbs, hypermedia."],
+]} />

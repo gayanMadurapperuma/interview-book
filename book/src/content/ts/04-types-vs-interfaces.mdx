@@ -1,0 +1,153 @@
+---
+title: Type aliases versus interfaces
+part: Foundations
+order: 4
+level: foundation
+summary: Two ways to name a shape. They overlap almost entirely — the differences that remain, and a simple rule for choosing.
+---
+
+TypeScript gives you two ways to give a name to a type. An **`interface`** describes the shape of an object (or class). A **`type` alias** gives a name to **any** type — object shapes, but also unions, tuples, primitives, functions and computed types. For plain object shapes they're nearly interchangeable; the differences are about **extension**, **declaration merging** and **what each can express**.
+
+<Analogy>
+  An interface is a job description: it lists the responsibilities of a role, can be extended into senior versions, and HR can add clauses to it later (merging). A type alias is a label you can stick on anything — a job description, but also "Monday or Tuesday", "a pair of shoes", or "whatever is left after removing the salary from this contract".
+</Analogy>
+
+## Why it matters
+
+"Type or interface?" is a very common interview question. A confident, accurate answer — plus a consistent team convention — matters more than which one you pick.
+
+## Side by side
+
+```ts
+interface UserI {
+  id: string;
+  name: string;
+}
+
+type UserT = {
+  id: string;
+  name: string;
+};
+
+// both work the same way here
+const a: UserI = { id: '1', name: 'Ada' };
+const b: UserT = { id: '1', name: 'Ada' };
+```
+
+| | `interface` | `type` |
+|---|---|---|
+| Object shapes | ✓ | ✓ |
+| Unions (`A \| B`) | ✗ | ✓ |
+| Tuples, primitives, function types | function types only (call signatures) | ✓ |
+| Mapped and conditional types | ✗ | ✓ |
+| Extending | `extends` | intersection `&` |
+| Declaration merging | ✓ (same name declared twice merges) | ✗ (duplicate name is an error) |
+| Classes can `implements` | ✓ | ✓ (if it's an object type) |
+| Error messages | shows the interface name | may expand the full structure |
+
+## Extending
+
+```ts
+interface Animal { name: string }
+interface Dog extends Animal { breed: string }
+
+type AnimalT = { name: string };
+type DogT = AnimalT & { breed: string };
+```
+
+<Diagram
+  caption="Interfaces extend with extends; type aliases combine with intersections. A conflicting property is reported clearly by extends, while an intersection silently produces never."
+  chart={`flowchart TB
+    subgraph IF["interface"]
+      A1["Animal { name }"] -- "extends" --> D1["Dog { name, breed }"]
+    end
+    subgraph TY["type"]
+      A2["AnimalT { name }"] -- "&" --> D2["DogT = AnimalT & { breed }"]
+    end
+    C["conflict: { id: string } vs { id: number }"] --> E1["extends → compile error at declaration ✓"]
+    C --> E2["& → id: never (error appears later, confusingly)"]`}
+/>
+
+`extends` checks compatibility up front, and the compiler caches interface relationships, which can make type-checking faster in very large codebases. Intersections are more flexible (you can intersect anything) but conflicts show up later and less clearly.
+
+## Declaration merging
+
+Two `interface` declarations with the same name merge into one. This is how libraries let you **augment** their types:
+
+```ts
+// add a property to Express's Request type
+declare global {
+  namespace Express {
+    interface Request {
+      user?: { id: string; role: 'admin' | 'member' };
+    }
+  }
+}
+
+// add a custom environment variable type
+declare global {
+  namespace NodeJS {
+    interface ProcessEnv { DATABASE_URL: string }
+  }
+}
+```
+
+That's powerful for augmentation, and occasionally surprising if you accidentally reuse a name.
+
+## What only `type` can do
+
+```ts
+type Status = 'pending' | 'paid' | 'refunded';                 // union of literals
+type Point = [x: number, y: number];                            // tuple
+type Handler = (req: Request) => Promise<Response>;             // function type
+type ReadonlyUser = Readonly<User>;                             // utility type result
+type Keys = keyof User;                                         // computed
+type Nullable<T> = { [K in keyof T]: T[K] | null };             // mapped type
+type ElementOf<T> = T extends (infer U)[] ? U : never;          // conditional type
+```
+
+## A practical rule
+
+<Diagram
+  caption="A simple convention many teams use."
+  chart={`flowchart TB
+    Q{"What are you naming?"} --> O["object shape / class contract<br/>(especially public or extendable)"] --> I["interface"]
+    Q --> U["union, tuple, function type,<br/>primitive alias, mapped/conditional"] --> T["type"]
+    Q --> AUG["augmenting a library type"] --> I2["interface (declaration merging)"]`}
+/>
+
+Many teams simply say: **`interface` for object shapes, `type` for everything else**. Others use `type` everywhere for consistency. Both are fine; consistency within a codebase is what matters. Both disappear at runtime.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Believing interfaces exist at runtime (`x instanceof MyInterface` doesn't work).
+- Accidental declaration merging from reusing a name.
+- Deep chains of intersections producing `never` from conflicting properties.
+- Arguing about it in code review instead of agreeing on a convention.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What's the difference between a type alias and an interface?">
+
+For object shapes they're almost interchangeable. An interface describes an object or class contract, extends other interfaces with `extends` — which reports conflicts at the declaration — and supports declaration merging, so redeclaring the same name adds members; that's how you augment library types like Express's Request. A type alias can name any type: unions, tuples, primitives, function types, and computed mapped or conditional types, and it combines object types with intersections rather than `extends`. Neither exists at runtime. My convention is interfaces for object shapes and public contracts, type aliases for unions and computed types — and above all, consistency within the codebase.
+
+<Fragment slot="deeper">
+
+- **What is declaration merging?** Multiple declarations of the same interface combining into one.
+- **Can a class implement a type alias?** Yes, if it's an object type (not a union).
+- **Why might interfaces type-check faster?** Their relationships are cached by name.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Interface", "Named object/class shape; extendable and mergeable."],
+  ["Type alias", "A name for any type, including unions and computed types."],
+  ["Declaration merging", "Same-named interfaces combining into one."],
+  ["Module augmentation", "Adding to a library's types via merging."],
+  ["Intersection", "Combining types with `&` so a value must satisfy all."],
+]} />

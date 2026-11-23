@@ -1,0 +1,160 @@
+---
+title: "Scaling and reliability: resources, probes, autoscaling, disruption"
+part: Running in production
+order: 7
+level: advanced
+summary: Requests and limits, liveness/readiness/startup probes, horizontal and cluster autoscaling, PodDisruptionBudgets and spreading pods across zones.
+---
+
+Kubernetes can keep a service healthy and right-sized automatically — but only if you tell it what the service needs and how to tell when it's healthy. **Resource requests and limits** drive scheduling and protect neighbours. **Probes** tell Kubernetes when to send traffic and when to restart. **Autoscalers** add pods (HPA) and nodes (Cluster Autoscaler, Karpenter) as load changes. **PodDisruptionBudgets** and **topology spread** keep enough replicas alive through maintenance and zone failures.
+
+<Analogy>
+  Running a hospital ward. Each patient's chart says the minimum care they need (requests) and the maximum they're allowed (limits). Nurses check vital signs regularly (probes) and only admit visitors when a patient is ready. When it gets busy, more nurses are called in (HPA), and if the ward is full, another ward is opened (cluster autoscaler). During renovations, no more than one bed is closed at a time (PodDisruptionBudget).
+</Analogy>
+
+## Why it matters
+
+Most production incidents on Kubernetes come from missing or wrong settings here: pods OOMKilled, CPU throttling, restarts loops from bad liveness probes, deploys dropping traffic, or all replicas evicted at once during node upgrades. Interviewers ask about exactly these.
+
+## Requests and limits
+
+```yaml
+resources:
+  requests: { cpu: "250m", memory: "256Mi" }   # guaranteed; used for scheduling
+  limits:   { memory: "512Mi" }                 # hard cap
+```
+
+<Diagram
+  caption="Requests reserve capacity for scheduling; limits cap usage. CPU over the limit is throttled; memory over the limit is killed."
+  chart={`flowchart TB
+    R["requests<br/>scheduler only places the pod on a node<br/>with this much unreserved capacity"]
+    L["limits<br/>enforced by cgroups at runtime"]
+    L --> CPU["CPU over limit → throttled<br/>(slower, latency spikes)"]
+    L --> MEM["memory over limit → OOMKilled<br/>(container restarted)"]
+    R --> Q["QoS class:<br/>Guaranteed (req = lim) · Burstable · BestEffort (none)"]`}
+/>
+
+Guidance:
+
+- **Always set requests** — without them the scheduler packs blindly and the pod is first to be evicted.
+- **Memory limit**: set it (≈ requests to somewhat above), so a leak kills one pod rather than the node.
+- **CPU limits**: many teams omit them for latency-sensitive services, because throttling causes tail-latency spikes; rely on requests for fair sharing.
+- **Node.js**: the V8 heap doesn't know the container's limit unless told — set `--max-old-space-size` to ~75% of the memory limit (or rely on newer Node versions' cgroup awareness), and remember one Node process uses about one core for JavaScript.
+
+## Probes
+
+| Probe | Question | On failure | Typical check |
+|---|---|---|---|
+| **Startup** | has the app finished starting? | keep waiting (other probes paused); restart after the deadline | `/health/startup` |
+| **Readiness** | should it receive traffic now? | removed from Service endpoints (no restart) | `/health/ready` — dependencies it needs reachable, not shutting down |
+| **Liveness** | is it stuck and needs restarting? | container restarted | `/health/live` — process responsive (event loop not blocked) |
+
+<Diagram
+  caption="Probes over a pod's life: startup gates the others; readiness controls traffic; liveness restarts a stuck process."
+  chart={`flowchart LR
+    ST["container starts"] --> SP{"startup probe<br/>passing?"}
+    SP -- "not yet" --> SP
+    SP -- "yes" --> RP{"readiness probe"}
+    RP -- "ready" --> TR["in Service endpoints:<br/>receives traffic"]
+    RP -- "not ready" --> NT["removed from endpoints<br/>(e.g. overloaded, draining)"]
+    TR --> LP{"liveness probe"}
+    LP -- "failing" --> RS["restart container"]`}
+  steps={[
+    { nodes: ["ST", "SP"], text: "A slow-starting app gets time to boot: liveness and readiness don't run until the startup probe succeeds." },
+    { nodes: ["SP", "RP", "TR"], text: "Readiness decides whether the pod is in the Service's endpoints. During a rolling update, new pods only get traffic once ready." },
+    { nodes: ["RP", "NT"], text: "If readiness fails — say, during shutdown or temporary overload — traffic stops but the pod isn't killed." },
+    { nodes: ["TR", "LP", "RS"], text: "Liveness detects a truly stuck process and restarts it." },
+  ]}
+/>
+
+<Callout type="pitfall" title="Liveness probes that check dependencies">
+  If liveness checks the database and the database blips, Kubernetes restarts **every** pod at once — turning a small outage into a big one. Liveness should only check the process itself; put dependency checks (carefully) in readiness.
+</Callout>
+
+## Autoscaling
+
+<Diagram
+  caption="Three autoscalers at different levels."
+  chart={`flowchart TB
+    HPA["HorizontalPodAutoscaler<br/>more/fewer pods<br/>on CPU, memory, custom metrics"] --> PODS["pods"]
+    KEDA["KEDA<br/>event-driven: queue length,<br/>Kafka lag, scale to zero"] --> PODS
+    VPA["VerticalPodAutoscaler<br/>recommends / sets requests"] --> PODS
+    PODS -- "pending, no room" --> CA["Cluster Autoscaler / Karpenter<br/>add or remove nodes"]`}
+/>
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: orders-api }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: orders-api }
+  minReplicas: 3
+  maxReplicas: 30
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 65 } }
+  behavior:
+    scaleDown: { stabilizationWindowSeconds: 300 }    # avoid flapping
+```
+
+- HPA percentages are relative to **requests** — so requests must be realistic.
+- For queue workers, scale on **queue depth/lag** (KEDA), not CPU.
+- New pods need time (image pull, startup, warm-up); keep headroom and a sensible minimum.
+- **Cluster autoscaling** adds nodes when pods can't be scheduled; **Karpenter** (AWS) picks right-sized instances quickly.
+
+## Surviving disruptions
+
+- **PodDisruptionBudget**: limits how many replicas can be down due to *voluntary* disruptions (node drains, upgrades).
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: orders-api }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app: orders-api } }
+```
+
+- **Topology spread constraints** / anti-affinity: spread replicas across nodes and **availability zones**, so one failure doesn't take them all.
+- **Graceful termination**: on deletion a pod is removed from endpoints and sent SIGTERM; `terminationGracePeriodSeconds` (default 30) later, SIGKILL. A short `preStop` sleep covers the race between endpoint removal and SIGTERM (see Node *Graceful shutdown*).
+- **Priority classes** decide which pods are evicted first under pressure.
+
+## Namespaced guardrails
+
+`ResourceQuota` (total CPU/memory/objects per namespace) and `LimitRange` (default requests/limits) keep one team from starving others.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- No requests (bad scheduling, early eviction) or requests far from reality (HPA misfires).
+- CPU limits causing throttling on latency-sensitive services.
+- Node heap size not matched to the memory limit → OOMKilled.
+- Liveness probes that depend on databases; no startup probe for slow starters.
+- Single replica, or all replicas on one node/zone; no PDB.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you make a service reliable and autoscaled on Kubernetes?">
+
+I set realistic resource requests so the scheduler can place pods properly and the HPA's percentages mean something, plus a memory limit — and for Node, a heap size matched to it — while usually leaving CPU unlimited to avoid throttling. I define three probes: a startup probe for slow boots, a readiness probe that controls whether the pod is in the Service's endpoints, and a liveness probe that only checks the process itself, never shared dependencies, so a database blip can't restart everything. The HPA scales between a minimum of three and a maximum on CPU or a custom metric, or KEDA on queue lag for workers, with scale-down stabilisation; Karpenter or the cluster autoscaler adds nodes. Replicas are spread across zones with topology constraints, a PodDisruptionBudget keeps enough running during node upgrades, and graceful termination with a short preStop delay makes rollouts lossless.
+
+<Fragment slot="deeper">
+
+- **CPU limit vs memory limit effects?** Throttling vs OOMKill.
+- **Readiness vs liveness?** Traffic routing vs restarts.
+- **What does a PDB protect against?** Voluntary disruptions like node drains taking down too many replicas.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Requests / limits", "Guaranteed resources for scheduling / hard runtime caps."],
+  ["OOMKilled", "Container killed for exceeding its memory limit."],
+  ["Readiness / liveness / startup probe", "Health checks for traffic, restarts and slow starts."],
+  ["HPA", "Horizontal Pod Autoscaler: adjusts replica count by metrics."],
+  ["Cluster autoscaler / Karpenter", "Adds and removes nodes based on unschedulable pods."],
+  ["PodDisruptionBudget", "Minimum availability during voluntary disruptions."],
+]} />

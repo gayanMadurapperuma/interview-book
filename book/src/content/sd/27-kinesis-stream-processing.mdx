@@ -1,0 +1,149 @@
+---
+title: Kinesis and stream processing
+part: Core components
+order: 27
+level: advanced
+summary: Managed data streams on AWS, and the ideas behind processing unbounded data in real time — windows, state, event time and watermarks.
+---
+
+**Amazon Kinesis Data Streams** is AWS's managed, Kafka-like streaming service: producers write records into a **stream** made of **shards**; records are ordered within a shard and retained (24 hours by default, up to a year) so several consumers can read and replay. **Kinesis Data Firehose** (now Amazon Data Firehose) delivers streams into S3, Redshift or OpenSearch with batching and format conversion and no code. On top of streams sits **stream processing** — computing results continuously over never-ending data with tools like Apache Flink, Kafka Streams or Spark Structured Streaming.
+
+<Analogy>
+  A batch job is reading yesterday's newspaper and summarising it. Stream processing is a sports commentator: events keep arriving, the commentator keeps a running tally (state), talks about "the last five minutes" (windows), and has to decide how long to wait for a late replay before calling the score final (watermarks).
+</Analogy>
+
+## Why it matters
+
+Real-time analytics, fraud detection, live dashboards, IoT, clickstreams and log pipelines all rely on streams. Interviewers ask Kinesis vs Kafka vs SQS, how shards scale, and stream-processing concepts like windowing and late data.
+
+## Kinesis Data Streams
+
+<Diagram
+  caption="A stream with shards. The partition key picks the shard; consumers read each shard in order and checkpoint their position."
+  chart={`flowchart LR
+    P["producers<br/>(partition key = deviceId)"] --> S1[["shard 1<br/>1 MB/s in, 2 MB/s out"]]
+    P --> S2[["shard 2"]]
+    P --> S3[["shard 3"]]
+    S1 --> C1["consumer app (KCL)<br/>checkpoints in DynamoDB"]
+    S2 --> C1
+    S3 --> C1
+    S1 --> L["Lambda"]
+    S1 --> FH["Firehose → S3 (Parquet)"]`}
+/>
+
+| Concept | Kinesis | Kafka equivalent |
+|---|---|---|
+| Stream | stream | topic |
+| Shard | 1 MB/s or 1,000 records/s write, 2 MB/s read | partition |
+| Partition key | hashed to a shard | record key |
+| Sequence number | position in shard | offset |
+| Checkpoint | stored by KCL (DynamoDB) or Lambda | committed offset |
+| Retention | 24 h – 365 days | configurable |
+
+- **Capacity**: provisioned (you choose shard count, resharding by split/merge) or **on-demand** (scales automatically).
+- **Fan-out**: shared read throughput is 2 MB/s per shard across all consumers; **enhanced fan-out** gives each consumer its own 2 MB/s with push delivery.
+- **Hot shards**: a skewed partition key overloads one shard → `ProvisionedThroughputExceeded`. Use high-cardinality keys.
+- **Lambda** consumers process per shard in order; configure batch size, parallelization factor, bisect-on-error and a failure destination.
+
+## Kinesis vs Kafka vs SQS
+
+| | Kinesis Data Streams | Kafka / MSK | SQS |
+|---|---|---|---|
+| Model | sharded replayable log | partitioned replayable log | queue |
+| Ops | fully managed, serverless option | self-run or MSK (still cluster-shaped) | fully managed |
+| Throughput unit | shard (1 MB/s in) | partition (much higher) | effectively unlimited |
+| Ecosystem | AWS-native (Lambda, Firehose, Flink) | huge (Connect, Streams, Schema Registry) | AWS-native |
+| Choose when | AWS-only, moderate scale, minimal ops | high throughput, portability, rich ecosystem | jobs and buffering, no replay |
+
+## Stream processing concepts
+
+### Windows
+
+Aggregations over infinite streams need **windows**:
+
+<Diagram
+  caption="Three common window types over the same stream of events."
+  chart={`flowchart TB
+    TU["Tumbling: fixed, non-overlapping<br/>[00:00–00:05) [00:05–00:10) …<br/>e.g. orders per 5 minutes"]
+    HO["Hopping / sliding: fixed size, overlapping<br/>10-minute windows every 1 minute<br/>e.g. moving averages"]
+    SE["Session: gaps of inactivity close the window<br/>e.g. a user's browsing session (30 min gap)"]`}
+/>
+
+### Event time vs processing time
+
+- **Processing time**: when the system sees the event. Easy, but results change if processing is delayed.
+- **Event time**: when the event actually happened (a timestamp in the event). Correct, but events arrive **late** and **out of order** (mobile devices offline, network delays).
+
+### Watermarks and late data
+
+A **watermark** is the processor's estimate that "all events up to time T have probably arrived". When the watermark passes a window's end, the window's result is emitted. Late events after that can be dropped, sent to a side output, or used to update the result (allowed lateness).
+
+<Diagram
+  caption="Events arrive out of order. The watermark trails the latest event time by an allowed delay; a window closes when the watermark passes its end."
+  chart={`flowchart LR
+    E1["event t=10:01"] --> W1["window 10:00–10:05<br/>collecting…"]
+    E2["event t=10:04"] --> W1
+    E3["event t=10:07"] --> W2["window 10:05–10:10"]
+    WM["watermark reaches 10:05<br/>(latest seen − 2 min)"] --> EMIT["emit 10:00–10:05 result"]
+    LATE["late event t=10:03<br/>arrives after"] -.-> SIDE["side output / update"]`}
+  steps={[
+    { nodes: ["E1", "E2", "W1"], text: "Events with event times 10:01 and 10:04 go into the 10:00–10:05 window." },
+    { nodes: ["E3", "W2"], text: "An event at 10:07 belongs to the next window." },
+    { nodes: ["WM", "EMIT"], text: "Once the watermark (say, latest event time minus 2 minutes) passes 10:05, the first window's result is emitted." },
+    { nodes: ["LATE", "SIDE"], text: "A straggler from 10:03 arriving later is handled by policy: dropped, routed aside, or used to correct the result." },
+  ]}
+/>
+
+### State and exactly-once
+
+Stream processors keep **state** (counts, joins, sessions) in local stores, periodically **checkpointed** to durable storage (Flink snapshots to S3). On failure they restore the last checkpoint and replay the stream from the matching offsets — together giving **exactly-once state** updates. Sinks must be idempotent or transactional for end-to-end exactly-once.
+
+## A typical real-time pipeline
+
+<Diagram
+  caption="Clickstream analytics on AWS: ingest, process in real time, store for history, serve dashboards."
+  chart={`flowchart LR
+    APP["web / mobile apps"] --> API["ingest API / Kinesis Agent"]
+    API --> KDS[["Kinesis Data Streams"]]
+    KDS --> FL["Managed Flink<br/>windows, dedup, enrich"]
+    FL --> DDB[("DynamoDB / Redis<br/>live counters")]
+    FL --> OS[("OpenSearch<br/>live dashboards")]
+    KDS --> FH["Firehose"] --> S3[("S3 data lake (Parquet)")]
+    S3 --> ATH["Athena / warehouse"]`}
+/>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Low-cardinality partition keys → hot shards.
+- Using processing time when results must reflect when events happened.
+- No plan for late or duplicate events.
+- Lambda consumers that fail a whole batch forever, blocking the shard ("poison pill") — use bisect-on-error and failure destinations.
+- Treating a stream as a database to query ad hoc.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you build real-time analytics on a stream of events?">
+
+I'd ingest events into a partitioned, replayable stream — Kinesis Data Streams on AWS, or Kafka — keyed by a high-cardinality ID so shards stay balanced and per-entity order is kept. A stream processor such as Flink computes results continuously using event time, not arrival time, with tumbling or sliding windows and watermarks that decide when a window is complete while tolerating some lateness; very late events go to a side output. It keeps state in local stores checkpointed to S3, so on failure it restores and replays for exactly-once state. Results go to a low-latency store for dashboards, and in parallel Firehose writes the raw stream to S3 as Parquet for historical queries. Consumers and sinks are idempotent because delivery is at-least-once.
+
+<Fragment slot="deeper">
+
+- **Shard limits?** About 1 MB/s or 1,000 records/s in, 2 MB/s out per shard (shared unless enhanced fan-out).
+- **Event time vs processing time?** When it happened vs when we saw it; event time needs watermarks.
+- **What is a watermark?** A progress marker asserting no earlier events are expected (within tolerance).
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Shard", "Kinesis unit of capacity and ordering."],
+  ["Firehose", "Managed delivery of streams to S3, Redshift or OpenSearch."],
+  ["Window", "A bounded slice of a stream used for aggregation."],
+  ["Event time", "When an event actually occurred, carried in the event."],
+  ["Watermark", "Estimate of event-time progress used to close windows."],
+  ["Checkpoint", "Durable snapshot of processing state and stream positions."],
+]} />

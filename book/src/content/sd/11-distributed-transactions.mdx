@@ -1,0 +1,146 @@
+---
+title: "Distributed transactions: two-phase commit and sagas"
+part: Guarantees & data flow
+order: 11
+level: advanced
+summary: When one business operation spans several services or databases, there's no single transaction to wrap it in. Two-phase commit locks everything; sagas undo things instead.
+---
+
+Placing an order might involve the order service, the payment service and the inventory service — each with its own database. In a single database you'd wrap the whole thing in one ACID transaction. Across services, you can't. Two approaches exist: **two-phase commit (2PC)**, which coordinates all participants to commit atomically, and **sagas**, which run a sequence of local transactions and, if one fails, run **compensating** actions to undo the earlier steps.
+
+<Analogy>
+  Booking a holiday: flight, hotel and car. Two-phase commit is a travel agent who puts all three on hold, and only when every provider confirms "held" says "book them all" — but while waiting, everything is frozen. A saga is booking the flight, then the hotel, then the car; if the car is unavailable, you cancel the hotel and the flight (compensations), accepting that for a while you held a flight you didn't end up using.
+</Analogy>
+
+## Why it matters
+
+Microservice designs constantly raise "how do you keep data consistent across services?" Interviewers expect sagas (choreography vs orchestration), compensation design, and a clear explanation of why 2PC is rarely used between services.
+
+## Two-phase commit
+
+A **coordinator** asks every participant to **prepare** (do the work, hold locks, promise it can commit). If all vote yes, it tells everyone to **commit**; if any votes no, everyone **aborts**.
+
+<Diagram
+  sequence
+  caption="Two-phase commit. Participants hold locks from prepare until the coordinator's decision arrives."
+  chart={`sequenceDiagram
+    participant Co as Coordinator
+    participant A as Orders DB
+    participant B as Payments DB
+    Co->>A: PREPARE
+    Co->>B: PREPARE
+    A-->>Co: YES (locked, ready)
+    B-->>Co: YES (locked, ready)
+    Co->>A: COMMIT
+    Co->>B: COMMIT`}
+  notes={[
+    "Phase 1: the coordinator asks the orders database to prepare.",
+    "And the payments database.",
+    "Orders votes yes — it has written everything durably and holds its locks.",
+    "Payments votes yes.",
+    "Phase 2: all yes, so commit. If any had said no, everyone would roll back.",
+    "Commit on payments. If the coordinator crashed before sending this, participants would stay locked, unsure — 2PC's blocking problem.",
+  ]}
+/>
+
+Problems with 2PC across services:
+
+- **Blocking**: if the coordinator dies after "prepare", participants hold locks indefinitely, unable to decide alone.
+- **Latency and availability**: every participant must be up and fast; the slowest sets the pace, and any outage blocks the whole operation.
+- **Support**: needs XA-capable resources; message brokers, many NoSQL stores and third-party APIs don't participate.
+
+2PC is used inside databases (e.g. distributed SQL systems coordinating their shards, using consensus to make the coordinator fault-tolerant) — but rarely between independent services.
+
+## Sagas
+
+A **saga** is a sequence of local transactions T1, T2, … Tn, each in one service. Each step has a **compensating transaction** C1, C2, … that semantically undoes it. If step Tk fails, run Ck-1 … C1.
+
+<Diagram
+  caption="An order saga. If payment fails, the reserved stock is released. Each box is a local ACID transaction in one service."
+  chart={`flowchart LR
+    T1["T1 · create order<br/>(PENDING)"] --> T2["T2 · reserve stock"]
+    T2 --> T3["T3 · charge payment"]
+    T3 -- "ok" --> T4["T4 · confirm order<br/>(CONFIRMED)"]
+    T3 -- "declined" --> C2["C2 · release stock"]
+    C2 --> C1["C1 · cancel order<br/>(CANCELLED)"]`}
+  steps={[
+    { nodes: ["T1"], text: "The order service creates the order in a PENDING state — visible as 'in progress', not yet final." },
+    { nodes: ["T1", "T2"], text: "Inventory reserves stock in its own database." },
+    { nodes: ["T2", "T3"], text: "Payments tries to charge the card." },
+    { nodes: ["T3", "T4"], text: "Success: the order is confirmed. The saga is complete." },
+    { nodes: ["T3", "C2", "C1"], text: "Failure: compensations run in reverse — release the stock, then cancel the order. The system ends consistent, just via a different path." },
+  ]}
+/>
+
+### Choreography versus orchestration
+
+| | Choreography | Orchestration |
+|---|---|---|
+| How | each service reacts to events and emits its own (`OrderCreated` → inventory reserves → `StockReserved` → payment charges…) | a central orchestrator tells each service what to do next and tracks state |
+| Pros | loose coupling, no central component | the flow is explicit in one place; easier to change, monitor and debug |
+| Cons | flow is implicit, spread across services; hard to see and evolve | the orchestrator is another component (can be built on a workflow engine) |
+| Tools | events over Kafka/SNS + outbox | Temporal, AWS Step Functions, Camunda, or a state machine in the order service |
+
+For more than three or four steps, orchestration is usually easier to live with.
+
+### Designing compensations
+
+- Compensations are **semantic**, not rollbacks: you can't un-send an email, but you can send a "your order was cancelled" email; you can't un-charge, but you can refund.
+- Steps and compensations must be **idempotent** (messages will be retried).
+- Order steps so the hardest-to-undo comes **last** (charge the card after reserving stock, ship only after payment).
+- Some steps are **pivot** points: after them the saga only moves forward (retry until success) rather than compensating.
+
+### Isolation: sagas are not ACID
+
+Other requests can see intermediate states (an order PENDING, stock reserved for an order that will be cancelled). Counter-measures:
+
+- **Semantic locks**: explicit states like PENDING that other operations respect.
+- **Commutative updates** where possible.
+- **Re-reading** values before acting rather than trusting earlier reads.
+
+## Choosing
+
+<Diagram
+  caption="Most cross-service consistency problems are best solved by avoiding them, then by sagas."
+  chart={`flowchart TB
+    Q{"Can the data live in<br/>one service / database?"} -- yes --> L["Local ACID transaction<br/>(simplest, strongest)"]
+    Q -- no --> R{"Do all participants support<br/>XA and is blocking acceptable?"}
+    R -- "rarely yes" --> TPC["2PC"]
+    R -- no --> S["Saga + outbox +<br/>idempotent steps"]`}
+/>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Splitting data that must change atomically into separate services in the first place.
+- Calling three services synchronously and hoping none fails.
+- Sagas without idempotent steps, or compensations that can themselves fail silently.
+- Publishing saga events without an outbox (dual-write problem).
+- Ignoring intermediate states visible to users.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you keep data consistent when an operation spans several microservices?">
+
+First, I check whether the boundary is right — if two pieces of data must always change together, they may belong in one service with a local transaction. If not, two-phase commit is possible in theory, but it blocks on coordinator failure, requires every participant to be available and support it, and doesn't work with brokers or third-party APIs, so I'd use a saga: a sequence of local transactions, each publishing an event or driven by an orchestrator, with a compensating action for each step — release stock, refund payment, cancel the order. Steps must be idempotent since messages are retried, events are published via an outbox, the riskiest irreversible step goes last, and intermediate states like PENDING are explicit because sagas aren't isolated. For anything beyond a few steps I prefer orchestration with a workflow engine like Temporal or Step Functions.
+
+<Fragment slot="deeper">
+
+- **Why does 2PC block?** Prepared participants can't commit or abort alone if the coordinator disappears.
+- **Choreography vs orchestration?** Event-driven reactions vs a central coordinator — implicit vs explicit flow.
+- **What is a compensating transaction?** A semantic undo of an earlier committed step.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Two-phase commit (2PC)", "Coordinator-driven prepare-then-commit across participants."],
+  ["Saga", "A sequence of local transactions with compensations on failure."],
+  ["Compensating transaction", "An action that semantically undoes a completed step."],
+  ["Choreography", "Saga steps triggered by services reacting to each other's events."],
+  ["Orchestration", "A central coordinator directing saga steps."],
+  ["Semantic lock", "An application-level state (e.g. PENDING) marking data as in use by a saga."],
+]} />

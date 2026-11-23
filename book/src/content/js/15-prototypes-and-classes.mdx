@@ -1,0 +1,198 @@
+---
+title: Prototypes, classes and inheritance
+part: Objects & prototypes
+order: 15
+level: core
+summary: JavaScript objects inherit from other objects through a hidden link. Classes are a friendlier syntax for setting up exactly those links.
+demo: js-prototype-lookup
+---
+
+In many languages, objects are created from classes, and classes inherit from classes. JavaScript works differently underneath: **objects inherit directly from other objects**. Every object has a hidden link, called its **prototype**, to another object. When you read a property that the object does not have, JavaScript follows that link and looks there, then follows *that* object's link, and so on. This sequence of links is the **prototype chain**. The `class` keyword, added in 2015, is a cleaner way to write code that builds these chains.
+
+<Analogy>
+  Think of asking a question at work. You ask your teammate; if they don't know, they ask their team lead; if the lead doesn't know, they ask the department head. The answer comes from the first person who knows it. Your teammate doesn't have to memorise everything — they just need to know who to ask next. That "who to ask next" is the prototype link.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask how inheritance works in JavaScript, what `class` really does, and the difference between `__proto__` and `prototype`. Understanding the chain also explains why methods are shared efficiently between instances, why `for...in` shows inherited properties, and how built-ins like `toString` appear on every object.
+
+## The prototype chain
+
+```js
+const animal = { breathes: true, describe() { return `I have ${this.legs} legs`; } };
+const dog = Object.create(animal);   // dog's prototype is animal
+dog.legs = 4;
+
+dog.legs;        // 4      — own property
+dog.breathes;    // true   — found on animal
+dog.describe();  // 'I have 4 legs' — method found on animal, this = dog
+dog.fly;         // undefined — not found anywhere
+```
+
+<Diagram
+  caption="A property lookup walks up the chain until it finds the name or reaches null."
+  chart={`flowchart TB
+    D["dog<br/>legs: 4"] -- "[[Prototype]]" --> A["animal<br/>breathes, describe()"]
+    A -- "[[Prototype]]" --> OP["Object.prototype<br/>toString, hasOwnProperty…"]
+    OP -- "[[Prototype]]" --> N(("null"))`}
+  steps={[
+    { nodes: ["D"], text: "Reading `dog.legs`: found directly on `dog`. Lookup stops." },
+    { nodes: ["D", "A"], text: "Reading `dog.breathes`: not on `dog`, so follow the link to `animal`. Found." },
+    { nodes: ["D", "A", "OP"], text: "Reading `dog.toString`: not on `dog`, not on `animal`, found on `Object.prototype`." },
+    { nodes: ["D", "A", "OP", "N"], text: "Reading `dog.fly`: the whole chain is searched and the end, `null`, is reached. The result is `undefined` — no error." },
+  ]}
+/>
+
+Important detail: **writing** a property never walks the chain. `dog.breathes = false` creates a new own property on `dog`, which *shadows* the one on `animal`; `animal` is untouched.
+
+## `prototype` versus `[[Prototype]]`
+
+This is the most confusing naming in the language:
+
+- **`[[Prototype]]`** is the hidden link every object has. Read it with `Object.getPrototypeOf(obj)`. (The old accessor `obj.__proto__` does the same but is legacy.)
+- **`.prototype`** is an ordinary property that exists on **functions** (and classes). It is the object that will become the `[[Prototype]]` of instances created with `new`.
+
+```js
+function User(name) { this.name = name; }
+User.prototype.greet = function () { return 'hi ' + this.name; };
+
+const u = new User('Ada');
+Object.getPrototypeOf(u) === User.prototype;   // true
+u.greet();                                      // found via the chain
+```
+
+<Diagram
+  caption="User.prototype is the shared object that every instance links to. Methods live there once, not on every instance."
+  chart={`flowchart LR
+    F["function User<br/>.prototype ⬤"] --> P["User.prototype<br/>greet()"]
+    u1["u1 { name: 'Ada' }"] -- "[[Prototype]]" --> P
+    u2["u2 { name: 'Grace' }"] -- "[[Prototype]]" --> P
+    P -- "[[Prototype]]" --> OP["Object.prototype"]`}
+/>
+
+## What `new` does
+
+`new User('Ada')` performs four steps:
+
+1. Create a new empty object.
+2. Set its `[[Prototype]]` to `User.prototype`.
+3. Call `User` with `this` set to the new object.
+4. Return the new object (unless the function explicitly returns another object).
+
+## Classes
+
+The `class` syntax builds exactly the same structure, but is easier to read and adds some guard rails.
+
+```js
+class Animal {
+  constructor(name) {
+    this.name = name;          // own property on each instance
+  }
+  speak() {                    // goes on Animal.prototype
+    return `${this.name} makes a sound`;
+  }
+  static create(name) {        // goes on the class itself
+    return new this(name);
+  }
+}
+
+class Dog extends Animal {
+  constructor(name, breed) {
+    super(name);               // must call the parent constructor before using this
+    this.breed = breed;
+  }
+  speak() {                    // overrides Animal's speak
+    return `${super.speak()} — woof`;
+  }
+}
+
+const rex = new Dog('Rex', 'collie');
+rex.speak();   // 'Rex makes a sound — woof'
+```
+
+<Diagram
+  caption="extends links Dog.prototype to Animal.prototype. Instances only hold data; behaviour is found by walking the chain."
+  chart={`flowchart TB
+    R["rex<br/>name, breed"] --> DP["Dog.prototype<br/>speak()"]
+    DP --> AP["Animal.prototype<br/>speak()"]
+    AP --> OP["Object.prototype"]
+    DC["class Dog"] -. "[[Prototype]]<br/>(for static inheritance)" .-> AC["class Animal<br/>static create()"]`}
+/>
+
+<DemoLink id="js-prototype-lookup" />
+
+What classes add on top of plain constructor functions:
+
+| Feature | Constructor function | `class` |
+|---|---|---|
+| Calling without `new` | Runs (silently wrong `this`) | `TypeError` |
+| Strict mode | Only if you add it | Always |
+| Methods enumerable in `for...in` | Yes (if assigned) | No |
+| `super` calls | Manual `Parent.prototype.fn.call(this)` | `super.fn()` |
+| Private fields `#x` | Not available | Available |
+| Hoisting | Function declaration: yes | TDZ, like `let` |
+
+## Own properties versus inherited ones
+
+```js
+Object.hasOwn(rex, 'name');    // true — own
+Object.hasOwn(rex, 'speak');   // false — inherited
+'speak' in rex;                // true — `in` checks the whole chain
+
+Object.keys(rex);              // ['name', 'breed'] — own, enumerable only
+for (const k in rex) {}        // own + inherited enumerable (avoid)
+```
+
+## Composition over inheritance
+
+Deep class hierarchies get rigid: a change in a base class ripples to every subclass, and real-world things rarely fit one tree (is a `FlyingFish` a `Bird` or a `Fish`?). A common alternative is **composition** — build objects from smaller pieces of behaviour:
+
+```js
+const canSwim = (o) => ({ swim: () => `${o.name} swims` });
+const canFly = (o) => ({ fly: () => `${o.name} flies` });
+
+function createDuck(name) {
+  const self = { name };
+  return Object.assign(self, canSwim(self), canFly(self));
+}
+```
+
+A good rule: use `extends` for genuine "is-a" relationships with shallow hierarchies (one or two levels), and composition for sharing behaviour.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using `__proto__` in new code; prefer `Object.getPrototypeOf` / `Object.create`.
+- Defining methods inside the constructor (`this.greet = function () {}`) — creates a copy per instance instead of sharing one.
+- Using `this` in a subclass constructor before calling `super()` — throws a `ReferenceError`.
+- Arrow functions as prototype methods — they do not get `this` from the call.
+- Extending built-ins like `Array` and being surprised by edge cases. It works with `class`, but composition is often simpler.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does inheritance work in JavaScript? Are classes different?">
+
+JavaScript uses prototypal inheritance: every object has a hidden `[[Prototype]]` link to another object, and when a property is not found on the object itself, the engine follows that chain upward until it finds it or reaches `null`. Constructor functions have a `.prototype` object, and `new` creates an instance linked to it, so methods placed there are shared by all instances. `class` and `extends` are syntax over the same mechanism — `Dog.prototype` is linked to `Animal.prototype` — with extra safety: class code is strict, must be called with `new`, and supports `super` and private fields.
+
+<Fragment slot="deeper">
+
+- **`prototype` vs `__proto__`?** `.prototype` is a property on constructors; `__proto__`/`[[Prototype]]` is every object's link to its parent.
+- **What does `new` do?** Creates an object, links its prototype, runs the constructor with `this` bound to it, returns it.
+- **How do you check own vs inherited properties?** `Object.hasOwn(obj, key)` vs `key in obj`.
+- **Why prefer composition?** Flexible combinations of behaviour without fragile deep hierarchies.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Prototype (`[[Prototype]]`)", "The hidden link from an object to the object it inherits from."],
+  ["Prototype chain", "The sequence of prototype links followed during property lookup, ending at `null`."],
+  ["`.prototype`", "A property on functions/classes: the object that instances created with `new` will inherit from."],
+  ["Own property", "A property defined directly on the object, not inherited."],
+  ["`super`", "Inside a class, refers to the parent class's constructor or methods."],
+  ["Composition", "Building objects by combining small pieces of behaviour instead of inheriting."],
+]} />

@@ -1,0 +1,179 @@
+/* ------------------------------------------------------------------
+   Design tokens
+   Three reading themes. Contrast is kept in the 10–13:1 band for body
+   text: comfortably above AAA, but without the glare of #000 on #fff.
+   ------------------------------------------------------------------ */
+
+:root,
+:root[data-theme='paper'] {
+  color-scheme: light;
+  --bg: #f7f5f0;
+  --bg-raised: #fbfaf6;
+  --surface: #efece4;
+  --surface-2: #e8e4da;
+  --ink: #26231f;
+  --text: #3a3631;
+  --muted: #6f6a63;
+  --faint: #9a948a;
+  --rule: #e2ddd2;
+  --rule-strong: #cfc8ba;
+
+  --accent: #2e5e73;
+  --accent-soft: #e1eaec;
+  --accent-ink: #234a5b;
+
+  --note: #2e5e73;     --note-bg: #e6edee;
+  --pitfall: #a4442e;  --pitfall-bg: #f4e6df;
+  --tip: #8a6514;      --tip-bg: #f3ead4;
+  --analogy: #4f6b4a;  --analogy-bg: #e7ece1;
+
+  --js: #a8761e;   --js-bg: #f3e9d3;
+  --node: #4e7d4a; --node-bg: #e4ecdf;
+  --ts: #3a62a0;   --ts-bg: #e2e8f2;
+  --db: #2f7a72;   --db-bg: #ddebe8;
+  --sd: #7a5397;   --sd-bg: #ebe3f0;
+  --api: #8a4f6e;  --api-bg: #f0e2e8;
+  --sec: #9b3b3b;  --sec-bg: #f3e0dd;
+  --k8s: #4f5aa3;  --k8s-bg: #e3e5f2;
+
+  /* syntax */
+  --sh-foreground: #3a3631;
+  --sh-background: transparent;
+  --sh-token-keyword: #8a3f5c;
+  --sh-token-constant: #2e5e73;
+  --sh-token-string: #4f6b2a;
+  --sh-token-string-expression: #4f6b2a;
+  --sh-token-comment: #9a948a;
+  --sh-token-function: #8a5a14;
+  --sh-token-parameter: #5a4a7a;
+  --sh-token-punctuation: #6f6a63;
+  --sh-token-link: #2e5e73;
+  --sh-token-inserted: #4e7d4a;
+  --sh-token-deleted: #a4442e;
+
+  --shadow: 0 1px 2px rgba(38, 35, 31, 0.06), 0 6px 20px -8px rgba(38, 35, 31, 0.12);
+}
+
+:root[data-theme='sepia'] {
+  color-scheme: light;
+  --bg: #f1e8d6;
+  --bg-raised: #f5eddd;
+  --surface: #e8dcc4;
+  --surface-2: #e0d2b6;
+  --ink: #3b2f22;
+  --text: #4a3c2c;
+  --muted: #7a6a55;
+  --faint: #a08e74;
+  --rule: #d9c9ab;
+  --rule-strong: #c7b38f;
+
+  --accent: #8a4b2a;
+  --accent-soft: #ead8c2;
+  --accent-ink: #6f3a1f;
+
+  --note: #3d6470;     --note-bg: #e2dcc9;
+  --pitfall: #9c3f28;  --pitfall-bg: #ecd5c0;
+  --tip: #7f5c12;      --tip-bg: #eadbb8;
+  --analogy: #55673c;  --analogy-bg: #e0dcbf;
+
+  --js: #94671a;   --js-bg: #eadab5;
+  --node: #4f6f3c; --node-bg: #dfdcbd;
+  --ts: #3f5a86;   --ts-bg: #dcd6c8;
+  --db: #3a6b60;   --db-bg: #d9d8c2;
+  --sd: #74506b;   --sd-bg: #e4d3c8;
+  --api: #85495f;  --api-bg: #e6d0c6;
+  --sec: #93372f;  --sec-bg: #e9cdbb;
+  --k8s: #4d5689;  --k8s-bg: #dad2c6;
+
+  --sh-foreground: #4a3c2c;
+  --sh-token-keyword: #8c3b4c;
+  --sh-token-constant: #3d6470;
+  --sh-token-string: #5a6a24;
+  --sh-token-string-expression: #5a6a24;
+  --sh-token-comment: #a08e74;
+  --sh-token-function: #8a4b2a;
+  --sh-token-parameter: #5f4a6a;
+  --sh-token-punctuation: #7a6a55;
+  --sh-token-link: #8a4b2a;
+  --sh-token-inserted: #4f6f3c;
+  --sh-token-deleted: #9c3f28;
+
+  --shadow: 0 1px 2px rgba(59, 47, 34, 0.08), 0 6px 20px -8px rgba(59, 47, 34, 0.18);
+}
+
+:root[data-theme='night'] {
+  color-scheme: dark;
+  --bg: #1a1c20;
+  --bg-raised: #1f2126;
+  --surface: #22252b;
+  --surface-2: #2a2e35;
+  --ink: #e4e0d8;
+  --text: #c9c4ba;
+  --muted: #9a958c;
+  --faint: #6f6b64;
+  --rule: #2f333a;
+  --rule-strong: #40454e;
+
+  --accent: #7fb3c4;
+  --accent-soft: #233239;
+  --accent-ink: #a5cad6;
+
+  --note: #7fb3c4;     --note-bg: #1f2a2f;
+  --pitfall: #e08f78;  --pitfall-bg: #2e2220;
+  --tip: #d6b56a;      --tip-bg: #2c271c;
+  --analogy: #9dbb8f;  --analogy-bg: #222a21;
+
+  --js: #d9b15e;   --js-bg: #2b261a;
+  --node: #8fbf84; --node-bg: #1f2a1f;
+  --ts: #86a8dc;   --ts-bg: #1d2533;
+  --db: #74c0b3;   --db-bg: #1a2a28;
+  --sd: #b99ad2;   --sd-bg: #272131;
+  --api: #d79bb6;  --api-bg: #2c1f26;
+  --sec: #e49a8f;  --sec-bg: #2e1f1e;
+  --k8s: #9aa3e6;  --k8s-bg: #1f2233;
+
+  --sh-foreground: #c9c4ba;
+  --sh-token-keyword: #d79bb3;
+  --sh-token-constant: #7fb3c4;
+  --sh-token-string: #a9c48a;
+  --sh-token-string-expression: #a9c48a;
+  --sh-token-comment: #6f6b64;
+  --sh-token-function: #dcb878;
+  --sh-token-parameter: #b5a6d8;
+  --sh-token-punctuation: #9a958c;
+  --sh-token-link: #7fb3c4;
+  --sh-token-inserted: #8fbf84;
+  --sh-token-deleted: #e08f78;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px -10px rgba(0, 0, 0, 0.5);
+}
+
+:root {
+  --font-read: 'Literata Variable', 'Iowan Old Style', Georgia, serif;
+  --font-ui: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --fs: 18px;
+  --lh: 1.72;
+  --measure: 68ch;
+
+  --header-h: 56px;
+  --sidebar-w: 290px;
+  --aside-w: 230px;
+  --radius: 6px;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+:root[data-size='s'] { --fs: 16px; }
+:root[data-size='l'] { --fs: 19.5px; }
+:root[data-size='xl'] { --fs: 21px; --lh: 1.75; }
+
+/* subject colour is set per page with data-subject */
+[data-subject='js']   { --subj: var(--js);   --subj-bg: var(--js-bg); }
+[data-subject='node'] { --subj: var(--node); --subj-bg: var(--node-bg); }
+[data-subject='ts']   { --subj: var(--ts);   --subj-bg: var(--ts-bg); }
+[data-subject='db']   { --subj: var(--db);   --subj-bg: var(--db-bg); }
+[data-subject='sd']   { --subj: var(--sd);   --subj-bg: var(--sd-bg); }
+[data-subject='api']  { --subj: var(--api);  --subj-bg: var(--api-bg); }
+[data-subject='sec']  { --subj: var(--sec);  --subj-bg: var(--sec-bg); }
+[data-subject='k8s']  { --subj: var(--k8s);  --subj-bg: var(--k8s-bg); }

@@ -1,0 +1,104 @@
+---
+title: "Choosing a broker: Kafka, RabbitMQ, SQS, Kinesis, Pub/Sub"
+part: Core components
+order: 28
+level: core
+summary: A side-by-side comparison of the messaging systems you'll name in designs, and a decision guide you can say out loud in an interview.
+---
+
+Messaging systems overlap, and in an interview "I'd put a queue here" invites the follow-up: **which one, and why?** This chapter compares the common choices — **Kafka**, **RabbitMQ**, **Amazon SQS/SNS**, **Kinesis**, **Google Pub/Sub**, **Redis Streams/BullMQ** and **NATS** — across the dimensions that actually decide the choice: delivery model, ordering, replay, throughput, routing and operational cost.
+
+<Analogy>
+  Choosing between a courier, the post office and a shared archive. A courier (SQS/RabbitMQ) picks up a parcel and delivers it to one recipient, then it's gone. The post office's mass mailing (SNS/fanout) sends copies to everyone on a list. A shared archive (Kafka/Kinesis) keeps every document in order so anyone can come and read from any point — today, or next month.
+</Analogy>
+
+## Why it matters
+
+A well-justified broker choice signals real-world experience. The wrong choice shows up as missing ordering, inability to replay, operational pain, or a bill you didn't expect.
+
+## Comparison
+
+| | Kafka | RabbitMQ | SQS (+SNS) | Kinesis | Google Pub/Sub | Redis Streams / BullMQ |
+|---|---|---|---|---|---|---|
+| Model | partitioned log | broker with queues + routing | managed queue (+ topics) | sharded log | managed pub/sub | in-memory log / job queue |
+| Message after read | retained | deleted on ack | deleted on delete | retained | deleted on ack (replay via seek) | retained (streams) / removed (jobs) |
+| Replay | ✓ | streams only | ✗ | ✓ | ✓ (seek to time/snapshot) | ✓ (streams) |
+| Ordering | per partition | per queue (single consumer) | FIFO per group | per shard | per ordering key | per stream |
+| Throughput | very high | high | very high | per-shard limits | very high | high, memory-bound |
+| Routing | topic + key | rich (exchanges) | SNS filter policies | none | filters | none |
+| Delays / priorities | ✗ | ✓ | delays ✓ | ✗ | ✗ | ✓ (BullMQ) |
+| Ops burden | high (or MSK/Confluent) | medium | none | none | none | low–medium |
+| Typical use | event backbone, CDC, streaming | task queues, RPC, routing | jobs, buffering, fan-out on AWS | AWS streaming/analytics | GCP events | jobs in Node apps |
+
+## Decision guide
+
+<Diagram
+  caption="Questions to ask, in order."
+  chart={`flowchart TB
+    Q1{"Do consumers need to replay history<br/>or many independent readers?"} -- yes --> Q2{"Massive throughput,<br/>rich ecosystem, portability?"}
+    Q2 -- yes --> KAFKA["Kafka (MSK / Confluent)"]
+    Q2 -- no --> KIN["Kinesis (AWS) /<br/>Pub/Sub (GCP)"]
+    Q1 -- no --> Q3{"Need complex routing, priorities,<br/>per-message delays?"}
+    Q3 -- yes --> RMQ["RabbitMQ"]
+    Q3 -- no --> Q4{"On AWS and want zero ops?"}
+    Q4 -- yes --> SQS["SQS (+ SNS for fan-out)"]
+    Q4 -- no --> Q5{"Small Node app with Redis already?"}
+    Q5 -- yes --> BULL["BullMQ on Redis"]
+    Q5 -- no --> RMQ`}
+  steps={[
+    { nodes: ["Q1"], text: "First: is this a **stream of events** that several consumers read independently, or that you may need to replay (rebuild a read model, backfill a new service)?" },
+    { nodes: ["Q1", "Q2", "KAFKA", "KIN"], text: "If yes, you need a log. Kafka for very high throughput and its ecosystem; Kinesis or Pub/Sub for managed simplicity in a single cloud." },
+    { nodes: ["Q1", "Q3", "RMQ"], text: "If it's **work to be done once** and routing, priorities or delays matter, RabbitMQ shines." },
+    { nodes: ["Q3", "Q4", "SQS"], text: "On AWS without special routing needs, SQS (with SNS for fan-out) gives near-zero operations." },
+    { nodes: ["Q4", "Q5", "BULL"], text: "For a modest Node service that already runs Redis, BullMQ is a pragmatic job queue." },
+  ]}
+/>
+
+## Patterns that combine them
+
+- **Outbox → Kafka** as the event backbone; consumers needing job semantics put work onto **SQS/RabbitMQ** queues.
+- **SNS → SQS** fan-out for AWS event-driven microservices.
+- **Kafka/Kinesis → Firehose/Connect → S3** for the data lake.
+- **Job queue for user-visible async work** (exports, emails) with progress stored in the database.
+
+## What to say about guarantees
+
+Whatever you choose, state the same three things:
+
+1. **Delivery**: at-least-once → consumers are idempotent (dedup by message ID).
+2. **Ordering**: per key/partition/group — choose the key; don't promise global order.
+3. **Failure handling**: retries with backoff, dead-letter queue, alarms on lag/DLQ depth.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Choosing Kafka for a simple background job queue (heavy ops for no benefit).
+- Choosing SQS when you'll need to replay events for new consumers.
+- Assuming "exactly-once" from any broker covers external side effects.
+- Not mentioning DLQs, idempotency and ordering keys.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Which message broker would you choose here, and why?">
+
+I'd first ask whether this is an event stream or a work queue. If several services consume the same events independently, or we may need to replay history — rebuilding a read model or onboarding a new consumer — I want a retained, partitioned log: Kafka for high throughput and its ecosystem, or Kinesis or Pub/Sub for a fully managed option in one cloud. If it's work to be done once — sending emails, generating exports — a queue fits better: SQS on AWS for zero operations, with SNS in front for fan-out, or RabbitMQ when I need routing, priorities or per-message delays. In every case I'd state at-least-once delivery with idempotent consumers, ordering per key, and retries with a dead-letter queue and alarms on lag.
+
+<Fragment slot="deeper">
+
+- **Can Kafka be a job queue?** It can, but per-message retry/delay semantics are awkward; queues are simpler.
+- **Why not RabbitMQ for event sourcing?** Messages are deleted on ack; no long-term replay (streams aside).
+- **What does the outbox pattern add?** Reliable publication alongside the database write.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Event stream", "Retained, ordered sequence of events read by many consumers."],
+  ["Work queue", "Tasks each processed once and then removed."],
+  ["Replay", "Re-reading past messages from an earlier position."],
+  ["Fan-out", "Delivering one message to multiple consumers."],
+  ["BullMQ", "A Redis-based job queue library for Node.js."],
+]} />

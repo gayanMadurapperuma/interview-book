@@ -1,0 +1,148 @@
+---
+title: tsconfig, compilation and module resolution
+part: Config & practice
+order: 16
+level: core
+summary: The settings that decide how strict TypeScript is, what JavaScript it emits, and how it finds modules — with recommended configurations for Node services and libraries.
+---
+
+Every TypeScript project is controlled by a `tsconfig.json`. It decides **how strict** the checker is, **what JavaScript** is produced (language version, module format), **how imports are resolved**, which files are included, and how big projects are split. A few settings matter far more than the rest — `strict`, `module`/`moduleResolution`, `target`, `noUncheckedIndexedAccess` — and getting them right avoids a whole category of confusing build and runtime errors.
+
+<Analogy>
+  tsconfig is the settings panel on a camera. "Strict" is the focus-assist that refuses to take blurry shots. "Target" and "module" are the file format you save in, depending on where the photos will be shown. "Module resolution" is how the camera finds the right lens when you ask for one by name.
+</Analogy>
+
+## Why it matters
+
+Interviewers ask what `strict` enables, the difference between `module` options, why imports fail at runtime even though they type-check, and how to set up monorepos. These are also everyday sources of friction.
+
+## A good starting point for a Node service
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "outDir": "dist",
+    "rootDir": "src",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "declaration": false,
+    "types": ["node"]
+  },
+  "include": ["src"]
+}
+```
+
+## Strictness
+
+`"strict": true` turns on a family of checks — always enable it for new code:
+
+| Flag (part of `strict`) | Catches |
+|---|---|
+| `strictNullChecks` | using possibly `null`/`undefined` values |
+| `noImplicitAny` | untyped parameters silently becoming `any` |
+| `strictFunctionTypes` | unsafe function parameter assignments |
+| `strictPropertyInitialization` | class fields never assigned |
+| `noImplicitThis` | `this` with an unknown type |
+| `useUnknownInCatchVariables` | `catch (e)` typed `unknown`, not `any` |
+| `alwaysStrict` | emits `"use strict"` |
+
+Worth adding beyond `strict`:
+
+- **`noUncheckedIndexedAccess`**: `arr[i]` and `record[key]` are `T | undefined` — the compiler makes you handle missing entries.
+- **`exactOptionalPropertyTypes`**: `{ a?: string }` means "absent or string", not "may be explicitly `undefined`".
+- **`noImplicitOverride`**: overriding methods must say `override`.
+
+## Emit: `target`, `module`, `lib`
+
+<Diagram
+  caption="Three separate knobs: which syntax to emit, which module format to emit, and which built-in APIs to type-check against."
+  chart={`flowchart LR
+    SRC["src/*.ts"] --> TGT["target<br/>syntax level emitted<br/>(ES2023: keep modern syntax)"]
+    SRC --> MOD["module<br/>import/export format emitted<br/>(NodeNext: ESM or CJS per file)"]
+    SRC --> LIB["lib<br/>which globals exist for type-checking<br/>(ES2023, DOM…)"]
+    TGT --> OUT["dist/*.js"]
+    MOD --> OUT`}
+/>
+
+- **`target`**: newer targets emit less down-levelled code. For modern Node, `ES2022`+ is fine.
+- **`lib`**: what APIs the checker believes exist. A Node service shouldn't include `DOM` (otherwise `fetch`/`document` types may mislead you).
+- **`module`**: for Node use **`NodeNext`** (or `Node16`), which mirrors Node's real rules: files are ESM or CommonJS according to `package.json` `"type"` and extensions. For code that a bundler processes (front-end), use `"module": "ESNext", "moduleResolution": "Bundler"`.
+
+## Module resolution pitfalls
+
+With `NodeNext` and ESM, **relative imports need file extensions — written as `.js`** even though the source file is `.ts`:
+
+```ts
+import { createServer } from './server.js';   // ✓ refers to the compiled output
+import { createServer } from './server';      // ✘ error under NodeNext ESM
+```
+
+This is the #1 surprise for people moving to ESM. (Newer setups using Node's native type stripping can enable `allowImportingTsExtensions` and `rewriteRelativeImportExtensions`.)
+
+Other resolution features:
+
+- **`paths`** aliases (`@/lib/*`) are only understood by the type checker; at runtime you need the bundler, `tsconfig-paths`, or **Node subpath imports** (`"imports": { "#lib/*": "./dist/lib/*" }` in `package.json`) — the latter works natively.
+- **`types`** limits which `@types/*` packages are loaded globally.
+- **`skipLibCheck`** skips type-checking `.d.ts` files in `node_modules` — much faster, commonly enabled.
+
+## Fast transpilers and `isolatedModules`
+
+Many projects compile with **esbuild**, **swc**, **tsx** or Vite, which transpile each file independently without type information (fast), and run `tsc --noEmit` separately for checking. `isolatedModules: true` makes `tsc` reject code those tools can't handle (e.g. re-exporting a type without `export type`). `verbatimModuleSyntax` makes type-only imports explicit (`import type { User } from './user.js'`) so they're reliably erased.
+
+## Libraries and declaration files
+
+For a published library: `"declaration": true` (emit `.d.ts`), `"declarationMap": true`, an `"exports"` map with a `"types"` condition, and test with `@arethetypeswrong/cli`. `.d.ts` files describe JavaScript's types without implementation — that's what `@types/*` packages contain.
+
+## Large codebases: project references
+
+Split a monorepo into projects that reference each other (`"composite": true`, `"references": [...]`) and build with `tsc --build`: each package is checked once and incrementally, which speeds up builds and enforces dependency boundaries. Tools like Turborepo or Nx orchestrate builds and caching across packages.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Turning off `strict` to "get it compiling".
+- Missing `.js` extensions in ESM relative imports under `NodeNext`.
+- `paths` aliases that type-check but fail at runtime.
+- `DOM` in `lib` for a backend.
+- Relying on esbuild/swc alone and never running `tsc --noEmit` in CI.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you configure TypeScript for a Node.js backend?">
+
+I'd enable `strict`, plus `noUncheckedIndexedAccess` so array and record lookups include `undefined`, `exactOptionalPropertyTypes` and `noImplicitOverride`. For output I'd target a modern ES version Node supports, with `lib` limited to ES — no DOM — and `module` and `moduleResolution` set to `NodeNext`, so TypeScript follows Node's real ESM/CommonJS rules; that means relative ESM imports are written with `.js` extensions. I'd turn on `isolatedModules` and `verbatimModuleSyntax` so fast transpilers like esbuild or tsx work safely, use `skipLibCheck` for speed, and avoid `paths` aliases in favour of package.json subpath imports, which work at runtime. CI runs `tsc --noEmit` because fast transpilers don't type-check, and in a monorepo I'd use project references for incremental builds.
+
+<Fragment slot="deeper">
+
+- **What does `strict` include?** strictNullChecks, noImplicitAny, strictFunctionTypes, strictPropertyInitialization, noImplicitThis and more.
+- **`target` vs `module` vs `lib`?** Emitted syntax vs emitted module format vs available API types.
+- **Why `.js` in imports from `.ts` files?** NodeNext resolves to the emitted output, matching Node's ESM rules.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["`strict`", "Umbrella flag enabling TypeScript's strict checks."],
+  ["`target`", "JavaScript language level of emitted code."],
+  ["`module` / `moduleResolution`", "Module format emitted / how imports are resolved."],
+  ["`noUncheckedIndexedAccess`", "Index access results include `undefined`."],
+  ["`isolatedModules`", "Ensures files can be transpiled independently."],
+  ["Project references", "Linking tsconfig projects for incremental, ordered builds."],
+]} />

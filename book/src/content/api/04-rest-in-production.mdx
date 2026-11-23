@@ -1,0 +1,172 @@
+---
+title: REST in production
+part: REST
+order: 4
+level: advanced
+summary: Pagination, filtering, versioning, idempotency, bulk and long-running operations, OpenAPI contracts and webhooks — what turns a REST API into one people can rely on.
+---
+
+The basics of REST — resources, methods, status codes — are easy. Running a REST API that many clients depend on for years needs more: **pagination** that stays fast, **filtering** that doesn't become a query language nobody can maintain, **versioning** that doesn't break integrations, **idempotency** so retries are safe, patterns for **bulk** and **long-running** operations, and a machine-readable **contract**.
+
+<Analogy>
+  Opening a shop is easy; running one that serves the same customers for ten years means stock systems, returns policies, clear signs when things move, and never changing the price of something already paid for. A production API is the long-running shop.
+</Analogy>
+
+## Why it matters
+
+Senior API interviews dig into these exact topics: "how would you paginate?", "how do you version?", "how do you handle a request that takes five minutes?", "how do clients retry safely?".
+
+## Pagination
+
+| Style | Request | Pros | Cons |
+|---|---|---|---|
+| Offset | `?limit=20&offset=40` | simple, jump to page N | slow for deep pages; items shift when data changes |
+| Cursor (keyset) | `?limit=20&cursor=eyJ…` | fast at any depth, stable under inserts | no random page jumps |
+| Page token from a search engine | `?pageToken=…` | engine-managed | engine-specific |
+
+Prefer **cursor pagination** for anything that can grow large:
+
+```json
+{
+  "data": [ … 20 orders … ],
+  "pagination": { "nextCursor": "eyJjcmVhdGVkQXQiOiIyMDI2LTExLTIzVDEwOjE1OjAwWiIsImlkIjoxMDQyfQ", "hasMore": true }
+}
+```
+
+The cursor is an opaque, base64-encoded position (e.g. last `createdAt` + `id`). Always cap `limit` (e.g. 100) and require a stable sort order with a unique tiebreaker.
+
+## Filtering, sorting, fields
+
+```text
+GET /orders?status=paid&createdAfter=2026-11-01&sort=-createdAt,id&fields=id,status,total&expand=customer
+```
+
+- Allow-list filterable and sortable fields (each needs an index).
+- Use clear operators for ranges (`createdAfter`, `minTotal`) rather than inventing a query language — unless your API genuinely needs rich queries (then consider GraphQL or a search endpoint).
+- Sparse fieldsets (`fields=`) and `expand=` give clients control without GraphQL.
+
+## Versioning
+
+<Diagram
+  caption="Prefer evolving without breaking. Version only when a breaking change is unavoidable, and run old and new side by side."
+  chart={`flowchart TB
+    CH["change needed"] --> BR{"breaking?<br/>remove/rename field,<br/>change type or meaning"}
+    BR -- no --> ADD["additive change<br/>new optional field/endpoint<br/>→ ship it, no version bump"]
+    BR -- yes --> V["new version<br/>/v2/… or version header"]
+    V --> RUN["run v1 and v2 together"]
+    RUN --> DEP["deprecate v1:<br/>Deprecation + Sunset headers,<br/>emails, usage metrics"]
+    DEP --> RM["remove when traffic ≈ 0"]`}
+/>
+
+| Strategy | Example | Notes |
+|---|---|---|
+| URL path | `/v1/orders` | most visible and common; easy routing and caching |
+| Header | `Accept: application/vnd.example.v2+json` or `Api-Version: 2026-11-01` | cleaner URLs; harder to test in a browser |
+| Date-based versions | Stripe-style `Stripe-Version: 2024-06-20` per account | fine-grained, pinned per client |
+
+Rules that avoid most version bumps: only add things, never change meaning, make new fields optional, and have clients ignore unknown fields.
+
+## Idempotency
+
+Network failures mean clients will retry. GET, PUT, DELETE are idempotent by definition; for POST, accept an **`Idempotency-Key`** header, store the key with the result, and return the stored result on retries (see *Delivery semantics* in System Design).
+
+## Concurrency control
+
+Prevent lost updates when two clients edit the same resource:
+
+```http
+GET /documents/9         → 200, ETag: "v17"
+PATCH /documents/9       If-Match: "v17"   → 200, ETag: "v18"
+PATCH /documents/9       If-Match: "v17"   → 412 Precondition Failed (someone else saved first)
+```
+
+## Bulk operations
+
+Creating 10,000 items one request at a time is slow. Options:
+
+- `POST /orders/batch` with an array, returning **per-item results** (`207 Multi-Status`-style body: which succeeded, which failed and why).
+- Limit batch size; make each item idempotent.
+- For very large imports, upload a file and process asynchronously.
+
+## Long-running operations
+
+<Diagram
+  sequence
+  caption="Asynchronous request–reply: accept quickly with 202, let the client poll a status resource (or receive a webhook)."
+  chart={`sequenceDiagram
+    participant C as Client
+    participant API as API
+    participant W as Worker
+    C->>API: POST /reports { range: 2026 }
+    API->>W: enqueue job 77
+    API-->>C: 202 Accepted, Location: /jobs/77
+    C->>API: GET /jobs/77
+    API-->>C: 200 { status: running, progress: 40% }
+    W->>API: job 77 done → result in S3
+    C->>API: GET /jobs/77
+    API-->>C: 200 { status: succeeded, resultUrl }`}
+  notes={[
+    "The client requests something that takes minutes.",
+    "The API enqueues the work instead of doing it inside the request.",
+    "It immediately returns 202 with a URL for the job's status.",
+    "The client polls (respecting a Retry-After hint)…",
+    "…and sees progress.",
+    "The worker finishes and stores the result.",
+    "Next poll…",
+    "…returns the final status and a link to the result. A webhook can notify instead of polling.",
+  ]}
+/>
+
+## Webhooks
+
+Webhooks let your API **push** events to clients' URLs (`order.paid`). Production-quality webhooks:
+
+- **Sign** each payload with an HMAC and a timestamp; clients verify to prevent spoofing and replay.
+- Deliver **at least once** with retries and exponential backoff; include an event ID for dedup.
+- Keep payloads small (or "thin events" with an ID the client fetches).
+- Provide a delivery log and a way to replay.
+
+## Contracts: OpenAPI
+
+Describe the API in an **OpenAPI** document — endpoints, parameters, schemas, errors, auth. From it you can generate docs, client SDKs, server validation and mock servers, and run **contract tests** in CI to catch breaking changes (tools like `oasdiff` compare versions).
+
+## Operational must-haves
+
+Authentication and scopes, rate limiting with `429` + headers, request IDs in responses and logs, timeouts, payload size limits, consistent pagination, deprecation policy, status page and changelog.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Offset pagination on huge, changing collections.
+- Unbounded `limit` values.
+- Breaking changes shipped without a new version.
+- Synchronous handling of minute-long work (timeouts at the load balancer).
+- Unsigned webhooks; no retries or dedup IDs.
+- No machine-readable contract, so clients and server drift.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you make a REST API robust for many external clients?">
+
+I design it to evolve without breaking: additive changes only, optional new fields, clients ignoring unknown fields, and a new version — usually in the path — only for unavoidable breaking changes, with deprecation and sunset headers and usage tracking before removal. Lists use cursor pagination with a capped limit and stable sort, and filters and sorts are allow-listed and indexed. POSTs that create or charge accept an idempotency key; updates use ETags with If-Match to prevent lost updates. Bulk endpoints return per-item results, and long-running work returns 202 with a job resource to poll or a webhook, signed with an HMAC and delivered at least once with event IDs. The contract lives in OpenAPI, with docs, SDKs and breaking-change checks generated from it, plus rate limiting, request IDs and consistent error formats.
+
+<Fragment slot="deeper">
+
+- **Why cursor over offset?** Constant cost per page and stability under inserts.
+- **How do you handle a five-minute operation?** 202 Accepted + status resource or webhook.
+- **How do you detect breaking changes?** Diff OpenAPI specs in CI.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Cursor pagination", "Paging with an opaque pointer to a position in a sorted list."],
+  ["Breaking change", "A change that can cause existing clients to fail."],
+  ["`If-Match` / 412", "Conditional update that fails if the resource version changed."],
+  ["202 Accepted", "Request accepted for asynchronous processing."],
+  ["Webhook", "HTTP callback pushing events to a client-provided URL."],
+  ["OpenAPI", "Machine-readable specification of an HTTP API."],
+]} />

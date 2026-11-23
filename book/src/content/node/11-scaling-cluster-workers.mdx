@@ -1,0 +1,191 @@
+---
+title: "Using all the cores: cluster, worker threads and child processes"
+part: Building services
+order: 11
+level: advanced
+summary: One Node process uses one core for JavaScript. Three tools let you use more — each with a different trade-off between isolation and sharing.
+demo: node-worker-offload
+---
+
+A single Node process runs your JavaScript on one CPU core. A modern server has many cores. To use them you run more JavaScript threads or processes. Node gives you three tools: **cluster** (several copies of your server sharing one port), **worker threads** (extra JavaScript threads inside one process, for CPU-heavy tasks) and **child processes** (run any program, including other Node scripts, as a separate process). In containers, you often scale a fourth way: simply run more containers.
+
+<Analogy>
+  A busy kitchen. **Cluster** is opening identical kitchens side by side with a host sending diners to whichever is free. **Worker threads** are extra chefs in the same kitchen who take the slow, fiddly jobs (like decorating a cake) so the head chef keeps serving. **Child processes** are calling in a specialist catering company — completely separate, and you communicate by phone.
+</Analogy>
+
+## Why it matters
+
+"Node is single-threaded — so how do you scale it?" is a standard question. The answer distinguishes scaling *throughput* of I/O-bound servers (more processes) from offloading *CPU-heavy* work (worker threads), and shows awareness of how this plays with containers and orchestrators.
+
+## Three tools compared
+
+<Diagram
+  caption="Processes share nothing and are isolated. Worker threads share a process and can share memory. All of them leave the main event loop free."
+  chart={`flowchart TB
+    subgraph CL["cluster"]
+      direction LR
+      PR["primary process"] --> W1["worker process 1<br/>full server"]
+      PR --> W2["worker process 2<br/>full server"]
+      PR --> W3["worker process N"]
+    end
+    subgraph WT["worker_threads"]
+      direction LR
+      MT["main thread<br/>(event loop)"] <-->|messages| T1["worker thread<br/>own event loop + heap"]
+    end
+    subgraph CP["child_process"]
+      direction LR
+      NP["node app"] <-->|"stdin · stdout · IPC"| EXT["ffmpeg, python,<br/>another node script"]
+    end`}
+/>
+
+| | `cluster` | `worker_threads` | `child_process` |
+|---|---|---|---|
+| Unit | OS process | thread in the same process | OS process |
+| Memory | separate | separate heaps; can share `SharedArrayBuffer` | separate |
+| Communication | IPC messages | `postMessage` (copy or transfer), shared memory | stdio, IPC |
+| Startup cost | high (~tens of MB each) | moderate | high |
+| Crash isolation | a crash kills one worker | an uncaught error kills the thread (catchable) | fully isolated |
+| Best for | scaling an HTTP server across cores | CPU-heavy tasks: parsing, image work, hashing | running other programs, isolation |
+
+## Cluster: one port, many processes
+
+```js
+const cluster = require('node:cluster');
+const os = require('node:os');
+const http = require('node:http');
+
+if (cluster.isPrimary) {
+  const n = os.availableParallelism();
+  for (let i = 0; i < n; i++) cluster.fork();
+  cluster.on('exit', (worker, code) => {
+    console.log(`worker ${worker.process.pid} died (${code}), starting a new one`);
+    cluster.fork();
+  });
+} else {
+  http.createServer((req, res) => res.end(`handled by ${process.pid}\n`)).listen(3000);
+}
+```
+
+The primary process accepts connections and distributes them to workers (round-robin on Linux and macOS). Each worker is a full copy of your app with its **own memory** — so in-memory sessions, caches and rate-limit counters are **not shared**. Shared state must live in Redis or a database.
+
+<Diagram
+  caption="With cluster, connections are spread across worker processes. Anything stored in one worker's memory is invisible to the others."
+  chart={`flowchart LR
+    C(("clients")) --> P["primary<br/>:3000"]
+    P --> A["worker A<br/>cache: {user 1}"]
+    P --> B["worker B<br/>cache: {}"]
+    P --> D["worker C<br/>cache: {}"]
+    A --> R[("Redis<br/>shared state")]
+    B --> R
+    D --> R`}
+  steps={[
+    { nodes: ["C", "P"], text: "Clients connect to port 3000, owned by the primary." },
+    { nodes: ["P", "A", "B", "D"], text: "The primary hands each connection to a worker in turn. Every worker is a full copy of the app on its own core." },
+    { nodes: ["A", "B"], text: "Worker A cached user 1 in memory, but a later request handled by worker B won't see it." },
+    { nodes: ["A", "B", "D", "R"], text: "Sessions, rate limits and caches that must be consistent go to shared storage." },
+  ]}
+/>
+
+<Callout type="note" title="Cluster in the container era">
+  On Kubernetes or ECS, the usual approach is **one Node process per container** and letting the orchestrator run more replicas. That gives you the same multi-core use, plus health checks, restarts and rolling deploys handled outside Node. Process managers like PM2 (`pm2 start app.js -i max`) wrap cluster for VMs.
+</Callout>
+
+## Worker threads: offload CPU work
+
+```js
+// main.js
+const { Worker } = require('node:worker_threads');
+
+function resizeImage(buffer) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker('./resize-worker.js', {
+      workerData: buffer,
+      transferList: [buffer.buffer],   // move the memory instead of copying it
+    });
+    worker.once('message', resolve);
+    worker.once('error', reject);
+    worker.once('exit', (code) => { if (code !== 0) reject(new Error(`worker exit ${code}`)); });
+  });
+}
+
+// resize-worker.js
+const { parentPort, workerData } = require('node:worker_threads');
+parentPort.postMessage(doTheExpensiveResize(workerData));
+```
+
+<DemoLink id="node-worker-offload" />
+
+Key facts:
+
+- Each worker has its own V8 isolate, heap and event loop. Messages are **copied** (structured clone) unless you **transfer** `ArrayBuffer`s or use a `SharedArrayBuffer` with `Atomics` for true shared memory.
+- Starting a worker takes milliseconds and memory. Use a **pool** (`piscina`) sized near the core count and reuse workers.
+- Workers are for CPU-bound work. They do **not** speed up I/O — Node's I/O is already asynchronous.
+
+## Child processes: run other programs
+
+```js
+const { spawn, execFile } = require('node:child_process');
+
+// stream output of a long-running program
+const ff = spawn('ffmpeg', ['-i', 'in.mov', 'out.mp4']);
+ff.stderr.on('data', (d) => process.stdout.write(d));
+ff.on('close', (code) => console.log('ffmpeg exited', code));
+
+// run and collect output (bounded)
+const { execFile: execFileAsync } = require('node:child_process');
+```
+
+| Function | Shell? | Output | Use for |
+|---|---|---|---|
+| `spawn` | no | streams | long-running processes, big output |
+| `execFile` | no | buffered | short commands with arguments |
+| `exec` | **yes** | buffered | rarely — shell injection risk |
+| `fork` | no | IPC channel | another Node script with messaging |
+
+Never pass user input to `exec` (it runs in a shell): `exec('convert ' + filename)` with `filename = "x; rm -rf /"` is a disaster. Use `execFile`/`spawn` with an argument array.
+
+## Choosing
+
+<Diagram
+  caption="A practical decision guide."
+  chart={`flowchart TB
+    Q{"What's the bottleneck?"} --> IO["Many requests,<br/>mostly I/O"] --> R["More processes:<br/>container replicas or cluster"]
+    Q --> CPU["Some CPU-heavy tasks<br/>in requests"] --> WP["Worker thread pool"]
+    Q --> LONG["Long jobs<br/>(minutes)"] --> JQ["Job queue + separate workers"]
+    Q --> BIN["Need another program<br/>(ffmpeg, python)"] --> CHP["child_process.spawn"]`}
+/>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Keeping sessions or caches in memory with cluster or multiple replicas.
+- Creating a new worker thread per request instead of pooling.
+- Using worker threads for I/O-bound work.
+- `exec` with user-controlled strings.
+- Running cluster *and* many container replicas without accounting for total CPU and memory.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Node is single-threaded — how do you use all the CPU cores?">
+
+For an I/O-bound web server, I run multiple processes: either Node's cluster module, where a primary forks one worker per core and distributes connections across them, or — more commonly today — one process per container and let Kubernetes or ECS run several replicas. Each process has its own memory, so sessions, caches and rate limits move to Redis or the database. For CPU-heavy work inside a request, like image processing or big parsing jobs, I use a pool of worker threads, which run JavaScript on other cores with their own event loops and communicate by message passing, keeping the main loop responsive. Child processes are for running external programs, and long-running jobs go to a queue.
+
+<Fragment slot="deeper">
+
+- **How do worker threads share data?** `postMessage` copies; transferring `ArrayBuffer`s moves ownership; `SharedArrayBuffer` + `Atomics` shares memory.
+- **Why not one worker per request?** Startup cost; use a pool.
+- **What breaks when moving to cluster?** Anything stored in process memory: sessions, in-memory rate limiting, caches, WebSocket room membership.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["`cluster`", "Forks worker processes that share a listening port."],
+  ["Worker thread", "An additional JavaScript thread with its own event loop and heap."],
+  ["Structured clone", "The copying algorithm used by `postMessage`."],
+  ["Transferable", "An object (like an `ArrayBuffer`) whose ownership can be moved between threads without copying."],
+  ["`child_process`", "Module for running other programs as separate processes."],
+]} />

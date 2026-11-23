@@ -1,0 +1,233 @@
+---
+title: Closures
+part: Scope & functions
+order: 11
+level: core
+summary: A function remembers the variables around where it was created — even after that outer function has finished. That memory is a closure.
+demo: js-closures-loop
+---
+
+A **closure** is a function together with the variables it can see from the place it was created. Because of lexical scope, a function written inside another function can use the outer function's variables. The surprising part is that it **keeps** access to them even after the outer function has returned. The variables do not disappear; the inner function carries them along.
+
+<Analogy>
+  A closure is like a backpack. When a function is created, it packs a backpack with every variable it might need from the surrounding code. Wherever the function later goes — passed to `setTimeout`, returned to another file, stored as a click handler — it carries that backpack, and the variables inside are the live originals, not photocopies.
+</Analogy>
+
+## Why it matters
+
+Closures are everywhere: event handlers, callbacks, React hooks, module privacy, memoisation, debounce. Interviewers ask you to explain them, then to predict the output of a loop with `setTimeout`, then to build something with them (a counter, `once`, `memoize`).
+
+## The classic example
+
+```js
+function makeCounter() {
+  let count = 0;              // a local variable of makeCounter
+  return function increment() {
+    count += 1;               // uses the outer variable
+    return count;
+  };
+}
+
+const counter = makeCounter();  // makeCounter has finished running…
+counter();  // 1
+counter();  // 2                 …but count lives on
+```
+
+<Diagram
+  caption="When makeCounter returns, its stack frame is gone — but the scope holding count survives on the heap, because the returned function still refers to it."
+  chart={`flowchart LR
+    subgraph Stack
+      G["global<br/>counter → ⬤"]
+      M["makeCounter frame<br/>(popped after return)"]
+    end
+    subgraph Heap
+      FN["function increment"]
+      ENV["scope of makeCounter<br/>count = 2"]
+    end
+    G --> FN
+    FN -- "closure: outer scope" --> ENV
+    M -. "created" .-> ENV`}
+  steps={[
+    { nodes: ["M", "ENV"], text: "Calling `makeCounter` creates a scope holding `count = 0`." },
+    { nodes: ["M", "ENV", "FN"], text: "It creates `increment`, which stores a link to that scope — this link **is** the closure." },
+    { nodes: ["G", "FN", "ENV"], text: "`makeCounter` returns and its frame is popped. The scope is not freed: `counter` → `increment` → scope is still a reachable chain." },
+    { nodes: ["FN", "ENV"], text: "Each call to `counter()` updates the **same** `count` in that saved scope: 1, then 2." },
+  ]}
+/>
+
+Each call to `makeCounter` creates a **new** scope, so separate counters are independent:
+
+```js
+const a = makeCounter();
+const b = makeCounter();
+a(); a();   // 1, 2
+b();        // 1 — its own count
+```
+
+## Closures capture variables, not values
+
+The closure holds a reference to the **variable itself**, so it always sees its current value.
+
+```js
+let message = 'hello';
+const say = () => console.log(message);
+message = 'goodbye';
+say();  // 'goodbye'
+```
+
+This is the heart of the most famous closure question:
+
+```js
+for (var i = 0; i < 3; i++) {
+  setTimeout(() => console.log(i), 0);
+}
+// 3, 3, 3
+
+for (let j = 0; j < 3; j++) {
+  setTimeout(() => console.log(j), 0);
+}
+// 0, 1, 2
+```
+
+<Diagram
+  caption="var creates one variable for the whole loop; all callbacks close over it. let creates a new variable per iteration; each callback closes over its own."
+  chart={`flowchart LR
+    subgraph VarLoop["var loop"]
+      c1["callback 1"] --> I["i (one shared variable)<br/>= 3 when they run"]
+      c2["callback 2"] --> I
+      c3["callback 3"] --> I
+    end
+    subgraph LetLoop["let loop"]
+      d1["callback 1"] --> J0["j = 0"]
+      d2["callback 2"] --> J1["j = 1"]
+      d3["callback 3"] --> J2["j = 2"]
+    end`}
+/>
+
+The callbacks run **after** the loop has finished. With `var` there is only one `i`, and by then it is 3. With `let`, the language creates a fresh `j` for each iteration and copies the current value in, so each callback sees its own.
+
+<DemoLink id="js-closures-loop" />
+
+## What closures are used for
+
+### Private state
+
+Before `#private` class fields existed, closures were the way to hide data. They are still a neat, lightweight option.
+
+```js
+function createWallet(initial) {
+  let balance = initial;                 // impossible to reach from outside
+  return {
+    deposit(amount) { balance += amount; },
+    getBalance() { return balance; },
+  };
+}
+const w = createWallet(10);
+w.deposit(5);
+w.getBalance(); // 15
+w.balance;      // undefined
+```
+
+### Function factories
+
+```js
+const multiplier = (factor) => (n) => n * factor;
+const double = multiplier(2);
+const triple = multiplier(3);
+double(5);  // 10
+triple(5);  // 15
+```
+
+### Remembering results (memoisation)
+
+```js
+function memoize(fn) {
+  const cache = new Map();             // lives in the closure
+  return (n) => {
+    if (!cache.has(n)) cache.set(n, fn(n));
+    return cache.get(n);
+  };
+}
+```
+
+### Running something only once
+
+```js
+function once(fn) {
+  let done = false, result;
+  return (...args) => {
+    if (!done) { done = true; result = fn(...args); }
+    return result;
+  };
+}
+const init = once(() => console.log('initialised'));
+init(); init();   // logs once
+```
+
+### Callbacks and handlers
+
+Every event handler or `.then` callback that uses a variable from its surrounding function is a closure:
+
+```js
+function attach(button, userId) {
+  button.addEventListener('click', () => {
+    fetch(`/api/like/${userId}`);   // userId remembered from attach's scope
+  });
+}
+```
+
+## Stale closures
+
+Because a closure sees the variables of the **specific scope it was created in**, it can get "stuck" with old values if that scope is replaced. React developers meet this with hooks:
+
+```js
+function Timer() {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setCount(count + 1), 1000); // count is always 0 here
+    return () => clearInterval(id);
+  }, []);                     // effect created once, with the first render's count
+}
+// fix: setCount((c) => c + 1)
+```
+
+Each render creates a new scope with its own `count`. The interval's callback was created during the first render and keeps seeing that render's `count`.
+
+## Memory cost
+
+A closure keeps its outer variables alive for as long as the closure itself is alive. That is usually exactly what you want, but a long-lived closure (a global listener, a cache) that happens to reference a large object keeps that object in memory too. See *Garbage collection and memory leaks*.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Thinking a closure copies values at creation time. It references live variables.
+- Creating callbacks in a `var` loop.
+- Holding a large object in a long-lived closure when only one field is needed.
+- Stale closures in React effects and intervals.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is a closure?">
+
+A closure is a function bundled with references to the variables in the scope where it was created. Because JavaScript uses lexical scope, an inner function can use its outer function's variables, and it keeps that access even after the outer function has returned — the engine keeps that scope alive on the heap for as long as the inner function is reachable. Closures capture variables, not values, which is why callbacks created in a `var` loop all see the final value. I use them for private state, function factories, memoisation, and they are what make callbacks and React hooks work.
+
+<Fragment slot="deeper">
+
+- **Why does the `var` loop print 3, 3, 3?** One shared `i`; the callbacks run after the loop, when it is 3. `let` creates a binding per iteration.
+- **Can closures leak memory?** Yes, if a long-lived closure references large data.
+- **What is a stale closure?** A callback still seeing variables from an older scope, common with React hooks.
+- **How would you implement `once` or `memoize`?** Keep state in the outer function's variables (see above).
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Closure", "A function plus the variables from its creation scope that it can still access."],
+  ["Lexical environment", "The record of variables for a scope, linked to its outer environment."],
+  ["Function factory", "A function that returns new functions configured by its arguments."],
+  ["Memoisation", "Caching a function's results by input."],
+  ["Stale closure", "A closure that keeps seeing outdated variables from an earlier scope."],
+]} />

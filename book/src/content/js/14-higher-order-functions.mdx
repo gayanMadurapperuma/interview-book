@@ -1,0 +1,219 @@
+---
+title: Higher-order functions, currying and memoisation
+part: Scope & functions
+order: 14
+level: core
+summary: Functions that take or return other functions let you build small, reusable pieces and combine them — the core of functional style in JavaScript.
+---
+
+A **higher-order function** is a function that either **takes a function as an argument**, **returns a function**, or both. You already use them every day: `map`, `filter`, `addEventListener` and `setTimeout` all take functions. Writing your own lets you capture a pattern once — retrying, logging, caching, validating — and apply it to any function.
+
+<Analogy>
+  A higher-order function is like a phone case. The case doesn't replace your phone; it wraps it and adds something — a grip, a wallet, a stand. `withRetry(fetchUser)` wraps `fetchUser` and adds retries, without changing `fetchUser` itself.
+</Analogy>
+
+## Why it matters
+
+Interviewers often ask you to implement `debounce`, `once`, `memoize`, `curry` or `compose` from scratch. They are short, test closures and higher-order thinking, and show up in real code (middleware, decorators, React higher-order components and hooks).
+
+## Functions in, functions out
+
+```js
+// takes a function
+function repeat(times, fn) {
+  for (let i = 0; i < times; i++) fn(i);
+}
+repeat(3, (i) => console.log('run', i));
+
+// returns a function
+function greaterThan(n) {
+  return (x) => x > n;
+}
+const isAdult = greaterThan(17);
+[12, 30, 18].filter(isAdult);  // [30, 18]
+```
+
+## Wrapping: adding behaviour without touching the original
+
+<Diagram
+  caption="A wrapper takes a function and returns a new one that does something before and after calling the original."
+  chart={`flowchart LR
+    C["caller"] --> W["withTiming(fn)<br/>start timer"]
+    W --> F["original fn"]
+    F --> W2["stop timer<br/>log duration"]
+    W2 --> C2["result back to caller"]`}
+  flow
+/>
+
+```js
+function withTiming(fn, label = fn.name) {
+  return async (...args) => {
+    const start = performance.now();
+    try {
+      return await fn(...args);
+    } finally {
+      console.log(`${label} took ${(performance.now() - start).toFixed(1)} ms`);
+    }
+  };
+}
+
+const timedFetchUser = withTiming(fetchUser);
+await timedFetchUser(42);   // logs: fetchUser took 37.2 ms
+```
+
+Express middleware, logging decorators and retry helpers all follow this shape.
+
+## Composition: building pipelines
+
+**Composition** chains small functions so the output of one becomes the input of the next.
+
+```js
+const pipe = (...fns) => (input) => fns.reduce((value, fn) => fn(value), input);
+
+const slugify = pipe(
+  (s) => s.trim(),
+  (s) => s.toLowerCase(),
+  (s) => s.replace(/[^a-z0-9]+/g, '-'),
+  (s) => s.replace(/^-|-$/g, ''),
+);
+
+slugify('  Hello, World!  ');   // 'hello-world'
+```
+
+<Diagram
+  caption="pipe runs the input through each function in turn, left to right."
+  chart={`flowchart LR
+    I["'  Hello, World!  '"] --> T["trim"] --> L["toLowerCase"] --> R["replace non-letters"] --> E["trim dashes"] --> O["'hello-world'"]`}
+  steps={[
+    { nodes: ["I", "T"], text: "`'  Hello, World!  '` → `'Hello, World!'`" },
+    { nodes: ["T", "L"], text: "→ `'hello, world!'`" },
+    { nodes: ["L", "R"], text: "→ `'hello-world-'`" },
+    { nodes: ["R", "E", "O"], text: "→ `'hello-world'`. Each step is tiny and testable on its own." },
+  ]}
+/>
+
+`compose` is the same idea but runs right to left, as in maths: `compose(f, g)(x)` is `f(g(x))`.
+
+## Currying and partial application
+
+**Currying** turns a function of several arguments into a chain of functions that each take one argument. **Partial application** fixes some arguments now and leaves the rest for later. In practice, both are used to create specialised functions from general ones.
+
+```js
+// plain
+const add = (a, b, c) => a + b + c;
+
+// curried by hand
+const addC = (a) => (b) => (c) => a + b + c;
+addC(1)(2)(3);   // 6
+
+// partial application with bind
+const addTen = add.bind(null, 10);
+addTen(1, 2);    // 13
+```
+
+A general `curry` helper:
+
+```js
+function curry(fn) {
+  return function curried(...args) {
+    if (args.length >= fn.length) return fn.apply(this, args);
+    return (...more) => curried.apply(this, [...args, ...more]);
+  };
+}
+
+const log = curry((level, area, message) => `[${level}] ${area}: ${message}`);
+const error = log('ERROR');
+const dbError = error('db');
+dbError('connection lost');   // '[ERROR] db: connection lost'
+```
+
+<Diagram
+  caption="Currying collects arguments one call at a time. When enough have arrived (fn.length), the original runs."
+  chart={`flowchart LR
+    A["log('ERROR')<br/>1 of 3 args"] --> B["…('db')<br/>2 of 3"] --> C["…('connection lost')<br/>3 of 3 → run"] --> R["'[ERROR] db: connection lost'"]`}
+/>
+
+## Memoisation
+
+**Memoisation** caches a function's result for each input, so repeated calls with the same input are instant. It only makes sense for **pure** functions (same input → same output, no side effects).
+
+```js
+function memoize(fn, { key = (...args) => JSON.stringify(args), max = 500 } = {}) {
+  const cache = new Map();
+  return function (...args) {
+    const k = key(...args);
+    if (cache.has(k)) {
+      const v = cache.get(k);
+      cache.delete(k); cache.set(k, v);   // move to "most recent"
+      return v;
+    }
+    const v = fn.apply(this, args);
+    cache.set(k, v);
+    if (cache.size > max) cache.delete(cache.keys().next().value); // evict oldest
+    return v;
+  };
+}
+
+const slowSquare = (n) => { for (let i = 0; i < 1e7; i++); return n * n; };
+const fastSquare = memoize(slowSquare);
+fastSquare(9);  // slow the first time
+fastSquare(9);  // instant
+```
+
+The `max` limit matters: an unbounded cache is a memory leak waiting to happen. Because a `Map` remembers insertion order, deleting and re-inserting on every hit and evicting the first key turns it into a simple **LRU** (least recently used) cache.
+
+<Callout type="pitfall" title="Memoising async functions">
+  Cache the **promise**, not the result, so concurrent callers share one request. But remove the entry if the promise rejects, otherwise a temporary failure is cached forever.
+</Callout>
+
+```js
+function memoizeAsync(fn) {
+  const cache = new Map();
+  return (key) => {
+    if (!cache.has(key)) {
+      const p = fn(key).catch((err) => { cache.delete(key); throw err; });
+      cache.set(key, p);
+    }
+    return cache.get(key);
+  };
+}
+```
+
+## Point-free style, briefly
+
+Passing a function directly instead of wrapping it in an arrow is called *point-free* style: `ids.map(String)` instead of `ids.map((id) => String(id))`. It reads nicely, but be careful: `map` passes three arguments (value, index, array), so `['1', '2', '3'].map(parseInt)` gives `[1, NaN, NaN]` because `parseInt` receives the index as its radix.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Memoising impure functions (anything reading the clock, random numbers or external state).
+- Unbounded memo caches on servers.
+- `['1','2','3'].map(parseInt)` — extra arguments change behaviour.
+- Over-abstracting: three nested curried calls are harder to read than one clear function.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is a higher-order function? Can you give examples?">
+
+A higher-order function takes a function as an argument, returns one, or both — possible because functions are values in JavaScript. Built-in examples are `map`, `filter`, `reduce` and `addEventListener`. I write them to capture reusable behaviour: wrappers like `withRetry` or `withTiming` that add logic around any function, `memoize` to cache results of pure functions, `debounce` to rate-limit calls, and `pipe` or `compose` to chain small transformations. They all rely on closures to remember the wrapped function and any state.
+
+<Fragment slot="deeper">
+
+- **Currying vs partial application?** Currying turns an n-argument function into n one-argument functions; partial application fixes some arguments and returns a function for the rest.
+- **When is memoisation safe?** For pure functions with cheap-to-compute keys, and with a bounded cache.
+- **Why does `map(parseInt)` misbehave?** `map` passes the index as a second argument, which `parseInt` treats as the radix.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Higher-order function", "A function that takes or returns another function."],
+  ["Composition", "Combining functions so the output of one feeds the next (`pipe`, `compose`)."],
+  ["Currying", "Transforming `f(a, b, c)` into `f(a)(b)(c)`."],
+  ["Partial application", "Fixing some arguments of a function to create a more specific one."],
+  ["Memoisation", "Caching results by input to avoid repeated work."],
+  ["LRU cache", "A bounded cache that evicts the least recently used entry first."],
+]} />

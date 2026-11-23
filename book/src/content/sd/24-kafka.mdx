@@ -1,0 +1,199 @@
+---
+title: Apache Kafka in depth
+part: Core components
+order: 24
+level: advanced
+summary: The distributed commit log behind most event-driven systems — topics, partitions, replication, consumer groups, delivery guarantees and the operational knobs that matter.
+---
+
+**Apache Kafka** is a distributed, durable, append-only **log**. Producers append records to **topics**; each topic is split into **partitions** spread across a cluster of **brokers**; consumers read records in order and remember their position (**offset**). Unlike a traditional queue, Kafka doesn't delete a record when it's read — it keeps records for a configured retention (hours, days, forever), so many independent consumers can read the same data, and any of them can rewind and replay. That makes Kafka the backbone for event-driven microservices, change data capture, stream processing and data pipelines.
+
+<Analogy>
+  Kafka is like a set of numbered ledgers kept in a bank vault. Clerks (producers) only ever add new lines at the end of a ledger. Auditors (consumers) read lines in order and keep a bookmark. Different departments each have their own bookmark in the same ledger, and a new department can start reading from page one. Every ledger is photocopied to other vaults (replication) so a fire doesn't lose it.
+</Analogy>
+
+## Why it matters
+
+"Why Kafka and not a queue?", "how do you guarantee ordering?", "what happens when a broker dies?", "how do you get exactly-once?" — Kafka questions are standard in backend and system design interviews, and in real systems misconfiguring it loses data or ordering silently.
+
+## Core concepts
+
+<Diagram
+  caption="A topic with three partitions, replicated across three brokers. Each partition has one leader replica (★) and followers."
+  chart={`flowchart LR
+    P["Producers"] --> B1
+    P --> B2
+    P --> B3
+    subgraph B1["Broker 1"]
+      direction TB
+      p0L["orders-0 ★ leader"]
+      p1F["orders-1 follower"]
+    end
+    subgraph B2["Broker 2"]
+      direction TB
+      p1L["orders-1 ★ leader"]
+      p2F["orders-2 follower"]
+    end
+    subgraph B3["Broker 3"]
+      direction TB
+      p2L["orders-2 ★ leader"]
+      p0F["orders-0 follower"]
+    end
+    B1 --> C["Consumer group"]
+    B2 --> C
+    B3 --> C`}
+  steps={[
+    { nodes: ["P"], text: "Producers write to a **topic** (`orders`). The record's **key** decides its partition: `hash(key) % partitions`." },
+    { nodes: ["p0L", "p1L", "p2L"], text: "Each **partition** is an ordered, append-only log with one **leader** replica that handles reads and writes." },
+    { nodes: ["p0F", "p1F", "p2F"], text: "Followers on other brokers copy the leader. If a broker dies, a follower that was fully caught up becomes the leader." },
+    { nodes: ["C"], text: "A **consumer group** splits partitions among its members; each partition is read by exactly one member of the group." },
+  ]}
+/>
+
+| Term | Meaning |
+|---|---|
+| **Broker** | a Kafka server; a cluster has several |
+| **Topic** | a named stream of records (`orders`, `payments`) |
+| **Partition** | an ordered shard of a topic; the unit of ordering, parallelism and replication |
+| **Offset** | a record's position within its partition |
+| **Replication factor** | how many copies of each partition (usually 3) |
+| **ISR** (in-sync replicas) | followers fully caught up with the leader |
+| **Consumer group** | consumers sharing work; each partition goes to one member |
+| **KRaft / ZooKeeper** | cluster metadata management (KRaft, Kafka's built-in Raft, replaced ZooKeeper) |
+
+## Producing
+
+```js
+// kafkajs
+const producer = kafka.producer({ idempotent: true });   // broker drops duplicate retries
+await producer.connect();
+await producer.send({
+  topic: 'orders',
+  acks: -1,                                               // "all": wait for all in-sync replicas
+  messages: [{ key: order.id, value: JSON.stringify(event), headers: { type: 'OrderPlaced' } }],
+});
+```
+
+- **Key** → partition. Same key, same partition, **same order**. Use the entity ID (order, user, account).
+- **`acks`**: `0` fire-and-forget; `1` leader wrote it; **`all`** every in-sync replica has it. With `min.insync.replicas=2` and replication factor 3, `acks=all` survives a broker loss without data loss.
+- **Idempotent producer**: retries after a lost acknowledgement don't create duplicates in the log.
+- **Batching** (`linger.ms`, `batch.size`) and **compression** (lz4, zstd) give Kafka its huge throughput.
+
+## Consuming
+
+```js
+const consumer = kafka.consumer({ groupId: 'billing' });
+await consumer.subscribe({ topic: 'orders', fromBeginning: false });
+await consumer.run({
+  eachMessage: async ({ partition, message }) => {
+    await handleOrderEvent(JSON.parse(message.value));   // must be idempotent
+  },                                                      // offset committed after success
+});
+```
+
+<Diagram
+  caption="Two consumer groups read the same topic independently. Within a group, adding members spreads partitions — up to one member per partition."
+  chart={`flowchart LR
+    subgraph T["topic: orders (4 partitions)"]
+      direction TB
+      p0["p0"]
+      p1["p1"]
+      p2["p2"]
+      p3["p3"]
+    end
+    subgraph G1["group: billing"]
+      direction TB
+      b1["billing-1"]
+      b2["billing-2"]
+    end
+    subgraph G2["group: analytics"]
+      direction TB
+      a1["analytics-1"]
+    end
+    p0 --> b1
+    p1 --> b1
+    p2 --> b2
+    p3 --> b2
+    p0 --> a1
+    p1 --> a1
+    p2 --> a1
+    p3 --> a1`}
+/>
+
+- **Rebalancing**: when members join/leave, partitions are reassigned. During a rebalance consumption pauses; cooperative rebalancing and static membership reduce the disruption.
+- **Max parallelism = number of partitions.** Five consumers on four partitions leaves one idle.
+- **Commit after processing** → at-least-once. Commit before → at-most-once.
+- **Consumer lag** (latest offset − committed offset) is the main health metric.
+
+## Delivery guarantees
+
+| Goal | How |
+|---|---|
+| No loss | `acks=all`, `min.insync.replicas=2`, RF=3, `unclean.leader.election=false`, commit offsets after processing |
+| No duplicates in Kafka | idempotent producer |
+| Exactly-once read–process–write within Kafka | transactions: produce output + commit input offsets atomically (Kafka Streams, Flink) |
+| Exactly-once side effects outside Kafka | idempotent consumers / dedup tables (see *Delivery semantics*) |
+
+## Retention and compaction
+
+- **Time/size retention**: delete segments older than N days or beyond N bytes.
+- **Log compaction**: keep only the **latest** record per key — the topic becomes a changelog of current state (e.g. user profiles), perfect for rebuilding caches or materialised views. A record with a null value (tombstone) deletes the key.
+- **Tiered storage** keeps recent segments on broker disks and older ones in object storage, so long retention is cheap.
+
+## Ecosystem
+
+- **Kafka Connect**: source/sink connectors (Debezium CDC from PostgreSQL, S3 sink, Elasticsearch sink) without custom code.
+- **Kafka Streams / ksqlDB / Flink**: stateful stream processing — joins, windows, aggregations.
+- **Schema Registry**: Avro/Protobuf/JSON schemas with compatibility rules so producers can't break consumers.
+- Managed options: Confluent Cloud, Amazon MSK, Aiven, Redpanda (Kafka-compatible).
+
+## Sizing and pitfalls
+
+<Diagram
+  caption="Choosing a partition key decides ordering and balance. A skewed key creates a hot partition that limits the whole consumer group."
+  chart={`flowchart LR
+    K{"partition key"} --> G["order_id / user_id<br/>✓ even spread, per-entity order"]
+    K --> B["country / tenant with one giant customer<br/>✗ hot partition"]
+    K --> N["no key (round-robin)<br/>~ even, but no ordering"]`}
+/>
+
+- Choose **partition count** for future throughput (adding partitions later remaps keys and breaks per-key ordering).
+- Large messages (>1 MB) hurt; store payloads in S3 and send references.
+- One slow message blocks its partition — use retry topics and a **dead-letter topic** instead of retrying in place forever.
+- Kafka is **not** a database for ad-hoc queries and not ideal as a job queue needing per-message acknowledgement and delays (that's RabbitMQ/SQS territory).
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `acks=1` with replication factor 1 "for performance" — data loss on any broker failure.
+- Assuming topic-wide ordering; ordering is per partition.
+- More consumers than partitions, expecting more throughput.
+- Non-idempotent consumers on at-least-once delivery.
+- No schema management: one producer change breaks every consumer.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How does Kafka work, and how do you avoid losing or reordering messages?">
+
+Kafka is a replicated, partitioned commit log. A topic is split into partitions, each an append-only ordered log with a leader on one broker and followers on others; records are retained for a configured time regardless of whether they've been read, so multiple consumer groups read independently and can replay. Producers choose a partition by key, so all events for one entity land in one partition and stay ordered — ordering is per partition, not per topic. For durability I use replication factor 3, `min.insync.replicas` 2, `acks=all` and idempotent producers. Consumers in a group split the partitions, so parallelism is capped by partition count; they commit offsets after processing, which gives at-least-once delivery, so handlers are idempotent. For exactly-once within Kafka there are transactions; for external side effects, deduplication.
+
+<Fragment slot="deeper">
+
+- **What is the ISR?** In-sync replicas — followers caught up with the leader; only they can become leader safely.
+- **What is log compaction?** Keeping the latest record per key, turning a topic into a changelog.
+- **Kafka vs a queue?** Retained, replayable, partition-ordered log with consumer groups vs per-message delete-on-ack work distribution.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Topic / partition", "A named stream / an ordered shard of it — the unit of ordering and parallelism."],
+  ["Offset", "A record's position in a partition; consumers commit offsets to track progress."],
+  ["Consumer group", "Consumers sharing a topic's partitions; each partition read by one member."],
+  ["ISR", "In-sync replicas: followers fully caught up with the leader."],
+  ["`acks=all`", "Producer waits until all in-sync replicas have the record."],
+  ["Log compaction", "Retaining only the latest record per key."],
+]} />

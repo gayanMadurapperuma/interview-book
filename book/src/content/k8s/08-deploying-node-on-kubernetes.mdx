@@ -1,0 +1,173 @@
+---
+title: Deploying a Node.js service to Kubernetes, end to end
+part: Running in production
+order: 8
+level: advanced
+summary: From git push to running pods — manifests, Helm/Kustomize, CI/CD and GitOps, migrations, observability and security for a real Node service.
+---
+
+This chapter ties the volume together by deploying a realistic Node.js API to Kubernetes: building and publishing the image, describing it with manifests, packaging them with **Helm** or **Kustomize**, delivering changes through **CI/CD** or **GitOps**, running **database migrations** safely, and wiring up **observability** and **security**. It's the answer to "walk me through how your service gets to production".
+
+<Analogy>
+  Publishing a book. The manuscript (code) goes to the printer (CI) to produce identical copies (images). The catalogue entry (manifests) describes where it's shelved and how many copies are on display. The distributor (GitOps controller) makes sure every bookshop's shelves match the catalogue. Readers' feedback (observability) tells you if something went wrong.
+</Analogy>
+
+## Why it matters
+
+Senior interviews often ask for an end-to-end deployment story. It shows you understand how code, containers, Kubernetes objects and operational practices fit together.
+
+## The pipeline
+
+<Diagram
+  caption="From commit to production with GitOps: CI builds and publishes; a controller in the cluster pulls the desired state from git."
+  chart={`flowchart LR
+    DEV["git push"] --> CI["CI: lint, test,<br/>build image (tag = SHA),<br/>scan, sign, push"]
+    CI --> REG[("registry")]
+    CI --> PR["PR: bump image tag in<br/>deploy repo (staging)"]
+    PR --> GIT[("deploy repo<br/>Helm values / Kustomize overlays")]
+    GIT --> ARGO["Argo CD / Flux<br/>in the cluster"]
+    ARGO --> K8S["staging cluster"]
+    K8S --> PROMO["promote: same digest<br/>to production overlay"]
+    PROMO --> GIT`}
+  steps={[
+    { nodes: ["DEV", "CI"], text: "Every commit runs tests and builds an immutable image tagged with the commit SHA; it's scanned and signed." },
+    { nodes: ["CI", "REG"], text: "The image is pushed to the registry." },
+    { nodes: ["CI", "PR", "GIT"], text: "CI updates the image reference in the deployment repository (for staging) — the cluster's desired state lives in git." },
+    { nodes: ["GIT", "ARGO", "K8S"], text: "A **GitOps** controller in the cluster notices the change and applies it, continuously reconciling — manual drift is reverted." },
+    { nodes: ["K8S", "PROMO", "GIT"], text: "After verification, the **same digest** is promoted to production by another git change: reviewed, auditable, revertible." },
+  ]}
+/>
+
+GitOps benefits: every change is a reviewed commit, rollback is `git revert`, the cluster can be rebuilt from git, and CI needs no cluster credentials. Push-based CD (CI runs `helm upgrade`) is simpler but less auditable.
+
+## The manifests
+
+A typical service ships: **Deployment**, **Service**, **Ingress/HTTPRoute**, **HPA**, **PDB**, **ServiceAccount** (with cloud IAM role), **ConfigMap**, **ExternalSecret**, **NetworkPolicy**.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: orders-api, labels: { app: orders-api } }
+spec:
+  replicas: 3
+  strategy: { rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } }
+  selector: { matchLabels: { app: orders-api } }
+  template:
+    metadata:
+      labels: { app: orders-api }
+      annotations: { checksum/config: "{{ include (print $.Template.BasePath \"/configmap.yaml\") . | sha256sum }}" }
+    spec:
+      serviceAccountName: orders-api
+      terminationGracePeriodSeconds: 40
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      topologySpreadConstraints:
+        - { maxSkew: 1, topologyKey: topology.kubernetes.io/zone, whenUnsatisfiable: ScheduleAnyway,
+            labelSelector: { matchLabels: { app: orders-api } } }
+      containers:
+        - name: api
+          image: registry.example.com/orders-api@sha256:4b1e…
+          ports: [{ containerPort: 3000 }]
+          env:
+            - { name: NODE_OPTIONS, value: "--max-old-space-size=384" }
+          envFrom: [{ configMapRef: { name: orders-config } }]
+          volumeMounts: [{ name: secrets, mountPath: /var/run/secrets/app, readOnly: true }]
+          resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 512Mi } }
+          startupProbe:   { httpGet: { path: /health/live,  port: 3000 }, failureThreshold: 30, periodSeconds: 2 }
+          readinessProbe: { httpGet: { path: /health/ready, port: 3000 }, periodSeconds: 5 }
+          livenessProbe:  { httpGet: { path: /health/live,  port: 3000 }, periodSeconds: 10, failureThreshold: 3 }
+          lifecycle: { preStop: { sleep: { seconds: 5 } } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+      volumes:
+        - { name: secrets, secret: { secretName: orders-api-secrets } }
+```
+
+## Helm vs Kustomize
+
+| | Helm | Kustomize |
+|---|---|---|
+| Approach | templated charts + values files | plain YAML base + patches per environment (overlays) |
+| Packaging | versioned charts, dependencies, a release history | built into `kubectl -k` |
+| Good for | distributing software, many similar services from one chart | your own services with small env differences |
+| Risk | complex templates | duplication for many variants |
+
+Many teams use a shared internal Helm chart for all services, with per-service values, managed by Argo CD.
+
+## The Node service side
+
+What the application must do to behave well on Kubernetes:
+
+- **Config** from env/mounted files, validated at startup; fail fast.
+- **Health endpoints**: `/health/live` (event loop responsive), `/health/ready` (not shutting down; critical dependencies reachable; warm).
+- **Graceful shutdown** on SIGTERM: fail readiness, stop accepting, drain, close pools, exit (see the Node *Graceful shutdown* chapter).
+- **Logs** as JSON to stdout with request/trace IDs.
+- **Metrics** endpoint (`/metrics` for Prometheus) including event-loop delay; **traces** via OpenTelemetry.
+- **Stateless**: sessions, caches and files in Redis/DB/S3.
+
+## Database migrations
+
+Never run migrations from every pod at startup (races, slow rollouts). Options:
+
+<Diagram
+  caption="Run migrations once per release, before the new version takes traffic — and keep them backward-compatible with the old version."
+  chart={`flowchart LR
+    REL["new release"] --> MJ["migration Job<br/>(Helm pre-upgrade hook /<br/>Argo CD PreSync)"]
+    MJ -- "success" --> RO["rolling update of the Deployment"]
+    MJ -- "failure" --> STOP["release stops;<br/>old version keeps running"]`}
+/>
+
+Because old and new pods run side by side during a rollout, migrations must be **expand–contract** (see Databases *Schema design*): additive first, remove old columns in a later release.
+
+## Observability
+
+- **Logs**: shipped by a DaemonSet (Fluent Bit) to Loki/Elasticsearch/CloudWatch.
+- **Metrics**: Prometheus scraping `/metrics`, Grafana dashboards; alert on SLO burn rate, restarts, OOMKills, pending pods, HPA at max.
+- **Traces**: OpenTelemetry SDK in Node → collector → Tempo/Jaeger/X-Ray.
+- Useful commands: `kubectl get pods -o wide`, `kubectl describe pod`, `kubectl logs -f --previous`, `kubectl top pods`, `kubectl get events --sort-by=.lastTimestamp`.
+
+## Security checklist
+
+- Non-root, read-only root filesystem, no privilege escalation, all capabilities dropped (Pod Security Standards "restricted").
+- Dedicated ServiceAccount with workload identity; least-privilege RBAC; no default token mounts if unused.
+- Secrets from an external manager; NetworkPolicies default-deny.
+- Signed images verified by an admission policy (Kyverno, Gatekeeper); image scanning; regular base-image rebuilds.
+- Separate namespaces/clusters per environment; restricted `kubectl` access to production (GitOps does the deploying).
+
+## Progressive delivery
+
+For risky changes, **canary** releases (Argo Rollouts/Flagger) shift 5% → 25% → 100% of traffic while watching error rates and latency, rolling back automatically if metrics degrade. Feature flags decouple deploying code from releasing features.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- `kubectl apply` from laptops to production; drift from git.
+- Rebuilding images per environment instead of promoting the same digest.
+- Migrations inside app startup; destructive schema changes in the same release.
+- No resource requests, probes, PDB or graceful shutdown.
+- Default ServiceAccount with broad permissions.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Walk me through how a Node.js service gets deployed to Kubernetes in production.">
+
+On every commit, CI runs tests, builds a multi-stage image tagged with the commit SHA, scans and signs it, and pushes it to the registry. Deployment is GitOps: CI bumps the image digest in a deployment repo holding Helm values or Kustomize overlays, and Argo CD in the cluster reconciles to it, so every change is reviewed and revertible, and production gets the same digest that passed staging. The manifests define a Deployment with realistic requests, a memory limit matched to Node's heap, startup, readiness and liveness probes, a preStop delay and a grace period for graceful SIGTERM handling, zone spreading, plus a Service, Ingress, HPA, PodDisruptionBudget, NetworkPolicy, and a ServiceAccount mapped to a least-privilege cloud role with secrets synced from a secret manager. Migrations run once per release as a pre-sync Job and are backward-compatible. Logs, Prometheus metrics with event-loop delay and OpenTelemetry traces feed SLO alerts, and risky releases go out as automated canaries.
+
+<Fragment slot="deeper">
+
+- **GitOps vs push-based CD?** Cluster pulls desired state from git (auditable, drift-correcting) vs CI pushing changes.
+- **Why promote the same digest?** What you tested is exactly what runs in production.
+- **Where do migrations run?** A one-off Job before the rollout, using expand–contract changes.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Helm", "Package manager for Kubernetes using templated charts and values."],
+  ["Kustomize", "Template-free customisation of YAML via bases and overlays."],
+  ["GitOps", "Git as the source of truth, reconciled into the cluster by a controller."],
+  ["Argo CD / Flux", "GitOps controllers that sync clusters to git."],
+  ["Canary release", "Gradually shifting traffic to a new version while watching metrics."],
+  ["Pod Security Standards", "Baseline/restricted security profiles for pods."],
+]} />

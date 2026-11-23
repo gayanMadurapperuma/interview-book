@@ -1,0 +1,164 @@
+---
+title: "Case study: a chat system"
+part: Case studies
+order: 33
+level: advanced
+summary: Real-time delivery over WebSockets, message ordering and storage, offline users, group chats and presence.
+---
+
+A chat system — think WhatsApp, Slack or Messenger — lets users send messages to individuals and groups, delivered in real time when the recipient is online and stored for later when they're not. The interesting parts are **persistent connections** (millions of open WebSockets), **routing** a message to whichever server holds the recipient's connection, **ordering** and **storing** messages per conversation, and **presence** ("online", "typing…").
+
+<Analogy>
+  A switchboard operator in a huge hotel. Each guest has a direct line to one of many operators (their connection). When a guest sends a message to another, the operator looks up which colleague is connected to the recipient and passes it along — and if the recipient is out, the message goes into their pigeonhole (storage) and a note is slipped under their door (push notification).
+</Analogy>
+
+## 1. Requirements
+
+**Functional**
+
+- One-to-one and group chats (groups up to, say, 500 members).
+- Real-time delivery when online; stored and delivered later when offline (with push notifications).
+- Message history, synced across a user's devices.
+- Delivery status (sent, delivered, read), typing indicators, online presence.
+- Out of scope: voice/video, end-to-end encryption details (mention).
+
+**Non-functional**
+
+- Low latency (under ~200 ms end to end in-region).
+- Messages must **never be lost** and must appear **in order** within a conversation.
+- Highly available; scale to e.g. 50 million daily users.
+
+## 2. Estimates
+
+- 50M DAU × 40 messages/day = 2 × 10⁹ messages/day ≈ **23,000/s** average, ~100k/s peak.
+- Concurrent connections: maybe 20% online at peak → **10 million WebSockets**. At ~50k–100k connections per gateway server → **100–200 gateway servers**.
+- Storage: 2 × 10⁹ × 200 bytes ≈ **400 GB/day** → ~150 TB/year → a horizontally scalable store, partitioned by conversation.
+
+## 3. Connections and protocol
+
+Clients keep a **persistent WebSocket** connection to a **gateway** (chat server). HTTP polling would waste resources and add latency; WebSockets give full-duplex, low-latency messaging. Mobile apps fall back to **push notifications** (APNs/FCM) when backgrounded.
+
+## 4. High-level design
+
+<Diagram
+  caption="Gateways hold connections; a session registry maps users to gateways; the message service persists and routes."
+  chart={`flowchart LR
+    A["Alice's device"] -- "WebSocket" --> G1["Gateway 1"]
+    B["Bob's device"] -- "WebSocket" --> G2["Gateway 2"]
+    G1 --> MS["Message service"]
+    MS --> DB[("Message store<br/>partitioned by conversation")]
+    MS --> REG[("Session registry<br/>user → gateway (Redis)")]
+    MS -- "route to gateway 2" --> BUS["pub/sub / internal RPC"]
+    BUS --> G2
+    MS -- "if offline" --> PUSH["Push service<br/>APNs / FCM"]`}
+  steps={[
+    { nodes: ["A", "G1"], text: "Alice is connected by WebSocket to gateway 1. Gateways are stateless apart from their open connections." },
+    { nodes: ["G1", "MS", "DB"], text: "Alice sends a message. Gateway 1 passes it to the message service, which assigns it a sequence number in the conversation and **persists it first**." },
+    { nodes: ["MS", "REG"], text: "The service looks up where Bob is connected: the registry says gateway 2." },
+    { nodes: ["MS", "BUS", "G2", "B"], text: "It routes the message to gateway 2 (pub/sub channel per gateway, or direct RPC), which pushes it down Bob's WebSocket." },
+    { nodes: ["MS", "PUSH"], text: "If Bob has no live connection, a push notification is sent instead; he fetches the message when the app opens." },
+  ]}
+/>
+
+## 5. Deep dive: sending a message reliably
+
+<Diagram
+  sequence
+  caption="Persist before acknowledging; deliver after. Client-generated IDs make retries safe."
+  chart={`sequenceDiagram
+    participant A as Alice app
+    participant G as Gateway
+    participant M as Message service
+    participant B as Bob app
+    A->>G: send { clientMsgId, convId, text }
+    G->>M: store
+    M->>M: assign seq 1042, persist (dedup by clientMsgId)
+    M-->>A: ack: sent (seq 1042) ✓
+    M->>B: deliver seq 1042 via Bob's gateway
+    B-->>M: delivered ✓✓`}
+  notes={[
+    "Alice's app sends the message with an ID it generated, so a resend after a timeout is recognisable.",
+    "The gateway forwards it to the message service.",
+    "The service assigns the next sequence number in the conversation and stores it, ignoring duplicates of the same client ID.",
+    "Only after it's durable does Alice see a single tick.",
+    "The message is pushed to Bob's connected devices.",
+    "Bob's app acknowledges; Alice sees 'delivered'. Read receipts work the same way.",
+  ]}
+/>
+
+- **Persist first, then deliver**: an acknowledged message is never lost even if delivery fails.
+- **Client message IDs** make retries idempotent.
+- **Ordering**: assign a per-conversation **sequence number** (from the conversation's partition leader, or a per-conversation counter). Clients sort by it and detect gaps (`I have up to 1040, server says 1042 → fetch 1041`).
+- **Sync**: each device tracks the last sequence it has per conversation; on reconnect it asks "give me everything after N".
+
+## 6. Deep dive: storage
+
+Access pattern: "latest N messages of conversation C", "messages after sequence S". Partition by **conversation ID**, cluster by sequence number:
+
+```text
+messages: partition key = conversation_id, sort key = seq
+          (sender_id, created_at, body, type, client_msg_id)
+```
+
+A wide-column store (Cassandra/ScyllaDB — Discord's choice) or DynamoDB fits this perfectly: writes spread across conversations, and reading a conversation is one contiguous range. Large group conversations are hot partitions; bucket them by time (`conversation_id + month`).
+
+Separately, a **user inbox** table holds each user's conversations with last-message preview and unread counts, for the conversation list screen.
+
+## 7. Deep dive: group chats
+
+For a 500-member group, a message must reach up to 500 devices.
+
+- Store the message **once** in the conversation.
+- **Fan out delivery**: look up members, then their gateways (batch registry lookups), and push. Offline members get notifications (batched / collapsed).
+- Very large channels (100k+ members, Slack/Discord style) switch to **pull on open**: don't push every message to everyone; clients fetch when they view the channel.
+
+## 8. Presence and typing
+
+Presence is high-volume and can tolerate staleness:
+
+- Gateways update a user's **last-seen heartbeat** in Redis (with a TTL of ~60 s); no heartbeat → offline.
+- Publish presence changes only to users who are currently viewing that person (subscribed), not to all their contacts.
+- Typing indicators are **ephemeral**: routed through pub/sub, never stored, dropped if late.
+
+## 9. Scaling and failure
+
+- Gateways scale horizontally; on gateway failure, clients reconnect (with jittered backoff) to another and resync from their last sequence number.
+- The session registry is ephemeral and rebuilt as clients reconnect.
+- Multi-region: users connect to the nearest region; conversations have a home region for ordering; cross-region messages are forwarded.
+- Security: TLS everywhere; end-to-end encryption (Signal protocol) means servers store only ciphertext — features like server-side search then move to the device.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using HTTP polling instead of persistent connections.
+- Delivering before persisting (lost messages on failure).
+- Relying on timestamps for message order.
+- Broadcasting presence to every contact on every change.
+- Writing a group message once per member into storage.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Design a chat application like WhatsApp.">
+
+Clients hold persistent WebSocket connections to a horizontally scaled gateway tier, and a Redis session registry maps each user to the gateway holding their connection. When a user sends a message with a client-generated ID, the message service assigns the next sequence number in that conversation, persists it — deduplicating by client ID — and only then acknowledges, so acknowledged messages are never lost. It then routes the message to the recipients' gateways via pub/sub, or sends a push notification if they're offline. Messages are stored in a wide-column store partitioned by conversation ID and sorted by sequence, so loading history is one range read; devices sync by asking for everything after their last sequence number, which also fills gaps. Groups store the message once and fan out delivery; presence uses heartbeats with TTLs and is published only to interested viewers; typing indicators are ephemeral.
+
+<Fragment slot="deeper">
+
+- **How do you order messages?** Per-conversation sequence numbers from a single owner, not timestamps.
+- **What happens when a gateway dies?** Clients reconnect elsewhere and resync from their last sequence number.
+- **Why partition by conversation?** History reads are contiguous and writes spread across partitions.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["WebSocket", "A persistent, full-duplex connection between client and server."],
+  ["Gateway", "Server tier holding client connections and pushing messages to them."],
+  ["Session registry", "Mapping from user/device to the gateway holding its connection."],
+  ["Sequence number", "Per-conversation increasing number used for ordering and sync."],
+  ["Presence", "Online/offline and typing status, typically ephemeral and approximate."],
+  ["Fan-out", "Delivering one message to many recipients."],
+]} />

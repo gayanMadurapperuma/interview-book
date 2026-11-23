@@ -1,0 +1,139 @@
+---
+title: "Configuration, secrets and storage"
+part: Kubernetes core
+order: 6
+level: core
+summary: ConfigMaps and Secrets for settings, external secret stores for real credentials, and volumes, PersistentVolumeClaims and StorageClasses for data that must survive a pod.
+---
+
+Containers should be immutable and identical across environments, so everything that differs — configuration and credentials — is injected at runtime. Kubernetes provides **ConfigMaps** for non-sensitive settings and **Secrets** for sensitive ones, exposed to pods as environment variables or files. And because a container's filesystem disappears with it, data that must persist lives on **volumes** — temporary ones shared within a pod, or **PersistentVolumes** that outlive pods, requested through **PersistentVolumeClaims** and provisioned by **StorageClasses**.
+
+<Analogy>
+  A hotel. The rooms (images) are identical; each guest's preferences (ConfigMap) and room safe code (Secret) are given at check-in. Luggage left in the room is cleared when you check out (container filesystem); valuables you want to keep go into the hotel's long-term storage locker (PersistentVolume), which you claim with a ticket (PersistentVolumeClaim).
+</Analogy>
+
+## Why it matters
+
+Interviewers ask how to manage config and secrets on Kubernetes (and why plain Secrets aren't enough), and how persistent storage works for stateful workloads.
+
+## ConfigMaps
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: orders-config }
+data:
+  LOG_LEVEL: info
+  PAYMENTS_URL: http://payments.shop.svc.cluster.local
+  feature-flags.json: |
+    { "newCheckout": true }
+```
+
+```yaml
+# in the pod spec
+containers:
+  - name: api
+    envFrom: [{ configMapRef: { name: orders-config } }]       # as env vars
+    volumeMounts: [{ name: flags, mountPath: /etc/flags }]      # or as files
+volumes:
+  - name: flags
+    configMap: { name: orders-config, items: [{ key: feature-flags.json, path: flags.json }] }
+```
+
+- Env vars are read **once at startup**; changing a ConfigMap requires a restart (rollout) to take effect. Files mounted from ConfigMaps update in place (after a delay) — the app must re-read them.
+- A common trick: put a hash of the config in a pod annotation, so config changes trigger a rolling update automatically (Helm and Kustomize support this).
+
+## Secrets
+
+Kubernetes **Secrets** look like ConfigMaps but are meant for sensitive data. Important caveats:
+
+- By default they're only **base64-encoded**, not encrypted. Enable **encryption at rest** for etcd (managed clusters often do, with KMS).
+- Anyone who can create pods in a namespace can usually read its secrets — restrict with **RBAC**.
+- Don't commit raw Secret manifests to git.
+
+<Diagram
+  caption="Production pattern: the real secret lives in a cloud secret manager; an operator syncs it into a Kubernetes Secret (or the pod reads it directly via workload identity)."
+  chart={`flowchart LR
+    SM[("AWS Secrets Manager /<br/>Vault / GCP Secret Manager")] --> ESO["External Secrets Operator<br/>or CSI Secrets Store driver"]
+    ESO --> KS["Kubernetes Secret<br/>(encrypted at rest)"]
+    KS --> POD["pod: env var or mounted file"]
+    SA["pod's service account<br/>→ cloud IAM role (IRSA / Workload Identity)"] -. "authorises access" .-> SM`}
+  steps={[
+    { nodes: ["SM"], text: "The source of truth is a managed secret store with audit logs and rotation." },
+    { nodes: ["SM", "ESO", "KS"], text: "An operator (External Secrets) or the CSI Secrets Store driver syncs selected secrets into the cluster, refreshing them on rotation." },
+    { nodes: ["KS", "POD"], text: "Pods consume them as files (preferred — env vars leak into crash dumps and child processes) or env vars." },
+    { nodes: ["SA", "SM"], text: "Access is granted to the pod's own identity via workload identity — no static cloud keys in the cluster." },
+  ]}
+/>
+
+Alternatives for GitOps: **Sealed Secrets** or **SOPS** encrypt secrets so the encrypted form can be committed.
+
+## Volumes
+
+| Volume | Lifetime | Use |
+|---|---|---|
+| `emptyDir` | the pod's lifetime | scratch space, cache, sharing files between containers in a pod |
+| `configMap` / `secret` / `projected` | managed by Kubernetes | config files, tokens, certificates |
+| `hostPath` | the node | node agents only — avoid for apps (security risk) |
+| **PersistentVolumeClaim** | independent of pods | databases, uploads processing, anything durable |
+
+## Persistent storage
+
+<Diagram
+  caption="Dynamic provisioning: a pod's claim triggers the StorageClass to create a cloud disk, which is bound to the claim and attached to whichever node runs the pod."
+  chart={`flowchart LR
+    POD["pod (StatefulSet db-0)"] --> PVC["PersistentVolumeClaim<br/>data-db-0: 50Gi, ReadWriteOnce"]
+    PVC --> SC["StorageClass gp3<br/>(provisioner: EBS CSI driver)"]
+    SC --> PV["PersistentVolume<br/>→ AWS EBS volume vol-0ab…"]
+    PV --> PVC`}
+  steps={[
+    { nodes: ["POD", "PVC"], text: "A pod (often via a StatefulSet's volume claim template) asks for storage with a **PersistentVolumeClaim**: size and access mode." },
+    { nodes: ["PVC", "SC"], text: "The claim names a **StorageClass**, which describes a type of storage and the CSI driver that provisions it." },
+    { nodes: ["SC", "PV"], text: "The driver creates a real disk (EBS, Persistent Disk, Azure Disk) and a **PersistentVolume** object for it." },
+    { nodes: ["PV", "PVC"], text: "The PV is bound to the claim and attached to the node running the pod. If the pod is rescheduled, the disk follows it (within its availability zone)." },
+  ]}
+/>
+
+Access modes:
+
+- **ReadWriteOnce** — one node mounts read-write (block disks like EBS). Most databases.
+- **ReadWriteMany** — many nodes read-write (network file systems: EFS, Filestore, NFS).
+- **ReadOnlyMany** — many readers.
+
+Things to know: block volumes are **zonal** (a pod with an EBS volume must run in that zone); set the **reclaim policy** (`Retain` for important data so deleting the claim doesn't delete the disk); use **VolumeSnapshots** for backups. Often the simplest answer is to keep durable data **out** of the cluster entirely — managed databases and object storage.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Assuming Secrets are encrypted because they're base64.
+- Secrets committed to git or printed in logs.
+- Changing a ConfigMap and expecting running pods to pick up env vars.
+- Writing important data to the container filesystem or `emptyDir`.
+- `Delete` reclaim policy on a production database volume.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you manage configuration, secrets and persistent data on Kubernetes?">
+
+Non-sensitive configuration goes in ConfigMaps, injected as environment variables or mounted files, with a config hash annotation so changes roll the pods. For secrets, Kubernetes Secrets are only base64 by default, so I'd enable etcd encryption with KMS, restrict access with RBAC, and keep the source of truth in a cloud secret manager or Vault, synced in by the External Secrets Operator or the CSI driver, with pods authenticating through workload identity rather than static keys — and prefer mounting secrets as files. For data, a container's filesystem is ephemeral, so durable data uses PersistentVolumeClaims: a StorageClass dynamically provisions a cloud disk through a CSI driver, bound to the claim and attached wherever the pod runs — usually via a StatefulSet's volume claim templates — with a Retain reclaim policy and snapshots. Often I'd rather keep durable state in managed databases and object storage outside the cluster.
+
+<Fragment slot="deeper">
+
+- **Env vars vs mounted files for secrets?** Files can update and don't leak into process environments; env vars need restarts.
+- **What is a StorageClass?** A template for dynamically provisioning a kind of storage.
+- **Why do volumes tie pods to zones?** Block disks are zonal; pods must run where the disk is.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["ConfigMap", "Kubernetes object holding non-sensitive configuration."],
+  ["Secret", "Object for sensitive data; base64 by default, encrypt at rest."],
+  ["External Secrets Operator", "Syncs secrets from external managers into Kubernetes."],
+  ["PersistentVolumeClaim", "A pod's request for durable storage."],
+  ["StorageClass", "Describes how to dynamically provision a kind of storage."],
+  ["Access mode", "ReadWriteOnce, ReadWriteMany or ReadOnlyMany."],
+]} />
