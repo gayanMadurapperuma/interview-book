@@ -24,6 +24,8 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.12",
+    "@iconify-json/logos": "^1.2.20",
+    "@iconify/utils": "^3.1.7",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "pagefind": "^1.6.0",

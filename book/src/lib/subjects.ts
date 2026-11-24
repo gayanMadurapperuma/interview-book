@@ -1,4 +1,4 @@
-export type SubjectKey = 'js' | 'node' | 'ts' | 'db' | 'sd' | 'api' | 'sec' | 'k8s';
+export type SubjectKey = 'js' | 'node' | 'ts' | 'db' | 'sd' | 'api' | 'sec' | 'k8s' | 'aws';
 
 export interface Subject {
   key: SubjectKey;
@@ -49,6 +49,11 @@ export const SUBJECTS: Subject[] = [
     key: 'k8s', name: 'Kubernetes', short: 'K8s', volume: 'VIII',
     blurb: 'Containers and Docker, how Kubernetes schedules and connects them, and running a production Node service on a cluster.',
     parts: ['Containers', 'Kubernetes core', 'Running in production'],
+  },
+  {
+    key: 'aws', name: 'AWS', short: 'AWS', volume: 'IX',
+    blurb: 'The AWS services interviews keep coming back to: IAM, networking, compute from EC2 to ECS, EKS and Lambda, S3, RDS, DynamoDB, messaging, and a full production platform end to end.',
+    parts: ['Foundations', 'Compute', 'Storage & data', 'Integration & operations'],
   },
 ];
 

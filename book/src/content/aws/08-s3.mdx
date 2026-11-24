@@ -1,0 +1,150 @@
+---
+title: "S3: object storage"
+part: Storage & data
+order: 8
+level: core
+summary: Buckets and objects, storage classes and lifecycle rules, consistency, presigned URLs for direct uploads, versioning, encryption, locking down public access, and serving through CloudFront.
+---
+
+**S3 (Simple Storage Service)** stores objects — files of any type up to 5 TB — in **buckets**, addressed by a **key**. It is designed for 11 nines of durability, scales without limits, and is the default home for uploads, static assets, backups, logs and data lakes. Interviews focus on direct uploads with presigned URLs, choosing storage classes, securing buckets, and event-driven processing.
+
+<Analogy>
+  An enormous, indestructible warehouse with an address-label system. You don't get shelves or folders, just labels: `invoices/2026/11/inv-123.pdf`. Anything can be stored and retrieved by its exact label. Some items you need daily sit by the door (Standard); archive boxes go to the deep vault and take hours to fetch (Glacier Deep Archive) but cost almost nothing to keep. A **presigned URL** is a single-use delivery slip the front desk gives a courier so they can drop off one specific parcel without a staff badge.
+</Analogy>
+
+## Why it matters
+
+"How do users upload large files?", "how do you serve a static site securely?", "how do you cut storage costs for old data?" and "how did that company leak a bucket?" are all S3 questions.
+
+## The essentials
+
+- **Bucket** — globally unique name, created in a region. **Object** — key + data + metadata, up to 5 TB (use **multipart upload** above ~100 MB).
+- **Flat namespace** — "folders" are just key prefixes. Throughput scales per prefix (thousands of requests/second each).
+- **Strong read-after-write consistency** for all operations: once a `PUT` returns, every `GET` and `LIST` sees it.
+- **Durability** 99.999999999% (data stored across ≥3 AZs), separate from **availability** (99.99% for Standard).
+
+## Storage classes and lifecycle
+
+| Class | For | Retrieval |
+|---|---|---|
+| **Standard** | Frequently accessed data | Milliseconds |
+| **Intelligent-Tiering** | Unknown or changing access patterns; moves objects automatically | Milliseconds (archive tiers optional) |
+| **Standard-IA / One Zone-IA** | Infrequent access, still needed quickly; retrieval fee; One Zone is single-AZ | Milliseconds |
+| **Glacier Instant Retrieval** | Archive accessed about quarterly | Milliseconds |
+| **Glacier Flexible Retrieval** | Archive | Minutes to hours |
+| **Glacier Deep Archive** | Compliance archives, rarely if ever read | Up to 12–48 hours |
+
+**Lifecycle rules** move objects between classes or expire them automatically: e.g. logs to IA after 30 days, to Deep Archive after 180, delete after 7 years; also expire old versions and abort incomplete multipart uploads.
+
+## Direct uploads with presigned URLs
+
+Routing large uploads through your API wastes bandwidth and memory. Instead, the API authorises the user and returns a **presigned URL** that lets the browser upload **directly to S3**.
+
+<Diagram
+  sequence
+  caption="Direct-to-S3 upload with a presigned URL. The file never passes through the application servers."
+  chart={`sequenceDiagram
+    participant B as Browser
+    participant API as Your API
+    participant S3 as S3 bucket
+    participant F as Processor (Lambda)
+    B->>API: POST /uploads (filename, type, size)
+    API->>API: authorise, choose key
+    API-->>B: presigned PUT URL (expires in 5 min)
+    B->>S3: PUT file using the URL
+    S3-->>B: 200 OK
+    S3->>F: ObjectCreated event
+    F->>F: scan, resize, record in DB`}
+  notes={[
+    "The client asks your API for permission to upload, sending metadata only.",
+    "The API checks the user may upload, validates the type and size, and picks the object key (never trust a client-chosen key).",
+    "The API signs a URL with **its own** IAM credentials. The URL embeds the bucket, key, content type and an expiry. No AWS credentials go to the browser.",
+    "The browser uploads the bytes straight to S3. Large files can use presigned **multipart** uploads, in parallel and resumable.",
+    "S3 accepts the object.",
+    "An S3 **event notification** (directly or via EventBridge/SQS) triggers processing.",
+    "The processor validates, scans for malware, makes thumbnails, and records metadata. The same pattern works for presigned GET downloads.",
+  ]}
+/>
+
+```ts
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { randomUUID } from 'node:crypto';
+
+const s3 = new S3Client({});
+
+export async function createUploadUrl(userId: string, contentType: string) {
+  const key = `uploads/${userId}/${randomUUID()}`;
+  const url = await getSignedUrl(
+    s3,
+    new PutObjectCommand({ Bucket: process.env.BUCKET!, Key: key, ContentType: contentType }),
+    { expiresIn: 300 },
+  );
+  return { url, key };
+}
+```
+
+## Serving content: CloudFront in front of a private bucket
+
+<Diagram
+  wide
+  caption="The bucket stays private. CloudFront reads it with Origin Access Control and caches at the edge; uploads into the bucket trigger a Lambda that records metadata in DynamoDB."
+  chart={`architecture-beta
+    service users(internet)[Users]
+    service cdn(aws:cloudfront)[CloudFront + OAC]
+    service bucket(aws:s3)[Private bucket]
+    service fn(aws:lambda)[on-upload fn]
+    service ddb(aws:dynamodb)[Metadata]
+
+    users:R --> L:cdn
+    cdn:R --> L:bucket
+    bucket:R --> L:fn
+    fn:R --> L:ddb`}
+/>
+
+Don't make a bucket public to host a website. Use **CloudFront with Origin Access Control (OAC)**: the bucket policy allows only that distribution to read, you get HTTPS on your own domain, edge caching, and WAF. Use **signed URLs or signed cookies** for private content.
+
+## Security and data protection
+
+- **Block Public Access** — on by default at account and bucket level. Keep it on unless the bucket is intentionally public.
+- **Bucket policies + IAM** — resource policy on the bucket, identity policies on callers. Disable ACLs (**Object Ownership: bucket owner enforced**).
+- **Encryption** — every new object is encrypted at rest (SSE-S3 by default); use **SSE-KMS** for key control and audit. Enforce TLS with `aws:SecureTransport`.
+- **Versioning** — keeps every version, protecting against overwrites and deletes. **MFA Delete** and **Object Lock** (WORM) protect against ransomware and meet compliance.
+- **Replication** — Cross-Region (CRR) for DR and latency, Same-Region (SRR) for log aggregation or account separation.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Making a bucket public for a website instead of CloudFront + OAC.
+- Proxying large uploads through the API instead of presigned URLs.
+- Trusting client-supplied keys or content types (path overwrite, stored XSS).
+- Versioning on without lifecycle rules for old versions — costs keep growing.
+- Lots of tiny objects in IA/Glacier classes, where minimum size and duration charges dominate.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you let users upload large files and serve them securely?">
+
+I'd keep the bucket private with Block Public Access on and never proxy file bytes through my API. The client asks the API for an upload; the API authenticates the user, validates the type and size, generates the object key itself and returns a short-lived presigned PUT URL, or presigned multipart URLs for very large files. The browser uploads directly to S3. An S3 event notification then triggers a Lambda that validates and scans the file, generates derivatives and records metadata in the database. For downloads I'd serve through CloudFront with Origin Access Control so only the distribution can read the bucket, using signed URLs or cookies for private files. Objects are encrypted at rest with SSE-KMS if we need key-level audit, versioning protects against accidental deletes, and lifecycle rules move old objects to Infrequent Access or Glacier and expire old versions.
+
+<Fragment slot="deeper">
+
+- **Is S3 eventually consistent?** No longer: it has strong read-after-write consistency for all operations since 2020.
+- **How do you speed up uploads from far away?** Multipart in parallel, and S3 Transfer Acceleration.
+- **How do you protect against deletion or ransomware?** Versioning, MFA Delete, Object Lock, and replication to another account.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Bucket / object / key", "Container, stored item, and the item's unique name within the bucket."],
+  ["Presigned URL", "A time-limited URL signed with the issuer's credentials for one specific operation."],
+  ["Storage class", "Price/latency tier for objects, from Standard to Glacier Deep Archive."],
+  ["Lifecycle rule", "Automatically transitions or expires objects and versions."],
+  ["Block Public Access", "Account- and bucket-level switch preventing public exposure."],
+  ["OAC", "Origin Access Control: lets only a CloudFront distribution read a private bucket."],
+  ["Object Lock", "Write-once-read-many retention to prevent deletion or overwrite."],
+]} />

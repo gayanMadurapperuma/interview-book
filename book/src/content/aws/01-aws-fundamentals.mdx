@@ -1,0 +1,157 @@
+---
+title: "AWS fundamentals: regions, AZs and shared responsibility"
+part: Foundations
+order: 1
+level: foundation
+summary: How AWS is laid out physically, who is responsible for what, the Well-Architected pillars, and how you pay — the vocabulary every other AWS answer builds on.
+---
+
+Before any specific service, interviewers want to know you understand **where** things run on AWS and **who** is responsible for keeping them safe. Almost every design answer — "how do you make this highly available?", "how do you cut latency for users in Asia?", "is this AWS's job or ours?" — comes back to regions, Availability Zones and the shared responsibility model.
+
+<Analogy>
+  A global chain of data-centre campuses. A **region** is a city where the chain operates. Each city has several **Availability Zones** — separate campuses on different power grids and flood plains, linked by fast private roads. **Edge locations** are small kiosks in many more cities that hand out copies of popular items close to customers. The chain owns and guards the buildings; you are responsible for what you put inside your rented rooms and who you give keys to.
+</Analogy>
+
+## Why it matters
+
+"Design this to survive a data-centre outage" means **multi-AZ**. "Survive a region outage" or "serve users worldwide with low latency" means **multi-region** or the **edge**. Mixing those up, or claiming AWS secures your S3 bucket permissions for you, is an instant red flag.
+
+## Global infrastructure
+
+| Concept | What it is | Design consequence |
+|---|---|---|
+| **Region** | A geographic area (`eu-west-1`, `us-east-1`) with its own isolated set of services | Data stays in the region unless you copy it. Choose by latency, data residency law, price and service availability. |
+| **Availability Zone (AZ)** | One or more data centres with independent power, cooling and networking; 3+ per region, low-latency links between them | Spread instances, subnets and databases across **at least two AZs** for high availability. |
+| **Edge location / PoP** | Hundreds of sites used by CloudFront, Route 53, Global Accelerator, WAF | Cache and terminate TLS close to users. |
+| **Local Zones / Wavelength / Outposts** | AWS infrastructure in metro areas, telco networks, or your own data centre | Niche: ultra-low latency or on-prem requirements. |
+
+Some services are **global** (IAM, Route 53, CloudFront) and some are **regional** (most of them: EC2, S3 buckets, DynamoDB tables, Lambda). Some regional services are automatically **multi-AZ** inside the region (S3, DynamoDB, SQS, Lambda); others are **zonal** and you spread them yourself (an EC2 instance, an EBS volume, a subnet).
+
+<Diagram
+  wide
+  caption="One region, three Availability Zones. The load balancer spreads traffic across an app instance in each AZ. RDS keeps a synchronous standby in a second AZ for failover, and an asynchronous read replica in a third for read scaling."
+  chart={`architecture-beta
+    service users(internet)[Users]
+    group region(cloud)[Region eu-west-1]
+    service alb(aws:elb)[Load balancer] in region
+    junction fan in region
+    junction fanA in region
+    junction fanC in region
+    group aza(cloud)[AZ a] in region
+    group azb(cloud)[AZ b] in region
+    group azc(cloud)[AZ c] in region
+    service appA(aws:ec2)[App] in aza
+    service appB(aws:ec2)[App] in azb
+    service appC(aws:ec2)[App] in azc
+    service dbP(aws:rds)[RDS primary] in aza
+    service dbS(aws:rds)[RDS standby] in azb
+    service dbR(aws:rds)[Read replica] in azc
+    junction rep1 in region
+    junction rep2 in region
+    junction rep3 in region
+
+    users:R --> L:alb
+    alb:R -- L:fan
+    fan:T -- B:fanA
+    fan:B -- T:fanC
+    fanA:R --> L:appA
+    fan:R --> L:appB
+    fanC:R --> L:appC
+    appA:R --> L:dbP
+    appC:R --> L:dbR
+    dbP:R -- L:rep1
+    rep1:B -- T:rep2
+    rep2:L --> R:dbS
+    rep2:B -- T:rep3
+    rep3:L --> R:dbR`}
+/>
+
+## The shared responsibility model
+
+AWS is responsible for security **of** the cloud; you are responsible for security **in** the cloud. Where the line falls depends on how managed the service is.
+
+| Layer | EC2 (IaaS) | RDS / ECS on Fargate (managed) | Lambda / S3 / DynamoDB (serverless) |
+|---|---|---|---|
+| Physical data centres, hardware, hypervisor | AWS | AWS | AWS |
+| Guest OS patching | **You** | AWS | AWS |
+| Runtime / engine patching | **You** | AWS (you choose maintenance windows) | AWS |
+| Network rules (security groups, NACLs) | **You** | **You** | mostly N/A |
+| IAM permissions, who can access data | **You** | **You** | **You** |
+| Data encryption choices, backups, classification | **You** | **You** | **You** |
+| Your application code | **You** | **You** | **You** |
+
+The row that never moves: **identity, access and data are always yours.** Most real-world AWS breaches are misconfigured IAM policies or public S3 buckets — customer-side failures.
+
+## The Well-Architected Framework
+
+AWS's checklist for reviewing a design. Naming the six pillars and one concrete practice for each is a strong way to structure a system-design answer.
+
+| Pillar | Ask yourself | Typical practices |
+|---|---|---|
+| **Operational excellence** | Can we deploy, observe and recover easily? | IaC, small frequent deploys, runbooks, dashboards and alarms |
+| **Security** | Least privilege? Data protected? Traceable? | IAM roles, encryption with KMS, CloudTrail, no long-lived keys |
+| **Reliability** | What happens when an AZ, dependency or deploy fails? | Multi-AZ, retries with backoff, health checks, backups tested |
+| **Performance efficiency** | Right resource types? Caching? | Managed services, CloudFront, ElastiCache, right-sized instances |
+| **Cost optimisation** | Paying only for what we use? | Auto Scaling, Savings Plans, Spot, S3 lifecycle, tagging |
+| **Sustainability** | Minimising wasted resources? | High utilisation, Graviton, serverless for spiky loads |
+
+## How you pay
+
+- **On-demand** — pay per second/hour with no commitment. Default; most expensive per unit.
+- **Savings Plans / Reserved Instances** — commit to 1 or 3 years of usage for up to ~70% off. Use for the steady baseline.
+- **Spot** — spare capacity at up to ~90% off that can be reclaimed with a 2-minute warning. Use for stateless, interruptible work (batch, CI, workers).
+- **Request / duration pricing** — Lambda, API Gateway, DynamoDB on-demand, S3 requests. Scales to zero; can get expensive at sustained high volume.
+- **Data transfer** — inbound is free; **outbound to the internet and cross-AZ/cross-region traffic is charged**. A chatty design across AZs or a NAT gateway in the hot path shows up on the bill.
+
+## Interacting with AWS
+
+Everything is an API call — the console, the CLI and the SDKs all sign requests with credentials (SigV4) and hit the same regional endpoints. In Node.js use the modular **AWS SDK v3**:
+
+```ts
+import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
+
+// credentials come from the environment: an IAM role on EC2/ECS/Lambda,
+// or SSO/profile locally — never hard-coded access keys
+const s3 = new S3Client({ region: 'eu-west-1' });
+const out = await s3.send(new ListObjectsV2Command({ Bucket: 'orders-exports', MaxKeys: 10 }));
+console.log(out.Contents?.map((o) => o.Key));
+```
+
+Infrastructure should be defined as code — **CloudFormation**, **CDK** (CloudFormation from TypeScript) or **Terraform** — so environments are reproducible and reviewed like any other change.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Saying "it's on AWS so it's highly available" — a single EC2 instance in one AZ is not.
+- Confusing AZs with regions: multi-AZ protects against a data-centre failure, not a regional outage.
+- Forgetting data transfer costs (cross-AZ chatter, NAT gateway, internet egress).
+- Using the root account or long-lived access keys for daily work.
+- Clicking resources together in the console with no IaC, so nobody can recreate production.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How is AWS infrastructure organised, and what is the shared responsibility model?">
+
+AWS is split into regions — independent geographic areas like eu-west-1 — and each region has three or more Availability Zones, which are physically separate data centres with their own power and networking but low-latency links between them. Most services are regional, so data stays in the region unless I replicate it. For high availability I spread workloads across at least two AZs behind a load balancer and use multi-AZ data stores; to survive a regional outage or serve global users I'd go multi-region or use the edge network through CloudFront and Route 53. Under the shared responsibility model AWS secures the cloud itself — hardware, facilities, the hypervisor and, for managed services, the OS and engine — while I'm always responsible for what's in it: IAM permissions, network rules, encryption choices and my application. The more managed the service, the more AWS takes on, but identity and data are always mine.
+
+<Fragment slot="deeper">
+
+- **How do you choose a region?** Latency to users, data-residency requirements, service availability and price.
+- **Is S3 multi-AZ?** Yes — standard storage classes store data across at least three AZs in the region (One Zone-IA is the exception).
+- **Which pricing model for a steady 24/7 API?** Savings Plans for the baseline, on-demand or Spot for bursts.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Region", "An isolated geographic area containing multiple Availability Zones."],
+  ["Availability Zone", "One or more physically separate data centres within a region."],
+  ["Edge location", "A point of presence used by CloudFront, Route 53 and other edge services."],
+  ["Shared responsibility", "AWS secures the cloud; the customer secures what they run and store in it."],
+  ["Well-Architected", "AWS's six-pillar framework for reviewing workload designs."],
+  ["Savings Plan", "A 1- or 3-year spend commitment in exchange for a large discount."],
+  ["Spot instance", "Discounted spare capacity that AWS can reclaim with two minutes' notice."],
+]} />

@@ -1,0 +1,226 @@
+---
+title: "EKS: Kubernetes on AWS"
+part: Compute
+order: 6
+level: advanced
+summary: What EKS manages and what you still own — node options and Karpenter, VPC CNI pod networking and IP exhaustion, the Load Balancer Controller, Pod Identity/IRSA, cluster access, storage, add-ons and upgrades.
+---
+
+**Amazon EKS (Elastic Kubernetes Service)** runs the Kubernetes **control plane** for you — API server and etcd, highly available across three AZs, patched and backed up by AWS. You still own the **data plane** (the nodes your pods run on) and everything you install into the cluster. The Kubernetes concepts are covered in the Kubernetes volume. This chapter is about the AWS-specific parts interviewers probe: how pods get VPC IPs, how traffic reaches them, how pods get IAM permissions, how nodes scale, and how you upgrade without downtime.
+
+<Analogy>
+  Renting a fully staffed airport control tower (the **control plane**) while you bring your own planes and ground crew (the **nodes** and add-ons). AWS keeps the tower running and radios working in all weathers. You decide how many planes to buy or lease, how they're maintained, and which gates they use. **Karpenter** is a fleet manager who leases exactly the right plane for each new flight and returns it when it's done.
+</Analogy>
+
+## Why it matters
+
+Many companies standardise on Kubernetes, so "how would you run this on EKS?", "how does a pod get permission to read S3?", "why are we running out of IP addresses?" and "how do you upgrade a cluster?" are common senior-level questions.
+
+## What AWS manages vs what you manage
+
+| AWS manages | You manage |
+|---|---|
+| API server, etcd, scheduler, controller manager — multi-AZ, scaled, patched | Worker nodes (unless using Fargate or EKS Auto Mode): AMIs, patching, scaling |
+| Control-plane version upgrades (when you trigger them) | Upgrading nodes and add-ons to match, and API deprecations in your manifests |
+| Integration points: IAM auth, VPC networking, ELB and EBS integrations | Installing and configuring add-ons (CNI, CoreDNS, ingress, autoscaler, observability) |
+| | Workload security: RBAC, network policies, pod security, image provenance |
+
+<Diagram
+  wide
+  caption="EKS layout. The control plane runs in an AWS-managed VPC. Worker nodes run in your private subnets across AZs, and pods get real VPC IP addresses, so the ALB sends traffic straight to pod IPs."
+  chart={`architecture-beta
+    service users(internet)[Users]
+    group vpc(aws:vpc)[Your VPC]
+    service alb(aws:elb)[ALB via LB Controller] in vpc
+    junction fan in vpc
+    junction fanA in vpc
+    junction fanB in vpc
+    group za(cloud)[AZ a private subnet] in vpc
+    group zb(cloud)[AZ b private subnet] in vpc
+    service nodeA(aws:ec2)[Node pods 10.0.1.x] in za
+    service nodeB(aws:ec2)[Node pods 10.0.2.x] in zb
+    junction jA in vpc
+    junction jB in vpc
+    junction join in vpc
+    group managed(cloud)[AWS-managed VPC]
+    service cp(aws:eks)[EKS control plane] in managed
+
+    users:R --> L:alb
+    alb:R -- L:fan
+    fan:T -- B:fanA
+    fan:B -- T:fanB
+    fanA:R --> L:nodeA
+    fanB:R --> L:nodeB
+    nodeA:R -- L:jA
+    nodeB:R -- L:jB
+    jA:B -- T:join
+    jB:T -- B:join
+    join:R --> L:cp`}
+/>
+
+## Compute options for the data plane
+
+| Option | What it is | Use when |
+|---|---|---|
+| **Managed node groups** | EKS-managed ASGs of EC2 with EKS-optimised AMIs (AL2023 / Bottlerocket); managed rolling updates | Predictable, simple node pools |
+| **Karpenter** | Open-source autoscaler that watches pending pods and launches the cheapest instances that fit, directly (no ASGs); consolidates under-used nodes | Most production clusters: fast scaling, Spot + Graviton mixes, bin-packing |
+| **Fargate profiles** | Each pod runs in its own micro-VM; no nodes at all | Small or bursty workloads, strong isolation; no DaemonSets, GPUs or EBS |
+| **EKS Auto Mode** | AWS runs Karpenter, CNI, load balancing, storage and node patching for you | Teams that want "Kubernetes API, fewer moving parts" |
+| **Self-managed nodes** | Your own ASGs and AMIs | Special OS or hardware needs |
+
+<Diagram
+  caption="Karpenter scaling out. Pods that can't be scheduled trigger a right-sized node launch in seconds, and consolidation later removes nodes that aren't needed."
+  chart={`flowchart LR
+    D["Deployment scales<br/>to 12 replicas"] --> P["4 pods Pending<br/>(insufficient CPU)"]
+    P --> K["Karpenter batches<br/>pending pods"]
+    K --> C["Chooses instance types<br/>Spot, Graviton, AZ"]
+    C --> L["EC2 CreateFleet<br/>node joins ~60s"]
+    L --> S["Scheduler binds<br/>pods to new node"]
+    S --> CO["Later: consolidation<br/>drains + removes idle nodes"]`}
+  steps={[
+    { nodes: ["D"], text: "The HPA (or a deploy) increases replicas: say from 8 to 12." },
+    { nodes: ["D", "P"], text: "The scheduler can't place 4 pods on existing nodes: they stay `Pending` with reason `Insufficient cpu`." },
+    { nodes: ["P", "K"], text: "Karpenter watches for unschedulable pods and batches them over a short window, so it launches one well-sized node rather than four small ones." },
+    { nodes: ["K", "C"], text: "Using the **NodePool** constraints (instance families, `arm64`/`amd64`, Spot or on-demand, zones), it picks the cheapest instance types that fit the pods' requests, affinities and topology spread." },
+    { nodes: ["C", "L"], text: "It calls EC2 `CreateFleet` directly (no Auto Scaling group). The node boots from the **EC2NodeClass** AMI, joins the cluster and becomes Ready in about a minute." },
+    { nodes: ["L", "S"], text: "The pending pods are scheduled onto the new node." },
+    { nodes: ["S", "CO"], text: "When load drops, **consolidation** moves pods off under-used nodes (respecting PodDisruptionBudgets) and terminates them. It also handles Spot interruption notices gracefully." },
+  ]}
+/>
+
+## Pod networking: the VPC CNI
+
+The **Amazon VPC CNI** gives every pod a **real IP address from your subnet** (via secondary IPs on the node's ENIs). Pods are first-class VPC citizens: security groups, VPC flow logs, and load balancers can target pod IPs directly.
+
+The trade-off is **IP exhaustion**: a `/24` subnet has ~250 addresses, and a busy node can consume dozens. Mitigations:
+
+- Size subnets generously (`/19` or larger for pods), or add a secondary CIDR (`100.64.0.0/10`) with **custom networking** so pods use separate subnets.
+- **Prefix delegation** assigns `/28` prefixes to ENIs, raising pods per node and speeding allocation.
+- **IPv6 clusters** remove the problem entirely.
+- **Security groups for pods** apply VPC security groups to individual pods (e.g. only the `payments` pods may reach the payments database).
+
+Inside the cluster you still use Kubernetes `NetworkPolicy` (the VPC CNI can enforce it) for pod-to-pod rules.
+
+## Getting traffic in: AWS Load Balancer Controller
+
+The **AWS Load Balancer Controller** watches Kubernetes objects and creates AWS load balancers:
+
+- `Ingress` (class `alb`) → an **ALB** with path/host rules, ACM certificates, WAF, and **target type `ip`** to route straight to pod IPs (no extra NodePort hop).
+- `Service` of type `LoadBalancer` → an **NLB** for TCP/UDP or static IPs.
+- `IngressGroup` lets many Ingresses share one ALB to save cost.
+- **ExternalDNS** creates Route 53 records for them; **cert-manager** or ACM for TLS.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orders
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/group.name: public
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-west-1:123456789012:certificate/…
+    alb.ingress.kubernetes.io/healthcheck-path: /readyz
+spec:
+  ingressClassName: alb
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /orders
+            pathType: Prefix
+            backend: { service: { name: orders, port: { number: 80 } } }
+```
+
+## IAM for pods: Pod Identity and IRSA
+
+Pods must never use the node's instance role (every pod on the node would share it). Two ways to give **one service account** its own IAM role:
+
+- **EKS Pod Identity** (newer, simpler) — install the Pod Identity agent add-on, then create an *association* between a namespace/service account and a role. Roles don't need cluster-specific trust policies, so they're reusable across clusters.
+- **IRSA (IAM Roles for Service Accounts)** — the cluster's OIDC provider issues a projected service-account token; the SDK exchanges it via `sts:AssumeRoleWithWebIdentity`. Works everywhere, including non-EKS clusters.
+
+<Diagram
+  sequence
+  caption="EKS Pod Identity. The AWS SDK in the pod gets temporary credentials for the role associated with its service account. No keys in the image, and no access to the node's role."
+  chart={`sequenceDiagram
+    participant Pod as orders pod (SDK)
+    participant Agent as Pod Identity agent (node)
+    participant EKS as EKS Auth API
+    participant S3 as Amazon S3
+    Pod->>Agent: GET credentials (SA token)
+    Agent->>EKS: AssumeRoleForPodIdentity(token)
+    EKS->>EKS: check association ns/orders → orders-role
+    EKS-->>Agent: temporary credentials
+    Agent-->>Pod: credentials
+    Pod->>S3: GetObject, signed as orders-role`}
+  notes={[
+    "The SDK's credential chain finds the container credentials endpoint (injected env vars) and presents the pod's projected service-account token.",
+    "The agent, a DaemonSet on each node, forwards the token to the EKS Auth API.",
+    "EKS validates the token and looks up the association for this cluster, namespace and service account.",
+    "It returns short-lived credentials for the associated role, tagged with the cluster, namespace and pod for use in ABAC conditions.",
+    "The pod receives the credentials. Other pods on the same node can't use them.",
+    "Calls are made as `orders-role`, with least-privilege access to just its bucket. CloudTrail shows which role, and via session tags which pod.",
+  ]}
+/>
+
+## Cluster access for humans and CI
+
+- **Access entries** (the EKS API) map IAM principals (SSO roles, CI roles) to Kubernetes permissions, using AWS-managed access policies or Kubernetes groups for RBAC. They replace the fragile `aws-auth` ConfigMap.
+- Make the API endpoint **private** (or public with restricted CIDRs) and reach it through VPN/SSO or CI runners in the VPC.
+- Prefer **GitOps** (Argo CD / Flux running inside the cluster) so humans and CI rarely need write access at all.
+
+## Storage
+
+- **EBS CSI driver** — `PersistentVolume`s backed by EBS (gp3). Volumes are **zonal**: a StatefulSet pod is pinned to its volume's AZ (use `WaitForFirstConsumer`).
+- **EFS CSI driver** — shared `ReadWriteMany` file storage across AZs.
+- **Mountpoint for S3 CSI** — mount buckets for read-heavy data (ML models, assets).
+- Prefer managed data services (Aurora, DynamoDB, ElastiCache, MSK) over running stateful databases in the cluster.
+
+## Add-ons and upgrades
+
+**Managed add-ons** (VPC CNI, CoreDNS, kube-proxy, EBS CSI, Pod Identity agent, ADOT) are versioned and updated by EKS. Kubernetes releases come roughly three times a year, and each EKS version has ~14 months of standard support (extended support costs extra), so **upgrades are routine work**:
+
+1. Check deprecated APIs in your manifests and Helm charts (EKS **upgrade insights**, `pluto`, `kubent`).
+2. Upgrade the **control plane** one minor version at a time (in-place, managed by AWS).
+3. Update **managed add-ons** to compatible versions.
+4. Roll the **nodes**: managed node groups update rolling; Karpenter replaces nodes via drift detection. PodDisruptionBudgets keep services available.
+5. For risky jumps, **blue/green clusters**: build a new cluster with GitOps, shift traffic with Route 53 weights or ALB target groups, then retire the old one.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Pods using the node instance role, so every pod can do what any pod can.
+- Small pod subnets, leading to `failed to assign an IP address` errors at scale.
+- Falling several versions behind and paying for extended support, then facing a multi-step upgrade.
+- No PodDisruptionBudgets, so node drains during upgrades or consolidation take whole services down.
+- Running everything with cluster-admin through the old `aws-auth` ConfigMap.
+- Running databases in the cluster without the operational maturity to back up, upgrade and fail them over.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you run a production Kubernetes platform on AWS with EKS?">
+
+EKS gives me a managed, multi-AZ control plane, so my job is the data plane and the platform add-ons. I'd create the cluster with Terraform in private subnets across three AZs, with a private API endpoint and access entries mapping SSO and CI roles to RBAC. Nodes are provisioned by Karpenter, with NodePools mixing Graviton and Spot for stateless workloads and on-demand for critical ones, and consolidation to keep utilisation high. The VPC CNI gives pods real VPC IPs, so I'd size pod subnets generously or use prefix delegation or a secondary CIDR to avoid IP exhaustion. Traffic comes in through the AWS Load Balancer Controller, creating an ALB with IP targets plus WAF and ACM certificates, and ExternalDNS for Route 53. Each service account gets its own IAM role through Pod Identity, never the node role, and secrets come from Secrets Manager via the External Secrets Operator. Stateful data lives in managed services like Aurora and DynamoDB. Deployments go through GitOps with Argo CD. I keep up with Kubernetes versions by upgrading the control plane, then add-ons, then rolling nodes with PodDisruptionBudgets, or by blue/green clusters for big jumps.
+
+<Fragment slot="deeper">
+
+- **Pod Identity vs IRSA?** Pod Identity needs no OIDC trust per cluster and is simpler to manage; IRSA works on any cluster and older setups.
+- **Karpenter vs Cluster Autoscaler?** Karpenter launches right-sized instances directly and consolidates; Cluster Autoscaler scales predefined node groups.
+- **Why target type ip?** The ALB sends to pod IPs directly, skipping the NodePort hop and enabling accurate health checks.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["EKS control plane", "The AWS-managed, multi-AZ Kubernetes API server and etcd."],
+  ["Managed node group", "An EKS-managed Auto Scaling group of worker nodes."],
+  ["Karpenter", "Node autoscaler that provisions right-sized EC2 capacity for pending pods."],
+  ["VPC CNI", "The plugin giving each pod an IP address from the VPC."],
+  ["Prefix delegation", "Assigning IP prefixes to ENIs to raise pod density."],
+  ["AWS Load Balancer Controller", "Creates ALBs/NLBs from Ingress and Service objects."],
+  ["Pod Identity / IRSA", "Mechanisms giving a Kubernetes service account its own IAM role."],
+  ["Access entry", "Maps an IAM principal to Kubernetes permissions in EKS."],
+]} />

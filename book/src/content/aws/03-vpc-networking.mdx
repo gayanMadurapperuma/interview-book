@@ -1,0 +1,131 @@
+---
+title: "VPC and networking: subnets, gateways, security groups, load balancers"
+part: Foundations
+order: 3
+level: core
+summary: The private network your resources live in — public and private subnets, internet and NAT gateways, security groups vs NACLs, ALB vs NLB, Route 53, CloudFront and VPC endpoints.
+---
+
+A **VPC (Virtual Private Cloud)** is your own isolated network inside a region. Everything with an IP address — EC2 instances, ECS tasks, RDS databases, Lambda functions attached to a VPC — lives in one of its **subnets**. Interview questions here are about the standard three-tier layout, why your database must not be reachable from the internet, how private instances still download packages, and which load balancer to pick.
+
+<Analogy>
+  A gated business park. The **VPC** is the fenced park; **subnets** are buildings. Public buildings face the street and have a front door (**internet gateway**). Private buildings sit behind them with no street door; staff who need to go out use the shared exit gate (**NAT gateway**), which lets them leave and come back but lets no stranger in. **Security groups** are the guards at each office door with a list of who may enter; **NACLs** are the checkpoints at each building's entrance.
+</Analogy>
+
+## Why it matters
+
+Almost every AWS architecture answer includes "the app runs in private subnets across two AZs behind an ALB, and the database is in isolated subnets". You should be able to justify every piece of that sentence.
+
+## The standard three-tier VPC
+
+<Diagram
+  wide
+  caption="A three-tier VPC in one AZ (repeat across 2–3 AZs). Only the load balancer is internet-facing. App servers reach the internet outbound through the NAT gateway, and the database has no route to the internet at all."
+  chart={`architecture-beta
+    service users(internet)[Users]
+    service cdn(aws:cloudfront)[CloudFront]
+    group vpc(aws:vpc)[VPC 10.0.0.0/16]
+    group pub(cloud)[Public subnet] in vpc
+    group priv(cloud)[Private app subnet] in vpc
+    group data(cloud)[Isolated DB subnet] in vpc
+    service alb(aws:elb)[ALB] in pub
+    service nat(aws:vpc)[NAT gateway] in pub
+    service app(aws:ec2)[App] in priv
+    service db(aws:rds)[RDS] in data
+    junction up in priv
+
+    users:R --> L:cdn
+    cdn:R --> L:alb
+    alb:R --> L:app
+    app:R --> L:db
+    app:T -- B:up
+    up:L --> R:nat`}
+/>
+
+| Piece | Purpose |
+|---|---|
+| **CIDR block** | The VPC's private IP range, e.g. `10.0.0.0/16`. Plan it so it won't overlap with other VPCs or on-prem networks you may peer with. |
+| **Subnet** | A slice of the CIDR in **one AZ**. "Public" or "private" is purely about its **route table**. |
+| **Internet gateway (IGW)** | Lets resources with public IPs talk to the internet in both directions. A public subnet routes `0.0.0.0/0` to it. |
+| **NAT gateway** | Lives in a public subnet; lets private resources make **outbound** connections (package installs, third-party APIs) while blocking inbound. Charged per hour and per GB: put one per AZ for availability. |
+| **Route table** | Decides where traffic for each destination goes (local, IGW, NAT, peering, endpoint). |
+
+## Security groups vs network ACLs
+
+| | Security group | Network ACL |
+|---|---|---|
+| Attached to | ENI (instance, task, RDS, Lambda) | Subnet |
+| State | **Stateful**: replies are allowed automatically | **Stateless**: you must allow return traffic (ephemeral ports) |
+| Rules | Allow only | Allow and deny, evaluated in number order |
+| Typical use | The main control: "DB accepts 5432 only from the app's security group" | Coarse subnet-wide blocks, e.g. deny a CIDR |
+
+Referencing **security groups by ID** instead of IP ranges is the key idiom: `db-sg` allows port 5432 from `app-sg`, so any app instance, whatever its IP, can connect, and nothing else can.
+
+## Load balancers
+
+| | ALB (Application) | NLB (Network) |
+|---|---|---|
+| Layer | 7 (HTTP/HTTPS, gRPC, WebSocket) | 4 (TCP/UDP/TLS) |
+| Routing | Path, host, header, query rules; weighted target groups | Port-based |
+| Performance | Very high, adds a few ms | Millions of requests per second, ultra-low latency, **static IPs** |
+| Extras | WAF, Cognito/OIDC auth, sticky sessions | PrivateLink, preserving the client IP |
+| Choose for | Web apps and APIs, microservices behind one domain | Non-HTTP protocols, static IPs, extreme throughput |
+
+Both are multi-AZ and health-check their targets, sending traffic only to healthy ones.
+
+## DNS and the edge
+
+- **Route 53** — managed DNS. Routing policies: simple, **weighted** (canaries), **latency-based**, **failover** (with health checks), **geolocation**. Alias records point at AWS resources (ALB, CloudFront) for free.
+- **CloudFront** — the CDN: caches content at edge locations, terminates TLS near users, shields the origin, and integrates **WAF** and **Shield** (DDoS protection).
+- **Global Accelerator** — static anycast IPs routed over the AWS backbone to the nearest healthy regional endpoint; for non-HTTP traffic or fast regional failover.
+
+## Connecting VPCs and services privately
+
+- **VPC endpoints** — reach AWS services without the internet or a NAT gateway. **Gateway endpoints** (S3, DynamoDB) are free, route-table entries. **Interface endpoints** (PrivateLink) put an ENI in your subnet for most other services (SQS, Secrets Manager, ECR…).
+- **VPC peering** — a private link between two VPCs. Not transitive.
+- **Transit Gateway** — a hub connecting many VPCs and on-prem networks.
+- **Site-to-Site VPN / Direct Connect** — link to your data centre over the internet or a dedicated line.
+
+<Callout type="tip" title="Cutting NAT costs">
+
+Heavy S3 or DynamoDB traffic from private subnets through a NAT gateway is a classic surprise on the bill. Add the free **gateway endpoints** for S3 and DynamoDB, and interface endpoints for chatty services like ECR and CloudWatch Logs.
+
+</Callout>
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Databases in public subnets, or security groups open to `0.0.0.0/0` on 22, 3306 or 5432.
+- A single NAT gateway shared by all AZs: one AZ failure cuts egress for everyone, and you pay cross-AZ traffic.
+- Overlapping CIDR ranges that later make peering impossible.
+- Forgetting that NACLs are stateless and blocking return traffic.
+- Using IP-based security group rules instead of referencing other security groups.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Walk me through how you'd lay out the network for a web application on AWS.">
+
+I'd create a VPC with a non-overlapping CIDR and, in each of two or three AZs, a public subnet, a private app subnet and an isolated database subnet. The only internet-facing component is an Application Load Balancer in the public subnets, ideally behind CloudFront with WAF. The application runs in the private subnets and has no public IPs. For outbound calls like third-party APIs it goes through a NAT gateway, one per AZ, and for S3 and DynamoDB through free gateway endpoints. The database sits in subnets with no internet route at all. Access control is with security groups chained by reference: the ALB's group allows 443 from the world, the app's group allows traffic only from the ALB's group, and the database's group only from the app's group. Route 53 alias records point the domain at CloudFront or the ALB, and health checks plus multi-AZ targets mean an AZ failure just removes capacity rather than taking the site down.
+
+<Fragment slot="deeper">
+
+- **What makes a subnet public?** A route to an internet gateway in its route table.
+- **Security group vs NACL?** Stateful allow-only at the ENI vs stateless allow/deny at the subnet.
+- **When an NLB?** TCP/UDP, static IPs, PrivateLink, or extreme throughput.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["VPC", "An isolated virtual network in one region."],
+  ["Subnet", "A range of the VPC's IPs in a single AZ; public or private by its route table."],
+  ["NAT gateway", "Gives private subnets outbound-only internet access."],
+  ["Security group", "A stateful, allow-only firewall attached to network interfaces."],
+  ["Network ACL", "A stateless subnet-level firewall with ordered allow and deny rules."],
+  ["ALB / NLB", "Layer-7 HTTP load balancer / layer-4 TCP-UDP load balancer."],
+  ["VPC endpoint", "Private access to AWS services without traversing the internet."],
+  ["Route 53", "AWS's DNS service with health checks and routing policies."],
+]} />

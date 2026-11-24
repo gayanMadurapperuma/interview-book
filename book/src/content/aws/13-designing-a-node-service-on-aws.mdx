@@ -1,0 +1,183 @@
+---
+title: "Designing a Node.js service on AWS, end to end"
+part: Integration & operations
+order: 13
+level: advanced
+summary: Two reference architectures — fully serverless and containers — how to choose between them, infrastructure as code, CI/CD, cost levers, and a complete interview walkthrough.
+---
+
+This chapter puts the volume together. Given "design the backend for an orders service on AWS", there are two mainstream shapes: **serverless** (API Gateway, Lambda, DynamoDB, EventBridge) and **containers** (ALB, ECS on Fargate, Aurora, ElastiCache). Both are correct. What interviewers want is a clear diagram, the reasons for each choice, and how it behaves under load, failure, deploys and cost pressure.
+
+<Analogy>
+  Food trucks versus a restaurant. **Serverless** is a fleet of food trucks that appear when crowds gather and vanish when they leave: nothing to pay when it's quiet, but each truck has a limited menu and a warm-up time. **Containers** are a restaurant with a kitchen staff you size for the evening: steadier, cheaper per meal when it's always busy, more control over the kitchen — and more to manage.
+</Analogy>
+
+## Requirements first
+
+Before drawing, ask and state assumptions: requests per second (average and peak), read/write ratio, latency target, data model and query patterns, consistency needs, multi-region or not, compliance, team size and existing skills. Example: *"2k RPS peak, spiky, p99 under 300 ms, orders and customers with known access patterns, single region with multi-AZ, a small team."*
+
+## Option A: serverless
+
+<Diagram
+  wide
+  caption="Serverless reference architecture. CloudFront serves the SPA from S3 and routes /api to API Gateway. Lambda writes to DynamoDB and publishes domain events to EventBridge, which buffers them into SQS for asynchronous workers."
+  chart={`architecture-beta
+    service users(internet)[Users]
+    service cdn(aws:cloudfront)[CloudFront + WAF]
+    junction split
+    junction toSite
+    service site(aws:s3)[SPA bucket]
+    service api(aws:api-gateway)[HTTP API + JWT auth]
+    service fn(aws:lambda)[orders fn]
+    service ddb(aws:dynamodb)[orders table]
+    junction up
+    service bus(aws:eventbridge)[Event bus]
+    service q(aws:sqs)[fulfilment queue]
+    service worker(aws:lambda)[worker fn]
+
+    users:R --> L:cdn
+    cdn:R -- L:split
+    split:T -- B:toSite
+    toSite:R --> L:site
+    split:R --> L:api
+    api:R --> L:fn
+    fn:R --> L:ddb
+    fn:T -- B:up
+    up:R --> L:bus
+    bus:R --> L:q
+    q:R --> L:worker`}
+/>
+
+- **Auth** — Cognito (or any OIDC provider) issues JWTs; the HTTP API's JWT authoriser validates them before Lambda runs.
+- **Data** — DynamoDB designed from access patterns, on-demand capacity, conditional writes for idempotency, TTL for idempotency keys.
+- **Events** — the function publishes `OrderPlaced`, or better, DynamoDB Streams + EventBridge Pipes publish from the table (no dual write). Rules route events to SQS queues per consumer, with DLQs.
+- **Long workflows** — Step Functions (payment → reserve stock → ship, with compensations).
+- **Strengths** — scales to zero, near-zero ops, per-request cost, built-in multi-AZ.
+- **Watch** — cold starts on latency-critical paths, account concurrency limits, cost at sustained high RPS, 15-minute and payload limits.
+
+## Option B: containers
+
+<Diagram
+  wide
+  caption="Container reference architecture. An ALB spreads traffic across ECS Fargate tasks in two AZs. Tasks use Aurora PostgreSQL for data and ElastiCache Redis for caching and rate limiting."
+  chart={`architecture-beta
+    service users(internet)[Users]
+    service cdn(aws:cloudfront)[CloudFront + WAF]
+    service alb(aws:elb)[ALB]
+    junction fan
+    junction fanA
+    junction fanB
+    group svc(aws:ecs)[ECS on Fargate]
+    service t1(aws:fargate)[Task AZ a] in svc
+    service t2(aws:fargate)[Task AZ b] in svc
+    junction jA
+    junction jB
+    junction join
+    service db(aws:aurora)[Aurora PostgreSQL]
+    junction down
+    service cache(aws:elasticache)[ElastiCache Redis]
+
+    users:R --> L:cdn
+    cdn:R --> L:alb
+    alb:R -- L:fan
+    fan:T -- B:fanA
+    fan:B -- T:fanB
+    fanA:R --> L:t1
+    fanB:R --> L:t2
+    t1:R -- L:jA
+    t2:R -- L:jB
+    jA:B -- T:join
+    jB:T -- B:join
+    join:R --> L:db
+    join:B -- T:down
+    down:R --> L:cache`}
+/>
+
+- **Compute** — ECS service on Fargate (ARM64), private subnets, task role per service, secrets from Secrets Manager, scaling on ALB requests per target.
+- **Data** — Aurora PostgreSQL with a writer and readers, RDS Proxy if connection counts grow; ElastiCache Redis for caching, sessions and rate limits.
+- **Async** — the same EventBridge/SQS pattern, with ECS workers scaling on queue backlog.
+- **Strengths** — no cold starts, full control of the runtime, long-lived connections (WebSockets), cheaper at steady high load, relational queries.
+- **Watch** — more to operate (capacity, deploys, pool sizing), you pay for idle baseline.
+
+## Choosing
+
+| Factor | Leans serverless | Leans containers |
+|---|---|---|
+| Traffic | Spiky, unpredictable, idle periods | Steady, high, predictable |
+| Latency | Tolerates occasional cold starts | Strict p99, no cold starts |
+| Data | Key-value, known access patterns | Relational, ad hoc queries, joins |
+| Workload | Event-driven, short tasks | Long-running, WebSockets, heavy CPU |
+| Team | Small, wants minimal ops | Has container/K8s experience |
+
+Mixing is normal: a container API with Lambda for event processing and cron jobs.
+
+## Cross-cutting concerns
+
+- **Multi-account** — AWS Organizations with separate dev/staging/prod accounts, SSO, SCP guardrails, central logging.
+- **Infrastructure as code** — **CDK** (TypeScript, natural for a Node team), Terraform, or SAM/Serverless Framework for Lambda-heavy apps. Everything reviewed and deployed through pipelines.
+- **CI/CD** — GitHub Actions with OIDC to assume a deploy role; build, test, scan the image or bundle, deploy to staging, run smoke tests, then prod with canary (Lambda aliases with CodeDeploy, ECS blue/green) and automatic rollback on alarms.
+- **Resilience** — multi-AZ everywhere, timeouts and retries with jitter on every call, idempotency keys, DLQs, backups with tested restores. Multi-region (DynamoDB global tables or Aurora Global Database + Route 53 failover) only when the RTO/RPO demands it.
+- **Security** — WAF at the edge, private subnets, least-privilege roles per service, KMS encryption, secrets rotation, CloudTrail + GuardDuty.
+- **Observability** — structured logs, metrics, traces, SLO-based alarms (previous chapter).
+
+```ts
+// AWS CDK (TypeScript): the core of Option A in a few lines
+const table = new dynamodb.TableV2(this, 'Orders', {
+  partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+  sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+  timeToLiveAttribute: 'ttl',
+});
+const fn = new nodejs.NodejsFunction(this, 'OrdersFn', {
+  entry: 'src/handler.ts',
+  runtime: lambda.Runtime.NODEJS_22_X,
+  architecture: lambda.Architecture.ARM_64,
+  environment: { TABLE: table.tableName },
+});
+table.grantReadWriteData(fn); // least-privilege policy generated for you
+new apigwv2.HttpApi(this, 'Api', {
+  defaultIntegration: new integrations.HttpLambdaIntegration('Orders', fn),
+});
+```
+
+## Cost levers
+
+- Graviton (ARM) for Lambda, Fargate and EC2: ~20% cheaper.
+- Savings Plans for steady compute; Fargate Spot / EC2 Spot for workers.
+- CloudFront caching to cut origin load; S3 lifecycle rules; log retention limits.
+- VPC gateway endpoints instead of NAT for S3/DynamoDB traffic.
+- Right-size with Compute Optimizer; tag everything and watch Cost Explorer and budgets.
+
+<Callout type="pitfall" title="Common mistakes in design interviews">
+
+- Jumping to services before clarifying traffic, data and latency requirements.
+- Drawing a single AZ, or a database with no failover story.
+- Synchronous chains between services where a queue or event would decouple them.
+- Ignoring how deploys, retries and duplicates behave.
+- Never mentioning cost, security or observability.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Design the backend for an orders service on AWS.">
+
+I'd start by confirming requirements: peak traffic, latency targets, data shape and team skills. Assuming spiky traffic, known access patterns and a small team, I'd go serverless. CloudFront with WAF serves the frontend from a private S3 bucket and routes /api to an API Gateway HTTP API, which validates Cognito JWTs before invoking a Node.js Lambda on ARM. Orders live in DynamoDB, keyed by customer and order so the main queries are single Query calls, with conditional writes for idempotency. Domain events go from the table's stream through EventBridge to per-consumer SQS queues with DLQs, so billing, email and fulfilment scale and fail independently, and multi-step fulfilment runs in Step Functions. Everything is multi-AZ by default. If traffic were steady and high, the data relational, or p99 latency strict, I'd switch the core to ECS on Fargate behind an ALB with Aurora PostgreSQL and Redis instead. Either way it's defined in CDK, deployed through GitHub Actions using OIDC with canary releases and alarm-based rollback, uses least-privilege roles and KMS encryption, and has structured logs, traces and SLO alarms.
+
+<Fragment slot="deeper">
+
+- **How would you go multi-region?** DynamoDB global tables or Aurora Global Database, stateless compute in both regions, Route 53 latency or failover routing; consider conflict handling.
+- **How do you handle a payment provider outage?** Queue the work, retry with backoff, circuit-break, and surface a pending state to users.
+- **How do you prevent double orders?** A client idempotency key stored with a conditional write.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Reference architecture", "A proven, reusable arrangement of services for a common workload."],
+  ["CDK", "AWS Cloud Development Kit: define infrastructure in TypeScript, synthesised to CloudFormation."],
+  ["OIDC deploy role", "A role CI assumes with its identity token instead of stored AWS keys."],
+  ["Canary deployment", "Shifting a small share of traffic to a new version before all of it."],
+  ["RTO / RPO", "How quickly you must recover / how much data you can afford to lose."],
+]} />

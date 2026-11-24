@@ -1,0 +1,155 @@
+---
+title: "Containers on AWS: ECS, Fargate and ECR"
+part: Compute
+order: 5
+level: core
+summary: Running containers without managing a cluster — task definitions, services, Fargate vs EC2 capacity, task roles, deployments, and when to choose ECS or EKS.
+---
+
+**ECS (Elastic Container Service)** is AWS's own container orchestrator: you describe a container, tell ECS how many copies to run, and it keeps them running behind a load balancer. **Fargate** is the serverless capacity option: no EC2 instances to patch or scale, you pay per task for the vCPU and memory you ask for. **ECR** is the private image registry. For a typical Node.js API this trio is the most common "containers on AWS" answer.
+
+<Analogy>
+  A staffing agency. The **task definition** is the job description (skills, tools, pay grade). A **service** is the standing order "always keep 4 people on this job, and replace anyone who leaves". With the **EC2 launch type** you provide the office and desks yourself; with **Fargate** the agency provides the desk too and bills you per person-hour.
+</Analogy>
+
+## Why it matters
+
+"How would you deploy this containerised API on AWS?", "ECS or EKS?", "Fargate or EC2?" and "how does the container get database credentials?" are standard questions. ECS concepts also map directly to the Kubernetes ones you already know.
+
+## Core concepts
+
+| ECS concept | What it is | Kubernetes equivalent |
+|---|---|---|
+| **Cluster** | A logical grouping of capacity and services | Cluster / namespace |
+| **Task definition** | Versioned JSON: image, CPU/memory, ports, env, secrets, roles, logging | Pod spec |
+| **Task** | A running instance of a task definition (one or more containers) | Pod |
+| **Service** | Keeps N tasks running, replaces failed ones, registers them with a load balancer, does rolling deploys | Deployment + Service |
+| **Capacity provider** | Fargate, Fargate Spot, or an EC2 Auto Scaling group | Node pool |
+
+<Diagram
+  wide
+  caption="An ECS service on Fargate: the ALB spreads requests over tasks in two AZs. Both tasks connect to the same RDS database in private subnets."
+  chart={`architecture-beta
+    service users(internet)[Users]
+    service alb(aws:elb)[ALB]
+    junction fan
+    junction fanA
+    junction fanB
+    group svc(aws:ecs)[ECS service orders-api]
+    group aza(cloud)[AZ a] in svc
+    group azb(cloud)[AZ b] in svc
+    service t1(aws:fargate)[Task] in aza
+    service t2(aws:fargate)[Task] in azb
+    junction join
+    junction joinA
+    junction joinB
+    service db(aws:rds)[RDS]
+
+    users:R --> L:alb
+    alb:R -- L:fan
+    fan:T -- B:fanA
+    fan:B -- T:fanB
+    fanA:R --> L:t1
+    fanB:R --> L:t2
+    t1:R -- L:joinA
+    t2:R -- L:joinB
+    joinA:B -- T:join
+    joinB:T -- B:join
+    join:R --> L:db`}
+/>
+
+### A task definition
+
+```json
+{
+  "family": "orders-api",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": { "cpuArchitecture": "ARM64", "operatingSystemFamily": "LINUX" },
+  "executionRoleArn": "arn:aws:iam::123456789012:role/orders-exec-role",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/orders-task-role",
+  "containerDefinitions": [{
+    "name": "api",
+    "image": "123456789012.dkr.ecr.eu-west-1.amazonaws.com/orders-api@sha256:…",
+    "portMappings": [{ "containerPort": 3000 }],
+    "environment": [{ "name": "NODE_ENV", "value": "production" }],
+    "secrets": [{ "name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:eu-west-1:123456789012:secret:orders/db" }],
+    "healthCheck": { "command": ["CMD-SHELL", "wget -qO- localhost:3000/healthz || exit 1"] },
+    "logConfiguration": { "logDriver": "awslogs", "options": { "awslogs-group": "/ecs/orders-api", "awslogs-region": "eu-west-1", "awslogs-stream-prefix": "api" } }
+  }]
+}
+```
+
+Two roles, and interviewers like to check you know the difference:
+
+- **Execution role** — used by the ECS *agent* to pull the image from ECR, fetch the `secrets` and write logs.
+- **Task role** — used by *your code* through the SDK to call AWS (S3, DynamoDB, SQS).
+
+With `awsvpc` networking each task gets **its own ENI and private IP**, so security groups apply per task.
+
+## Fargate vs EC2 capacity
+
+| | Fargate | EC2 capacity provider |
+|---|---|---|
+| Servers to manage | None | An ASG of instances (AMIs, patching, scaling) |
+| Pricing | Per task vCPU/GB-second (~20–30% premium) | Per instance; cheaper at high, steady utilisation |
+| Startup | Pull image every task start (tens of seconds) | Images can be cached on the host |
+| Limits | No GPUs, no privileged containers, no host access | Anything an instance can do |
+| Choose when | Most APIs and workers; small teams | GPUs, daemons, very large steady fleets, tight cost control |
+
+**Fargate Spot** gives up to ~70% off for interruptible tasks (workers, batch).
+
+## Scaling and deploying
+
+- **Service Auto Scaling** — target tracking on CPU, memory or **ALB requests per target**; scale workers on **SQS queue depth**.
+- **Rolling deploys** — `minimumHealthyPercent` / `maximumPercent` work like Kubernetes `maxUnavailable` / `maxSurge`. The **deployment circuit breaker** automatically rolls back when new tasks keep failing.
+- **Blue/green** — through CodeDeploy, with two target groups and traffic shifting (all-at-once, linear or canary) and automatic rollback on alarms.
+- **Graceful shutdown** — ECS sends `SIGTERM`, waits `stopTimeout` (default 30s), then `SIGKILL`. The ALB deregistration delay should cover in-flight requests.
+
+## ECS or EKS?
+
+| ECS | EKS |
+|---|---|
+| AWS-native, simpler, fewer moving parts | Standard Kubernetes API, portable across clouds |
+| Deep integration (IAM per task, ALB, CloudWatch) with no add-ons | Huge ecosystem (Helm, operators, service meshes, Argo) |
+| No control-plane fee | Control-plane fee per cluster, plus more to operate (upgrades, add-ons) |
+| Good default for teams that just want to run containers on AWS | Good when you already run Kubernetes or need its ecosystem |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Secrets in plain `environment` variables in the task definition — use `secrets` with Secrets Manager or Parameter Store.
+- Confusing the execution role with the task role, then granting the app's permissions to the wrong one.
+- Using `:latest` image tags, so a task restart silently runs different code — pin by digest or immutable tag.
+- No container health check or ALB health check path, so broken tasks keep receiving traffic.
+- Ignoring `SIGTERM` in Node.js, so deploys drop requests.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How would you run a containerised Node.js API on AWS?">
+
+I'd push the image to ECR and run it as an ECS service on Fargate, so there are no servers to manage. The task definition pins the image by digest and sets CPU and memory, an ARM64 runtime for Graviton pricing, a health check, CloudWatch logging, and secrets pulled from Secrets Manager rather than plain environment variables. It has two roles: the execution role lets ECS pull the image and read the secrets, and the task role is what the application uses for AWS calls, scoped to just its tables and queues. Tasks run in private subnets in two or more AZs, each with its own security group, behind an ALB. The service scales on requests per target or CPU, deploys with rolling updates and the circuit breaker, or blue/green through CodeDeploy, and the app handles SIGTERM to drain gracefully. I'd pick EKS instead only if the team already runs Kubernetes or needs its ecosystem.
+
+<Fragment slot="deeper">
+
+- **When EC2 capacity instead of Fargate?** GPUs, privileged or host-level needs, or a large, steady fleet where instances are cheaper.
+- **How do you scale a queue worker?** Service auto scaling on SQS `ApproximateNumberOfMessagesVisible`, ideally per task (backlog per task).
+- **Where do logs go?** The `awslogs` driver to CloudWatch Logs, or FireLens to another destination.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Task definition", "The versioned blueprint for a task's containers, resources and roles."],
+  ["ECS service", "Keeps a desired number of tasks running and registered with a load balancer."],
+  ["Fargate", "Serverless compute for containers — no instances to manage."],
+  ["ECR", "AWS's private container image registry."],
+  ["Task role", "The IAM role your application code uses inside the task."],
+  ["Execution role", "The IAM role ECS uses to pull images, fetch secrets and ship logs."],
+  ["awsvpc", "Networking mode giving each task its own ENI and security group."],
+]} />

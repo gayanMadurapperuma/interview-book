@@ -1,0 +1,151 @@
+---
+title: "DynamoDB: key-value at any scale"
+part: Storage & data
+order: 10
+level: advanced
+summary: Partition and sort keys, how data is spread across partitions, designing from access patterns, GSIs vs LSIs, single-table design, capacity modes, hot partitions, streams, TTL and conditional writes.
+---
+
+**DynamoDB** is a fully managed key-value and document database with single-digit-millisecond latency at any scale, no servers or connections to manage, and pay-per-request pricing. The catch: you can only query efficiently by the keys you designed. Interviewers test whether you understand partitioning, can **design the keys from the access patterns**, and know the trade-offs against a relational database.
+
+<Analogy>
+  A huge library of filing cabinets. The **partition key** decides which cabinet a folder goes in — a hash of it, so folders spread evenly. Inside each cabinet the **sort key** keeps folders in order, so "all of customer 42's orders from November" is one drawer pull. Asking "find every folder mentioning *blue*" means opening every cabinet — a **scan** — which is slow and expensive. If you need another way in, you build a second index of cabinets (a **GSI**).
+</Analogy>
+
+## Why it matters
+
+DynamoDB is the default data store for serverless designs and appears in many system-design answers (sessions, carts, leaderboards, idempotency keys, high-scale metadata). Using it like SQL — scans, filters, joins in code — is a common failure.
+
+## Keys and partitions
+
+- **Partition key (PK)** — hashed to pick the physical **partition** (each ~10 GB and ~3,000 RCU / 1,000 WCU).
+- **Sort key (SK)** — optional; orders items that share a PK. Together they form the **primary key**.
+- Items with the same PK form an **item collection**: one `Query` can read them all or a range of them.
+
+<Diagram
+  caption="How a Query on PK = CUSTOMER#42 is served. The partition key is hashed to one partition; the sort-key condition selects a contiguous range inside it."
+  chart={`flowchart LR
+    Q["Query PK = CUSTOMER#42<br/>SK begins_with ORDER#2026-11"] --> R["Request router"]
+    R --> H["hash(CUSTOMER#42)"]
+    H --> P2["Partition 2<br/>(3 replicas, 3 AZs)"]
+    P2 --> C["Item collection<br/>sorted by SK"]
+    C --> RES["Returns the matching<br/>range, ≤ 1 MB per page"]
+    R -.-> P1["Partition 1"]
+    R -.-> P3["Partition 3"]`}
+  steps={[
+    { nodes: ["Q"], text: "A `Query` must give an exact partition key, and may add a sort-key condition (`=`, `<`, `between`, `begins_with`)." },
+    { nodes: ["Q", "R"], text: "The request router authenticates the request and looks up the table's partition map." },
+    { nodes: ["R", "H"], text: "It hashes the partition key. The hash, not the value, decides placement, so keys spread evenly when there are many distinct values." },
+    { nodes: ["H", "P2"], text: "Exactly one partition is touched. Each partition is replicated three ways across AZs; strongly consistent reads go to the leader." },
+    { nodes: ["P2", "C"], text: "Inside the partition, items with that PK are stored sorted by sort key, so the range lookup is efficient." },
+    { nodes: ["C", "RES"], text: "Results come back in pages of up to 1 MB. Partitions 1 and 3 never did any work. A `Scan`, by contrast, would read every partition." },
+  ]}
+/>
+
+## Design from access patterns
+
+In SQL you model entities, then write queries. In DynamoDB you **list the queries first**, then shape keys and indexes so each one is a single `GetItem` or `Query`.
+
+**Single-table design** stores several entity types in one table with generic key names, so related items can be fetched together:
+
+| PK | SK | Attributes |
+|---|---|---|
+| `CUSTOMER#42` | `PROFILE` | name, email, tier |
+| `CUSTOMER#42` | `ORDER#2026-11-03#981` | total, status |
+| `CUSTOMER#42` | `ORDER#2026-11-20#1044` | total, status |
+| `ORDER#1044` | `ITEM#1` | sku, qty, price |
+| `ORDER#1044` | `ITEM#2` | sku, qty, price |
+
+- "Customer profile + recent orders" → `Query PK = CUSTOMER#42` (one request).
+- "Orders in November" → `Query PK = CUSTOMER#42 AND SK begins_with ORDER#2026-11`.
+- "Items in order 1044" → `Query PK = ORDER#1044`.
+
+Single-table design is powerful but harder to evolve and read; many teams use one table per bounded context instead. The principle — keys shaped by access patterns — matters more than the number of tables.
+
+## Secondary indexes
+
+| | Global secondary index (GSI) | Local secondary index (LSI) |
+|---|---|---|
+| Keys | Any new PK and SK | Same PK, different SK |
+| Created | Any time | Only at table creation |
+| Consistency | Eventually consistent only | Strong or eventual |
+| Capacity | Its own | Shares the table's |
+| Limits | 20 per table | 5 per table; 10 GB per item collection |
+
+GSIs are copies maintained asynchronously. Project only the attributes you need. A **sparse index** (only items that have the GSI key attribute) is a cheap way to index "only open orders".
+
+## Capacity, hot partitions and consistency
+
+- **On-demand** — pay per request, scales instantly to previous peaks and beyond. Default for new or spiky workloads.
+- **Provisioned** — set RCUs/WCUs with auto scaling; cheaper for steady, predictable traffic (plus reserved capacity).
+- **Hot partition** — one PK getting a large share of traffic (a celebrity, "today's date" as PK) hits the per-partition limit and throttles. Fix with higher-cardinality keys or **write sharding** (`PK = DATE#2026-11-24#7`, with a random suffix 0–9).
+- **Reads** are eventually consistent by default (half the cost); request strongly consistent reads when needed (not on GSIs).
+- **Item limit** 400 KB — store large blobs in S3 and keep a pointer.
+
+## Features worth naming
+
+- **Conditional writes** — `ConditionExpression` for optimistic locking (`version = :v`) and idempotency (`attribute_not_exists(pk)`).
+- **Transactions** — `TransactWriteItems`: up to 100 items, all-or-nothing, at 2× the cost.
+- **Streams** — an ordered change log (24 h) consumed by Lambda for projections, search indexing, audit or event publishing (the outbox pattern for free).
+- **TTL** — expires items automatically (sessions, idempotency keys) at no cost.
+- **Global tables** — multi-region, multi-active replication (last writer wins).
+- **DAX** — an in-memory cache for microsecond reads.
+
+```ts
+// optimistic locking: only update if nobody else changed it
+await ddb.send(new UpdateCommand({
+  TableName: 'orders',
+  Key: { pk: 'ORDER#1044', sk: 'META' },
+  UpdateExpression: 'SET #s = :s, version = version + :one',
+  ConditionExpression: 'version = :expected',
+  ExpressionAttributeNames: { '#s': 'status' },
+  ExpressionAttributeValues: { ':s': 'SHIPPED', ':one': 1, ':expected': 7 },
+}));
+```
+
+## DynamoDB or a relational database?
+
+| Choose DynamoDB when | Choose RDS/Aurora when |
+|---|---|
+| Access patterns are known and key-based | Queries are ad hoc, reporting-heavy, or will change a lot |
+| You need predictable latency at very high scale | You need joins, complex transactions, constraints |
+| Serverless / spiky traffic, no connection management | The team knows SQL and the data is highly relational |
+| Simple ops: no patching, versions or failover to manage | You need full-text or flexible secondary querying (or add OpenSearch) |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Using `Scan` with filters in request paths — it reads (and bills) the whole table.
+- Low-cardinality partition keys (status, date, country) creating hot partitions.
+- Designing tables like normalised SQL and doing joins in application code.
+- Forgetting GSIs are eventually consistent.
+- Big items or ever-growing lists inside one item instead of separate items in a collection.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you design a DynamoDB table, and what are its main trade-offs?">
+
+DynamoDB distributes items across partitions by hashing the partition key, and within a partition keeps items sorted by the sort key. Efficient operations are GetItem on a full key or a Query on one partition key with a sort-key range, while a Scan reads everything. So I design from access patterns: list every query the app needs, then choose keys so each one is a single Query. For example, partition key CUSTOMER#id with sort keys PROFILE and ORDER#date#id gives a customer's profile and orders in one request, and date ranges with begins_with. Other access paths get global secondary indexes, which are eventually consistent copies with their own keys. I pick high-cardinality partition keys to avoid hot partitions, using write sharding if one key is naturally hot, and on-demand capacity unless traffic is steady. I use conditional writes for idempotency and optimistic locking, TTL for expiring data, and Streams with Lambda to drive projections or events. The trade-off is flexibility: ad hoc queries, joins and analytics are hard, so for highly relational or exploratory data I'd choose Aurora.
+
+<Fragment slot="deeper">
+
+- **GSI vs LSI?** GSI: any keys, created anytime, eventually consistent, own capacity. LSI: same PK, creation-time only, strong reads possible.
+- **How do you do transactions?** `TransactWriteItems` / `TransactGetItems`, up to 100 items, double cost.
+- **How do you search text?** Stream changes into OpenSearch.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Partition key", "Hashed to choose the partition that stores an item."],
+  ["Sort key", "Orders items within a partition key, enabling range queries."],
+  ["Item collection", "All items sharing one partition key."],
+  ["GSI", "Global secondary index with its own keys, eventually consistent."],
+  ["Hot partition", "A partition receiving disproportionate traffic and throttling."],
+  ["Single-table design", "Storing several entity types in one table, keyed for access patterns."],
+  ["DynamoDB Streams", "A time-ordered log of item changes, consumable by Lambda."],
+  ["Conditional write", "A write that succeeds only if a condition on the current item holds."],
+]} />

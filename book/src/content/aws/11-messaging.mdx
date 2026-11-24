@@ -1,0 +1,156 @@
+---
+title: "Messaging: SQS, SNS, EventBridge and Kinesis"
+part: Integration & operations
+order: 11
+level: core
+summary: Decoupling services on AWS — queues vs pub/sub vs event buses vs streams, standard vs FIFO, visibility timeouts and dead-letter queues, and the SNS-to-SQS fan-out pattern.
+---
+
+AWS has four core messaging services, and picking the right one is a frequent interview question. **SQS** is a queue: work items each processed by one consumer. **SNS** is pub/sub: push a message to many subscribers. **EventBridge** is an event bus: route events by content rules between services, accounts and SaaS apps. **Kinesis Data Streams** is an ordered, replayable stream for high-volume data, like a managed Kafka (AWS also offers **MSK**, real managed Kafka).
+
+<Analogy>
+  A post office. **SQS** is a pigeonhole of job tickets: each worker takes one ticket, and if they don't finish in time it goes back in the pile. **SNS** is a loudspeaker announcement: everyone subscribed hears it at once. **EventBridge** is the sorting room: each letter is routed by what's written on it to whoever registered interest in that kind of letter. **Kinesis** is a CCTV recording: everything is kept in order for a while, and anyone can rewind and replay.
+</Analogy>
+
+## Why it matters
+
+Asynchronous messaging is how you absorb spikes, isolate failures and keep services decoupled. You need to choose the right service and explain delivery guarantees, retries, ordering and dead-letter queues.
+
+## Choosing a service
+
+| | SQS | SNS | EventBridge | Kinesis Data Streams |
+|---|---|---|---|---|
+| Model | Queue (pull) | Pub/sub (push) | Event bus with rules (push) | Ordered log (pull) |
+| Consumers per message | One | All subscribers | All matching rules (up to 5 targets each) | Many, each with its own position |
+| Ordering | FIFO queues per group | FIFO topics | No | Per shard |
+| Retention / replay | Up to 14 days, no replay | None (delivers and forgets) | Archive and replay | 24 h – 365 days, replayable |
+| Filtering | — | Subscription filter policies | Rich content-based rules, schema registry | Consumer-side |
+| Typical use | Work queues, buffering, smoothing load | Fan-out, notifications (email, SMS, mobile push) | Event-driven microservices, SaaS and AWS events, cron | Clickstreams, telemetry, analytics, CDC |
+
+## SQS in depth
+
+- **Standard queues** — nearly unlimited throughput, **at-least-once** delivery, best-effort ordering.
+- **FIFO queues** — exactly-once processing within a 5-minute dedup window, strict ordering per **message group ID**; up to 300 msg/s per API action (3,000 with batching, more in high-throughput mode).
+- **Visibility timeout** — after a consumer receives a message it's hidden; if not deleted before the timeout, it reappears for another consumer. Set it longer than processing time.
+- **Dead-letter queue (DLQ)** — after `maxReceiveCount` failed attempts, the message moves to a DLQ for inspection and redrive, instead of looping forever.
+- **Long polling** (`WaitTimeSeconds` up to 20) cuts empty receives and cost.
+- **Delay queues** and per-message timers postpone delivery up to 15 minutes.
+
+<Diagram
+  caption="The life of an SQS message: received, hidden during processing, then deleted on success or redelivered on failure, ending in the DLQ after too many attempts."
+  chart={`flowchart LR
+    P["Producer<br/>SendMessage"] --> Q["Queue<br/>(visible)"]
+    Q --> R["Consumer receives<br/>→ message hidden"]
+    R --> OK["Success:<br/>DeleteMessage"]
+    R --> F["Failure / crash:<br/>no delete"]
+    F --> V["Visibility timeout<br/>expires → visible again"]
+    V --> DLQ["receiveCount > max<br/>→ moved to DLQ"]`}
+  steps={[
+    { nodes: ["P", "Q"], text: "A producer sends a message. It's stored redundantly across AZs and is now visible." },
+    { nodes: ["Q", "R"], text: "A consumer (an ECS worker or a Lambda event source mapping) receives it. The message becomes **invisible** for the visibility timeout. It is not removed." },
+    { nodes: ["R", "OK"], text: "On success the consumer explicitly deletes the message. Only then is it gone for good." },
+    { nodes: ["R", "F"], text: "If the consumer crashes or throws, it never deletes. This is why delivery is at-least-once and handlers must be idempotent." },
+    { nodes: ["F", "V"], text: "When the visibility timeout expires the message reappears and is received again, and its `ApproximateReceiveCount` increases." },
+    { nodes: ["V", "DLQ"], text: "Once it exceeds `maxReceiveCount` (the redrive policy), SQS moves it to the dead-letter queue. Alarm on DLQ depth, fix, then redrive." },
+  ]}
+/>
+
+## Fan-out: SNS to SQS
+
+When one event must trigger several independent consumers, publish once to an **SNS topic** and subscribe one **SQS queue per consumer**. Each consumer gets its own durable buffer, retries and DLQ, and a slow or failing consumer doesn't affect the others.
+
+<Diagram
+  wide
+  caption="SNS-to-SQS fan-out: the orders service publishes one OrderPlaced event. Each downstream service has its own queue, so it can scale, fail and retry independently."
+  chart={`architecture-beta
+    service orders(aws:ecs)[Orders service]
+    service topic(aws:sns)[OrderPlaced topic]
+    junction fan
+    junction fanT
+    junction fanB
+    service q1(aws:sqs)[billing queue]
+    service q2(aws:sqs)[email queue]
+    service q3(aws:sqs)[analytics queue]
+    service c1(aws:lambda)[Billing]
+    service c2(aws:lambda)[Email]
+    service c3(aws:lambda)[Analytics]
+
+    orders:R --> L:topic
+    topic:R -- L:fan
+    fan:T -- B:fanT
+    fan:B -- T:fanB
+    fanT:R --> L:q1
+    fan:R --> L:q2
+    fanB:R --> L:q3
+    q1:R --> L:c1
+    q2:R --> L:c2
+    q3:R --> L:c3`}
+/>
+
+EventBridge can do the same with rules per consumer (and an SQS target for buffering); prefer it when routing depends on event **content** or events cross accounts.
+
+```ts
+// publishing an event to EventBridge from Node.js
+import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+const eb = new EventBridgeClient({});
+
+await eb.send(new PutEventsCommand({
+  Entries: [{
+    EventBusName: 'orders',
+    Source: 'com.acme.orders',
+    DetailType: 'OrderPlaced',
+    Detail: JSON.stringify({ orderId: '1044', customerId: '42', total: 129.5 }),
+  }],
+}));
+// a rule matching { "source": ["com.acme.orders"], "detail-type": ["OrderPlaced"] }
+// routes it to a billing SQS queue, a Step Functions workflow, etc.
+```
+
+## Kinesis Data Streams
+
+- Data is split into **shards** by partition key; each shard keeps records **in order** and supports ~1 MB/s or 1,000 records/s in, 2 MB/s out (or use on-demand mode).
+- Multiple consumers read independently and can **replay** from any point within retention.
+- Use it for high-volume ordered data — clickstreams, IoT telemetry, change data capture — not for simple job queues.
+- **Firehose** loads streams into S3, Redshift or OpenSearch with no code.
+
+## Delivery semantics
+
+Almost everything here is **at-least-once**. Design consumers to be **idempotent**: store processed message IDs (DynamoDB conditional put with TTL), or make operations naturally idempotent (upserts, "set status = PAID"). To publish an event reliably after a DB write, use the **outbox pattern** — or DynamoDB Streams / EventBridge Pipes from the table.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- No DLQ, so a poison message is retried forever (or silently dropped after retention).
+- Visibility timeout shorter than processing time, so messages are processed twice concurrently.
+- Expecting ordering from a standard queue or from SNS/EventBridge.
+- Several consumers sharing one SQS queue when each needs every message — use fan-out.
+- Choosing Kinesis for a work queue (per-shard ordering means one bad record blocks the shard).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="SQS, SNS, EventBridge or Kinesis — how do you choose, and how do you make consumers reliable?">
+
+SQS is a queue for work items: each message is processed by one consumer, it buffers spikes and lets workers scale on queue depth. SNS is pub/sub that pushes one message to many subscribers. EventBridge is an event bus that routes events by their content, across services and accounts, and also carries AWS and SaaS events. Kinesis is an ordered, sharded, replayable log for high-volume streams like clickstreams. A very common pattern is fan-out: publish an OrderPlaced event once to SNS or EventBridge, and give each consumer its own SQS queue so they scale and fail independently. For reliability, delivery is at-least-once, so consumers are idempotent. In SQS a received message is hidden for the visibility timeout and only removed when the consumer deletes it, so crashes cause redelivery. I set the timeout longer than processing time, configure a dead-letter queue with a max receive count, and alarm on DLQ depth. If I need strict ordering I use FIFO queues with message group IDs, accepting lower throughput.
+
+<Fragment slot="deeper">
+
+- **How do you get exactly-once?** FIFO deduplication within 5 minutes, plus idempotent consumers; true end-to-end exactly-once needs idempotency.
+- **How do you scale SQS workers?** Lambda event source mapping scales automatically; ECS scales on backlog per task.
+- **Why not call the other services directly?** Temporal coupling: if billing is down, orders fail. A queue absorbs the outage.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["SQS", "Managed message queue; each message processed by one consumer."],
+  ["Visibility timeout", "How long a received message stays hidden before reappearing."],
+  ["Dead-letter queue", "Where messages go after too many failed processing attempts."],
+  ["FIFO queue", "SQS queue with ordering per message group and deduplication."],
+  ["SNS", "Pub/sub service that pushes messages to many subscribers."],
+  ["EventBridge", "Serverless event bus routing events by content-based rules."],
+  ["Kinesis Data Streams", "Sharded, ordered, replayable stream for high-volume data."],
+  ["Fan-out", "One published event delivered to many independent consumers."],
+]} />

@@ -51,6 +51,7 @@
 .volumes a[data-subject='api'] { --subj: var(--api); }
 .volumes a[data-subject='sec'] { --subj: var(--sec); }
 .volumes a[data-subject='k8s'] { --subj: var(--k8s); }
+.volumes a[data-subject='aws'] { --subj: var(--aws); }
 .vol-num {
   font-family: var(--font-read); font-style: italic; font-size: 12px;
   color: var(--faint); min-width: 1.1em;
