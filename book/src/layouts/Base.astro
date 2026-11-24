@@ -14,8 +14,9 @@ interface Props {
   active?: SubjectKey | 'demos' | 'home';
   bodyClass?: string;
 }
-const { title, description = 'A plain-English book for JavaScript, Node.js, TypeScript, databases, system design, APIs, security and Kubernetes interviews.', subject, active, bodyClass = '' } = Astro.props;
+const { title, description = 'A plain-English book for JavaScript, Node.js, TypeScript, databases, system design, APIs, security, Kubernetes and AWS interviews.', subject, active, bodyClass = '' } = Astro.props;
 const pageTitle = title === 'The Interview Book' ? title : `${title} — The Interview Book`;
+const canonical = Astro.site ? new URL(Astro.url.pathname, Astro.site).href : undefined;
 ---
 <!doctype html>
 <html lang="en" data-theme="paper" data-size="m">
@@ -24,6 +25,15 @@ const pageTitle = title === 'The Interview Book' ? title : `${title} — The Int
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{pageTitle}</title>
   <meta name="description" content={description} />
+  {canonical && <link rel="canonical" href={canonical} />}
+  <meta property="og:site_name" content="The Interview Book" />
+  <meta property="og:type" content={subject ? 'article' : 'website'} />
+  <meta property="og:title" content={pageTitle} />
+  <meta property="og:description" content={description} />
+  {canonical && <meta property="og:url" content={canonical} />}
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content={pageTitle} />
+  <meta name="twitter:description" content={description} />
   <link rel="icon" href={withBase('/favicon.svg')} type="image/svg+xml" />
   <meta name="theme-color" content="#f7f5f0" />
   <script is:inline>
@@ -66,7 +76,6 @@ const pageTitle = title === 'The Interview Book' ? title : `${title} — The Int
   <footer class="colophon">
     <p>
       Set in Literata &amp; Inter. Written for people preparing for their next interview.
-      <a href={withBase('/../')}>Classic reference →</a>
     </p>
   </footer>
 

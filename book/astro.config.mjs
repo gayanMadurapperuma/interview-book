@@ -12,8 +12,11 @@ const bookTheme = createCssVariablesTheme({
 });
 
 export default defineConfig({
-  site: 'https://gayanmadurapperuma.github.io',
-  base: '/js-node-animated-reference/book',
+  site: process.env.SITE_URL || 'https://gayanmadurapperuma.github.io',
+  // In CI the base comes from actions/configure-pages (the repo's Pages path),
+  // so renaming the repo or adding a custom domain needs no code change.
+  // ('' from a custom domain means the site root)
+  base: process.env.BASE_PATH === undefined ? '/interview-book' : process.env.BASE_PATH || '/',
   trailingSlash: 'ignore',
   integrations: [mdx(), react()],
   markdown: {
