@@ -50,4 +50,4 @@ export default scenario({
   .step("console.log('last job took", 'Confirmed: the last job waited about one extra full "wave".', { phase: 'poll' })
   .pop('stack')
   .step(0, 'Takeaway for interviews: async ≠ infinitely parallel. Know which APIs use the pool.', { phase: 'done' })
-  .build({ kind: 'exact', module: 'cjs' });
+  .build({ kind: 'none', reason: 'timing depends on the CPU core count of the machine running the tests' });
