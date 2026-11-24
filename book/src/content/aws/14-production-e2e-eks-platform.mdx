@@ -1,0 +1,374 @@
+---
+title: "Production case study: an e-commerce platform on EKS, end to end"
+part: Integration & operations
+order: 14
+level: advanced
+summary: A complete production design — multi-account landing zone, edge and request path, EKS platform add-ons, event backbone, GitOps CI/CD with canary releases, security layers, observability, multi-region DR, cost and day-2 operations.
+---
+
+This chapter brings the whole volume together in one realistic system: **a global e-commerce platform built from Node.js microservices running on EKS**, using the AWS services around the cluster for everything stateful, secure and observable. It is the shape of answer expected for "design and operate X in production on AWS": not just the boxes, but how the platform is built, how code gets to production safely, how it is secured and observed, and what happens when an AZ or a whole region fails.
+
+<Analogy>
+  A large shopping mall. The **landing zone** is the mall's legal structure and building codes: separate units for shops, security and management. The **edge** is the entrances with guards and signposts (CloudFront, WAF, Route 53). The **EKS platform** is the managed floor space with power, plumbing and fire alarms already installed (add-ons) so shops (services) just move in. The **event backbone** is the internal delivery corridor. **GitOps** is the rule that no shop changes its layout unless the change is in the approved floor plan. **DR** is a second mall in another city kept stocked and ready to open.
+</Analogy>
+
+## The scenario and requirements
+
+**Product:** an online store — catalog and search, cart, checkout and payments, orders, inventory, notifications, analytics. About 12 Node.js services built by 6 teams.
+
+| Requirement | Target |
+|---|---|
+| Traffic | 3k RPS normal, **15k RPS** during sales; spiky |
+| Latency | p99 under 300 ms for browse and cart APIs |
+| Availability | **99.95%** for checkout |
+| Data loss / recovery | RPO ≤ 1 min, RTO ≤ 15 min for a full region loss |
+| Compliance | Card data via a PCI-compliant provider (tokenised); GDPR for EU customers |
+| Teams | Independent deploys many times a day, no shared release train |
+
+Stating these first drives every choice below: spiky traffic → autoscaling at both pod and node level; 99.95% plus RTO 15 min → multi-AZ everywhere plus a warm standby region; many teams → a self-service platform with GitOps and guardrails.
+
+## 1. Multi-account landing zone
+
+Accounts are the strongest isolation boundary on AWS (blast radius, IAM, quotas, billing). The platform starts with **AWS Organizations + Control Tower**:
+
+<Diagram
+  caption="Multi-account layout. Workloads are isolated per environment; security, logging, networking and shared tooling each live in their own account, governed by SCP guardrails."
+  chart={`flowchart TB
+    ORG["Management account<br/>Organizations, Control Tower, SSO, billing"]
+    ORG --> SEC["Security OU"]
+    ORG --> INF["Infrastructure OU"]
+    ORG --> WL["Workloads OU"]
+    SEC --> LOG["Log archive<br/>CloudTrail, Config, VPC flow logs"]
+    SEC --> AUD["Security tooling<br/>GuardDuty, Security Hub admin"]
+    INF --> NET["Network<br/>Transit Gateway, egress, Route 53"]
+    INF --> SH["Shared services<br/>ECR, CI runners, Argo CD"]
+    WL --> DEV["dev"]
+    WL --> STG["staging"]
+    WL --> PROD["prod (eu-west-1 + us-east-1)"]`}
+/>
+
+- **SSO (IAM Identity Center)** for all humans: read-only by default, break-glass admin with approval.
+- **SCPs**: deny leaving approved regions, deny disabling CloudTrail/GuardDuty/Config, deny creating IAM users and access keys, deny public S3.
+- **Networking account**: Transit Gateway connects workload VPCs; centralised egress through NAT + Network Firewall; private Route 53 zones shared.
+- **Shared services account**: ECR (replicated to both prod regions), CI runners, the Argo CD management cluster.
+- Everything created with **Terraform** (Account Factory for Terraform for new accounts).
+
+## 2. The request path
+
+<Diagram
+  wide
+  caption="Request path in the prod account. CloudFront with WAF fronts one ALB, created by the Load Balancer Controller. The ALB routes by path to services on EKS, and each service owns its data store."
+  chart={`architecture-beta
+    service users(internet)[Shoppers]
+    service cdn(aws:cloudfront)[CloudFront + WAF]
+    group vpc(aws:vpc)[Prod VPC eu-west-1 3 AZs]
+    service alb(aws:elb)[ALB] in vpc
+    junction fan in vpc
+    junction fanT in vpc
+    junction fanB in vpc
+    group eks(aws:eks)[EKS cluster] in vpc
+    service catalog(aws:eks)[catalog svc] in eks
+    service orders(aws:eks)[orders svc] in eks
+    service payments(aws:eks)[payments svc] in eks
+    service search(aws:open-search)[OpenSearch] in vpc
+    service aurora(aws:aurora)[Aurora PostgreSQL] in vpc
+    service ddb(aws:dynamodb)[DynamoDB] in vpc
+
+    users:R --> L:cdn
+    cdn:R --> L:alb
+    alb:R -- L:fan
+    fan:T -- B:fanT
+    fan:B -- T:fanB
+    fanT:R --> L:catalog
+    fan:R --> L:orders
+    fanB:R --> L:payments
+    catalog:R --> L:search
+    orders:R --> L:aurora
+    payments:R --> L:ddb`}
+/>
+
+| Layer | Choice | Why |
+|---|---|---|
+| DNS | Route 53, latency-based records + health checks per region | Users go to the nearest healthy region |
+| Edge | CloudFront + **WAF** (managed rules, rate limits, bot control) + **Shield** | Caches static and catalog responses, absorbs DDoS, terminates TLS near users |
+| Static frontend | Next.js static assets in S3 behind CloudFront (OAC) | No servers for static content |
+| Ingress | One shared ALB via `IngressGroup`, target type `ip`, ACM certs | Path routing to services, direct-to-pod |
+| Services | Node.js on EKS, one namespace per team | Independent deploys and scaling |
+| Data | **Database per service**: Aurora PostgreSQL (orders), DynamoDB (cart, payments idempotency), OpenSearch (search), ElastiCache Redis (sessions, caching, rate limits), S3 (images, exports) | Each data store fits its access pattern; no shared schema between teams |
+
+Service-to-service calls inside the cluster go through Kubernetes Services (optionally a mesh such as Istio Ambient or VPC Lattice for mTLS and traffic policy), always with **timeouts, retries with jitter and circuit breakers**.
+
+## 3. The event backbone
+
+Checkout must not call inventory, email and analytics synchronously. Orders publish domain events; consumers react independently.
+
+<Diagram
+  wide
+  caption="Event backbone. The orders service writes the order and an outbox row in one transaction; a relay publishes OrderPlaced to MSK. Inventory, notifications and the analytics pipeline each consume at their own pace."
+  chart={`architecture-beta
+    service orders(aws:eks)[orders svc + outbox]
+    service msk(aws:msk)[MSK Kafka]
+    junction fan
+    junction fanT
+    junction fanB
+    service inv(aws:eks)[inventory svc]
+    service notify(aws:eks)[notifications svc]
+    service fh(aws:kinesis)[Firehose]
+    service invdb(aws:dynamodb)[Stock table]
+    service ses(aws:ses)[SES email]
+    service lake(aws:s3)[S3 data lake]
+
+    orders:R --> L:msk
+    msk:R -- L:fan
+    fan:T -- B:fanT
+    fan:B -- T:fanB
+    fanT:R --> L:inv
+    fan:R --> L:notify
+    fanB:R --> L:fh
+    inv:R --> L:invdb
+    notify:R --> L:ses
+    fh:R --> L:lake`}
+/>
+
+- **Transactional outbox**: the order row and an `outbox` row are written in the same Aurora transaction; a relay (Debezium on MSK Connect) publishes to Kafka. No dual-write inconsistency.
+- **MSK (Kafka)** for ordered, replayable, high-volume events, partitioned by `orderId`. (A smaller platform would use EventBridge + SQS, as in the messaging chapter.)
+- Consumers are **idempotent** (processed-event IDs in DynamoDB with TTL) with **dead-letter topics**.
+- The checkout workflow (reserve stock → charge → confirm, with compensations) is a **saga**, orchestrated by Step Functions or by the orders service.
+- Consumer pods autoscale on **Kafka consumer lag** with **KEDA**.
+
+## 4. Building the EKS platform
+
+Infrastructure is layered so each layer changes at its own pace:
+
+| Layer | Tool | Contents |
+|---|---|---|
+| 0. Accounts & guardrails | Terraform + Control Tower | Accounts, SCPs, SSO, log archive |
+| 1. Network | Terraform | VPC per region, 3 AZs, public / private / pod / data subnets (large pod CIDR), TGW attachment, endpoints |
+| 2. Data | Terraform | Aurora Global Database, DynamoDB global tables, MSK, OpenSearch, ElastiCache, KMS keys |
+| 3. Cluster | Terraform (`terraform-aws-eks`) | EKS cluster (private endpoint), access entries, managed add-ons, Karpenter IAM and a small system node group |
+| 4. Platform add-ons | Argo CD (app-of-apps, Helm) | Everything installed *into* the cluster, below |
+| 5. Applications | Argo CD + Argo Rollouts | Each team's services from their config repos |
+
+Platform add-ons, all managed by GitOps:
+
+| Need | Add-on |
+|---|---|
+| Node provisioning | **Karpenter** (NodePools: `system` on-demand, `general` Graviton Spot + on-demand fallback) |
+| Ingress & DNS | **AWS Load Balancer Controller**, **ExternalDNS**, ACM |
+| Secrets | **External Secrets Operator** syncing from Secrets Manager |
+| Pod IAM | **EKS Pod Identity** agent; one role per service account |
+| Autoscaling | HPA on CPU / RPS, **KEDA** on Kafka lag and SQS depth |
+| Progressive delivery | **Argo Rollouts** (canary with automated analysis) |
+| Policy | **Kyverno**: require resources, probes, non-root, signed images from our ECR only |
+| Observability | **ADOT collector** (metrics → Amazon Managed Prometheus, traces → X-Ray), **Fluent Bit** (logs → CloudWatch / OpenSearch) |
+| Backup | **Velero** for cluster objects (state lives in managed services anyway) |
+
+## 5. Deploying the application
+
+Each service ships a Helm chart. What makes it production-ready:
+
+```yaml
+# orders: key parts of the production manifests (rendered from Helm)
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout                     # Argo Rollouts instead of a plain Deployment
+metadata: { name: orders, namespace: orders }
+spec:
+  replicas: 6
+  selector: { matchLabels: { app: orders } }
+  strategy:
+    canary:
+      steps:
+        - setWeight: 10
+        - analysis: { templates: [{ templateName: success-rate-and-latency }] }
+        - setWeight: 50
+        - pause: { duration: 5m }
+  template:
+    metadata: { labels: { app: orders } }
+    spec:
+      serviceAccountName: orders          # Pod Identity → orders-role (Aurora IAM auth, its S3 prefix)
+      topologySpreadConstraints:
+        - { maxSkew: 1, topologyKey: topology.kubernetes.io/zone, whenUnsatisfiable: DoNotSchedule, labelSelector: { matchLabels: { app: orders } } }
+      containers:
+        - name: api
+          image: 111122223333.dkr.ecr.eu-west-1.amazonaws.com/orders@sha256:4f1c…   # pinned digest, signed
+          ports: [{ containerPort: 3000 }]
+          resources: { requests: { cpu: 500m, memory: 512Mi }, limits: { memory: 512Mi } }
+          envFrom: [{ secretRef: { name: orders-db } }]      # created by External Secrets
+          readinessProbe: { httpGet: { path: /readyz, port: 3000 }, periodSeconds: 5 }
+          livenessProbe:  { httpGet: { path: /livez,  port: 3000 }, periodSeconds: 10 }
+          lifecycle: { preStop: { sleep: { seconds: 10 } } }  # let the ALB deregister before SIGTERM handling
+          securityContext: { runAsNonRoot: true, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: orders, namespace: orders }
+spec: { minAvailable: 4, selector: { matchLabels: { app: orders } } }
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: { name: orders-db, namespace: orders }
+spec:
+  secretStoreRef: { kind: ClusterSecretStore, name: aws-secrets-manager }
+  target: { name: orders-db }
+  dataFrom: [{ extract: { key: prod/orders/db } }]
+```
+
+### From commit to production
+
+<Diagram
+  sequence
+  caption="GitOps delivery. CI never touches the cluster: it builds, scans and signs an image, then commits the new digest. Argo CD in the cluster pulls the change, and Argo Rollouts runs the canary."
+  chart={`sequenceDiagram
+    participant Dev as Developer
+    participant GH as GitHub Actions
+    participant ECR as Amazon ECR
+    participant Cfg as Config repo
+    participant Argo as Argo CD
+    participant EKS as EKS prod
+    Dev->>GH: merge PR to main
+    GH->>GH: test, build arm64 image, SBOM, sign
+    GH->>ECR: push via OIDC role, scan on push
+    GH->>Cfg: PR: bump orders digest (staging, then prod)
+    Argo->>Cfg: detect change (pull)
+    Argo->>EKS: sync Rollout, canary 10%
+    EKS-->>Argo: analysis passes, promote to 100%`}
+  notes={[
+    "A reviewed PR is merged. Branch protection requires tests, review and passing security checks.",
+    "CI runs unit and contract tests, builds a multi-stage `arm64` image, generates an SBOM, and signs the image (cosign / AWS Signer).",
+    "CI assumes a push-only role through **OIDC** (no AWS keys) and pushes to ECR. ECR enhanced scanning (Inspector) checks for CVEs, and replication copies the image to the DR region.",
+    "CI opens a PR to the **config repo** changing only the image digest, first for staging. Prod is promoted the same way after staging checks pass. Git is the audit trail.",
+    "Argo CD, running in the cluster, **pulls** the desired state. CI has no cluster credentials at all.",
+    "Argo CD applies the Rollout. Kyverno admits it only if the image is signed and from our ECR. Argo Rollouts shifts 10% of ALB traffic to the canary.",
+    "An AnalysisTemplate queries Amazon Managed Prometheus (error rate, p99) during each step. On success it promotes; on failure it aborts and shifts traffic back automatically.",
+  ]}
+/>
+
+<Diagram
+  caption="Canary progression with automated analysis. A bad version is caught at 10% traffic and rolled back without a human."
+  chart={`flowchart LR
+    S["Stable v41<br/>100%"] --> C10["Canary v42<br/>10% traffic"]
+    C10 --> A1{"Analysis: 5xx under 0.5%,<br/>p99 under 300 ms?"}
+    A1 -- pass --> C50["50% traffic<br/>pause 5 min"]
+    C50 --> F["v42 = 100%<br/>v41 scaled down"]
+    A1 -- fail --> RB["Abort: 100% back to v41<br/>alert the team"]`}
+  steps={[
+    { nodes: ["S"], text: "All traffic is on the stable version. Argo Rollouts manages two ReplicaSets and weights on the ALB target groups." },
+    { nodes: ["S", "C10"], text: "The new version starts with 10% of live traffic. Pods must pass readiness probes first." },
+    { nodes: ["C10", "A1"], text: "Automated **analysis** runs Prometheus queries comparing the canary's error rate and latency against thresholds." },
+    { nodes: ["A1", "C50"], text: "Healthy: the weight increases to 50% and the rollout pauses so slower signals (business metrics, logs) can show up." },
+    { nodes: ["C50", "F"], text: "Fully promoted. The old ReplicaSet scales down after a delay, so a quick manual rollback is still instant." },
+    { nodes: ["A1", "RB"], text: "If analysis fails at any step, the rollout aborts and all traffic returns to the stable version in seconds. Only ~10% of users saw errors, briefly." },
+  ]}
+/>
+
+Database schema changes follow **expand → migrate → contract** and run as a pre-sync Kubernetes Job, so old and new versions can run side by side during the canary.
+
+## 6. Security in layers
+
+| Layer | Controls |
+|---|---|
+| Organisation | SCP guardrails, SSO only, no IAM users, separate prod accounts |
+| Edge | WAF managed rules, rate limiting, bot control, Shield, TLS 1.2+ |
+| Network | Private subnets; private EKS endpoint; security groups for pods (only payments pods reach the payments store); NetworkPolicies default-deny; egress through Network Firewall |
+| Identity | Pod Identity per service account; least-privilege roles; Aurora IAM auth |
+| Supply chain | Signed images, SBOMs, ECR scanning, Kyverno admission (signed + our registry only), pinned digests |
+| Runtime | Non-root, read-only root FS, no privilege escalation; GuardDuty EKS runtime monitoring |
+| Data | KMS customer-managed keys for Aurora, DynamoDB, S3, EBS and EKS secrets envelope encryption; card data never stored (provider tokens) |
+| Audit & detection | Org-wide CloudTrail to the log archive, Config rules, Security Hub, alerts to the security team |
+
+## 7. Observability
+
+- **Metrics**: ADOT / Prometheus scraping → **Amazon Managed Prometheus**; **Amazon Managed Grafana** dashboards per service (RED: rate, errors, duration) and per platform component.
+- **Traces**: OpenTelemetry SDK in each Node.js service → ADOT → X-Ray, with trace IDs in every log line.
+- **Logs**: structured JSON → Fluent Bit → CloudWatch Logs (30-day retention) and S3 for long-term.
+- **SLOs and alerting**: SLOs per user journey (browse, add to cart, checkout) with **burn-rate alerts** to PagerDuty; Container Insights for cluster health; Kafka lag and DLQ alarms.
+- **Business metrics**: orders per minute and payment success rate, often the fastest signal that something is wrong.
+
+## 8. Resilience and disaster recovery
+
+**Within a region (AZ failure):** three AZs; topology spread keeps pods in every AZ; Karpenter replaces lost capacity; Aurora fails over to a reader in under ~30 s; DynamoDB, S3, MSK and the ALB are multi-AZ already. Result: a brief blip, no manual action.
+
+**Region failure — warm standby in us-east-1:**
+
+<Diagram
+  wide
+  caption="Warm standby across regions. Route 53 sends traffic to the healthy region. Aurora Global Database and DynamoDB global tables replicate data with about one second of lag, giving RPO in seconds."
+  chart={`flowchart TB
+    users(["Shoppers"]) --> dns@{ icon: "aws:route53", form: "square", label: "Route 53 health checks", pos: "b", h: 56 }
+    subgraph eu["eu-west-1 · primary"]
+      direction LR
+      albEU@{ icon: "aws:elb", form: "square", label: "ALB", pos: "b", h: 56 } --> eksEU@{ icon: "aws:eks", form: "square", label: "EKS full size", pos: "b", h: 56 } --> dbEU@{ icon: "aws:aurora", form: "square", label: "Aurora writer", pos: "b", h: 56 }
+    end
+    subgraph us["us-east-1 · warm standby"]
+      direction LR
+      albUS@{ icon: "aws:elb", form: "square", label: "ALB", pos: "b", h: 56 } --> eksUS@{ icon: "aws:eks", form: "square", label: "EKS scaled down", pos: "b", h: 56 } --> dbUS@{ icon: "aws:aurora", form: "square", label: "Aurora secondary", pos: "b", h: 56 }
+    end
+    dns -- "active" --> eu
+    dns -. "on failover" .-> us
+    eu -. "Aurora Global Database + DynamoDB global tables, ~1s lag" .-> us`}
+/>
+
+- The standby region runs the **same platform from the same Git repos** (Argo CD), scaled down; Karpenter scales it up on failover.
+- **Aurora Global Database** (managed failover/switchover promotes the secondary in about a minute); **DynamoDB global tables**; **S3 Cross-Region Replication**; ECR replication; MSK replicated with MirrorMaker 2 / MSK Replicator.
+- Failover: Route 53 health checks shift traffic; a runbook (or **ARC**, Application Recovery Controller) promotes Aurora, then scales the standby. Rehearse with **game days** and **AWS Fault Injection Service** (AZ power loss, node termination, latency injection).
+
+| Strategy | RTO | Cost | Chosen? |
+|---|---|---|---|
+| Backup & restore | hours | lowest | for dev/staging |
+| Pilot light | tens of minutes | low | — |
+| **Warm standby** | **minutes** | medium | **prod: meets RTO 15 min** |
+| Multi-region active-active | ~zero | highest; needs conflict handling | future, for browse traffic only |
+
+## 9. Cost
+
+- Karpenter with **Graviton + Spot** for stateless services (on-demand fallback; PDBs + interruption handling) and consolidation to keep node utilisation high.
+- **Compute Savings Plans** for the on-demand baseline (covers EC2, Fargate and Lambda).
+- Right-sized pod requests (Goldilocks / VPA recommendations), since requests drive node count.
+- CloudFront caching for catalog reads; VPC endpoints instead of NAT for S3, DynamoDB and ECR; log retention and sampling for traces.
+- Per-team cost allocation with namespace labels + **split cost allocation data** for EKS in Cost Explorer; budgets and anomaly detection.
+
+## 10. Day-2 operations
+
+- **Cluster upgrades** every ~4 months: staging first, then control plane → add-ons → Karpenter drift-replaces nodes, guarded by PDBs. For risky jumps, **blue/green clusters** behind Route 53 weights.
+- **Capacity events** (Black Friday): pre-scale with scheduled minimums, warm Aurora readers, raise service quotas in advance, load-test with production-like data.
+- **Incidents**: SLO alert → runbook → rollback is one Git revert (or an automatic canary abort) → blameless post-incident review.
+- **Tenancy**: namespaces, ResourceQuotas and LimitRanges per team; a golden-path Helm chart and templates so teams get probes, PDBs, Pod Identity and dashboards by default.
+
+<Callout type="pitfall" title="Where production platforms usually go wrong">
+
+- One giant shared database, so teams can't deploy independently and one bad query takes everyone down.
+- CI pipelines holding cluster-admin credentials instead of GitOps pull.
+- No PDBs or topology spread, so a node drain or AZ loss removes a whole service.
+- A DR region that was never tested: stale images, missing secrets, wrong quotas.
+- Synchronous call chains through checkout, so an email-service outage blocks payments.
+- Unbounded log and metrics cardinality quietly becoming the largest line on the bill.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="Design and operate a large e-commerce platform on AWS using Kubernetes. Walk me through it end to end.">
+
+I'd start from requirements: spiky traffic up to 15k RPS, p99 under 300 ms, 99.95% for checkout, RPO about a minute and RTO 15 minutes, and six teams deploying independently. The foundation is a multi-account landing zone with Control Tower: separate dev, staging and prod accounts, a log archive, security tooling, networking and shared-services accounts, SSO for people and SCP guardrails. The request path goes Route 53 latency routing to CloudFront with WAF and Shield, then a shared ALB created by the Load Balancer Controller, routing by path directly to pod IPs on EKS in three AZs. Each service owns its data — Aurora PostgreSQL for orders, DynamoDB for carts and idempotency, OpenSearch for search, Redis for caching — and side effects go through events: a transactional outbox to MSK, idempotent consumers, KEDA scaling them on lag, and a saga for checkout. The platform is Terraform for accounts, network, data and the cluster, then Argo CD installs add-ons: Karpenter on Graviton and Spot, External Secrets from Secrets Manager, Pod Identity per service account, Kyverno policies, ADOT and Fluent Bit. Delivery is GitOps: CI builds, scans and signs arm64 images, pushes to ECR via OIDC and bumps a digest in the config repo, then Argo Rollouts canaries at 10% with automated Prometheus analysis and auto-rollback. Security is layered from SCPs to signed images, network policies, security groups for pods and KMS everywhere. Observability is Managed Prometheus, Grafana, X-Ray and SLO burn-rate alerts. AZ failures are absorbed automatically, and for regional failure there's a warm standby in a second region with Aurora Global Database and DynamoDB global tables, the same GitOps state, and Route 53 failover, rehearsed with Fault Injection Service game days.
+
+<Fragment slot="deeper">
+
+- **Why EKS over ECS here?** Many teams, a rich add-on ecosystem (Argo, KEDA, Kyverno), portability and existing Kubernetes skills. ECS would be simpler for a smaller org.
+- **Why MSK rather than EventBridge?** Ordered, replayable, high-throughput streams and CDC via Debezium. EventBridge + SQS is simpler at lower volume.
+- **How do you keep the DR region from drifting?** Same Git source of truth, continuous deploys to both regions, and regular failover drills.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Landing zone", "A governed multi-account AWS setup with baseline security, logging and networking."],
+  ["GitOps", "Git holds the desired state; an in-cluster agent pulls and applies it."],
+  ["Argo Rollouts", "Progressive delivery controller for canary and blue/green with automated analysis."],
+  ["Transactional outbox", "Writing an event in the same DB transaction as the state change, then relaying it."],
+  ["KEDA", "Event-driven pod autoscaling on external metrics such as Kafka lag."],
+  ["Warm standby", "A scaled-down full copy in another region, ready to take over in minutes."],
+  ["Aurora Global Database", "Cross-region Aurora replication with ~1 s lag and fast promotion."],
+  ["Burn-rate alert", "An alert on how fast an SLO's error budget is being consumed."],
+]} />

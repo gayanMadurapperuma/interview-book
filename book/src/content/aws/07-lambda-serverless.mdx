@@ -1,0 +1,174 @@
+---
+title: "Lambda and serverless"
+part: Compute
+order: 7
+level: core
+summary: Functions that run on events — the invocation models, cold starts, concurrency and its limits, API Gateway, Step Functions, and when serverless is (and isn't) the right choice.
+---
+
+**AWS Lambda** runs your code in response to events — an HTTP request, a file landing in S3, a message on a queue, a schedule — and you pay only for the milliseconds it runs. There are no servers, no scaling policies and no idle cost. "Serverless" on AWS usually means Lambda plus managed building blocks: **API Gateway**, **DynamoDB**, **S3**, **SQS/SNS/EventBridge** and **Step Functions**. Interviews dig into cold starts, concurrency, limits and failure handling.
+
+<Analogy>
+  A taxi rank instead of owning a car. When a passenger (event) arrives, a taxi pulls up and drives them; you pay per trip, and nothing when nobody is waiting. If there's no taxi already idling at the rank, one must be called in from the depot first — that delay is a **cold start**. The council licenses only so many taxis at once — that's your **concurrency limit**.
+</Analogy>
+
+## Why it matters
+
+"Design a serverless API", "what's a cold start and how do you reduce it?", "what happens when Lambda overwhelms your database?" and "when would you *not* use Lambda?" are very common, especially for Node.js roles: Node is one of Lambda's most popular runtimes.
+
+## A typical serverless backend
+
+<Diagram
+  wide
+  caption="A synchronous API path (API Gateway → Lambda → DynamoDB) plus an asynchronous path: the API function enqueues slow work on SQS, and a separate worker function processes it in batches."
+  chart={`architecture-beta
+    service users(internet)[Clients]
+    service api(aws:api-gateway)[API Gateway]
+    service fn(aws:lambda)[orders-api fn]
+    service ddb(aws:dynamodb)[DynamoDB]
+    junction up
+    service q(aws:sqs)[SQS queue]
+    service worker(aws:lambda)[worker fn]
+    service ses(aws:ses)[SES email]
+
+    users:R --> L:api
+    api:R --> L:fn
+    fn:R --> L:ddb
+    fn:T -- B:up
+    up:R --> L:q
+    q:R --> L:worker
+    worker:R --> L:ses`}
+/>
+
+```ts
+// handler.ts — Node.js 22 runtime, API Gateway HTTP API event
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import type { APIGatewayProxyHandlerV2 } from 'aws-lambda';
+
+// created once per execution environment and reused across warm invocations
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+export const handler: APIGatewayProxyHandlerV2 = async (event) => {
+  const order = JSON.parse(event.body ?? '{}');
+  await ddb.send(new PutCommand({
+    TableName: process.env.TABLE!,
+    Item: { pk: `ORDER#${order.id}`, ...order },
+    ConditionExpression: 'attribute_not_exists(pk)', // idempotent create
+  }));
+  return { statusCode: 201, body: JSON.stringify({ id: order.id }) };
+};
+```
+
+## How invocation works
+
+| Model | Who calls | Retries | Examples |
+|---|---|---|---|
+| **Synchronous** | Caller waits for the result | Caller's job | API Gateway, ALB, SDK `Invoke` |
+| **Asynchronous** | Lambda queues the event internally and returns 202 | 2 retries, then a DLQ / **on-failure destination** | S3, SNS, EventBridge |
+| **Poll-based (event source mapping)** | Lambda polls the source and invokes with **batches** | Until success or expiry; partial batch failures supported | SQS, Kinesis, DynamoDB Streams, Kafka |
+
+Because async and poll-based events can be delivered **more than once**, handlers must be **idempotent**.
+
+## Cold starts and the execution environment
+
+<Diagram
+  sequence
+  caption="A cold start versus a warm invocation. Only the first request to a new execution environment pays for the init phase."
+  chart={`sequenceDiagram
+    participant C as Client
+    participant L as Lambda service
+    participant E as Execution environment
+    C->>L: request 1
+    L->>E: create micro-VM, download code
+    E->>E: INIT: start runtime, run module scope
+    E-->>C: response (cold, + 100ms–1s)
+    C->>L: request 2
+    L->>E: reuse same environment
+    E-->>C: response (warm, handler only)`}
+  notes={[
+    "A request arrives and there is no idle execution environment for this function version.",
+    "Lambda creates a Firecracker micro-VM and downloads your code package or container image.",
+    "The **init phase** starts the Node.js runtime and runs your module's top-level code: imports, SDK clients, config loading.",
+    "The handler runs and the response returns. The user pays the init time once: the **cold start**.",
+    "A later request arrives while the environment is idle.",
+    "The environment is reused: module-scope state (SDK clients, DB connections, caches) is still there.",
+    "Only the handler runs, so latency is just your code. One environment handles **one request at a time**.",
+  ]}
+/>
+
+Reducing cold starts:
+
+- Keep the bundle small (esbuild, tree-shaking; import only the SDK v3 clients you use).
+- Do expensive setup **once at module scope**, not per request.
+- More memory also means proportionally more CPU, which speeds up init.
+- **Provisioned concurrency** keeps N environments initialised (you pay for them). **SnapStart** (Java, Python, .NET) restores from a snapshot.
+- Avoid unnecessary VPC attachment (modern Lambda VPC networking is fast, but egress then needs a NAT gateway or endpoints).
+
+## Concurrency and limits
+
+**Concurrency** = requests per second × average duration in seconds. 200 RPS at 250 ms needs ~50 concurrent environments.
+
+- **Account concurrency limit** per region (1,000 by default, can be raised), shared by all functions. Throttled sync calls get `429`.
+- **Reserved concurrency** guarantees a function capacity — and **caps** it, which protects downstream systems.
+- **Provisioned concurrency** pre-warms environments for latency-sensitive paths.
+- Hard limits worth knowing: **15-minute** max duration, up to 10 GB memory, 6 MB synchronous payload, 250 MB unzipped package (10 GB as a container image), 10 GB `/tmp`.
+
+<Callout type="pitfall" title="Lambda and relational databases">
+
+Each concurrent environment opens its own DB connection. A traffic spike to 800 concurrent executions can exhaust a PostgreSQL instance's connections. Use **RDS Proxy** to pool connections, cap concurrency with **reserved concurrency**, or use DynamoDB, which is built for this access pattern.
+
+</Callout>
+
+## API Gateway and orchestration
+
+- **HTTP API** — cheaper, faster, simpler: JWT authorisers, CORS, Lambda/HTTP integrations. The default for new APIs.
+- **REST API** — more features: usage plans and API keys, request validation, caching, WAF, private APIs.
+- **Lambda function URLs** — a direct HTTPS endpoint for a single function, no API Gateway.
+- **Step Functions** — state machines that orchestrate Lambdas and AWS services with retries, branches, parallel steps, waits up to a year and human-approval steps. Use instead of chaining Lambdas calling each other.
+
+## When serverless fits — and when it doesn't
+
+| Good fit | Poor fit |
+|---|---|
+| Spiky or unpredictable traffic, scale to zero | Steady high throughput 24/7 (containers are cheaper) |
+| Event processing: S3 uploads, queues, streams, cron | Long-running jobs over 15 minutes |
+| Glue between AWS services | Very latency-sensitive paths that can't tolerate cold starts |
+| Small teams wanting no ops | Long-lived connections (use API Gateway WebSockets or containers) |
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Initialising SDK clients inside the handler, paying setup on every call.
+- Non-idempotent handlers on async or SQS triggers, so retries double-charge or double-send.
+- Lambdas invoking Lambdas synchronously in chains (paying for waiting) instead of queues or Step Functions.
+- An SQS trigger's visibility timeout shorter than the function timeout (should be at least 6×).
+- One unbounded function exhausting the account's concurrency and throttling everything else.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What is a Lambda cold start, and how do you design a serverless API that holds up under load?">
+
+Lambda runs each request in an execution environment, a micro-VM that handles one request at a time. When no idle environment exists, Lambda creates one, downloads the code and runs the init phase — starting the runtime and executing module-level code — and that extra latency is the cold start. Afterwards the environment is reused, so I create SDK clients and connections at module scope, keep bundles small with esbuild, and use provisioned concurrency for latency-critical endpoints. For the API I'd use API Gateway's HTTP API with a JWT authoriser in front of Lambda, and DynamoDB as the data store because it handles massive connection counts. Slow work gets pushed to SQS and processed by a worker function in batches, with partial batch failure reporting and a dead-letter queue, and every handler is idempotent because async delivery is at-least-once. I'd watch concurrency: it's requests per second times duration, it's capped per account, so I'd use reserved concurrency to protect downstream systems and RDS Proxy if I had to talk to a relational database.
+
+<Fragment slot="deeper">
+
+- **How is Lambda priced?** Per request plus GB-seconds of duration (memory × time); ARM is ~20% cheaper.
+- **How do you orchestrate multi-step workflows?** Step Functions, not Lambdas calling Lambdas.
+- **How do you handle failures from an S3 trigger?** Async retries twice, then the on-failure destination or DLQ.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Cold start", "Latency added when Lambda must create and initialise a new execution environment."],
+  ["Execution environment", "The micro-VM running one function invocation at a time, reused while warm."],
+  ["Concurrency", "Number of in-flight invocations: requests per second × duration."],
+  ["Reserved concurrency", "Guaranteed and capped concurrency for one function."],
+  ["Provisioned concurrency", "Pre-initialised environments that remove cold starts."],
+  ["Event source mapping", "Lambda polling SQS, Kinesis or streams and invoking in batches."],
+  ["Step Functions", "Managed state machines for orchestrating multi-step workflows."],
+]} />

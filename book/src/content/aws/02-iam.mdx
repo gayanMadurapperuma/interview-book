@@ -1,0 +1,173 @@
+---
+title: "IAM: identities, policies and roles"
+part: Foundations
+order: 2
+level: core
+summary: Who can do what to which resource — users, roles and policies, how AWS evaluates a request, temporary credentials with STS, and least privilege in practice.
+---
+
+**IAM (Identity and Access Management)** decides whether every single AWS API call is allowed. It is global, free, and the most important security control you have on AWS: almost every serious incident is an over-permissive policy or a leaked long-lived key. Interviewers expect you to explain roles versus users, how a request is evaluated, and how a service like Lambda gets permission to read a DynamoDB table without any keys in the code.
+
+<Analogy>
+  An office building. A **user** is an employee with a permanent badge. A **role** is a visitor badge kept at reception: anyone (or any service) that is allowed to pick it up gets its access for a few hours, then it expires. **Policies** are the rules printed on the badge: which doors, which floors, which hours. A posted sign on a door saying "no entry, whatever your badge says" is an **explicit deny**: it always wins.
+</Analogy>
+
+## Why it matters
+
+"How does your Lambda access S3?", "How do you give another AWS account access?", "What happens if a policy allows and another denies?" are all IAM questions. Getting them right shows you can build systems that are secure by default.
+
+## The building blocks
+
+| Concept | What it is | Use it for |
+|---|---|---|
+| **Root user** | The account's owner email; unrestricted | Only a handful of account tasks. Lock it with MFA and never use it day to day. |
+| **IAM user** | A long-lived identity with a password and/or access keys | Rarely now: prefer SSO (IAM Identity Center) for humans. |
+| **Group** | A collection of users sharing policies | Attaching permissions to teams rather than people. |
+| **Role** | An identity with **no long-term credentials**; assumed to get temporary ones | EC2/ECS/Lambda workloads, cross-account access, SSO users, CI/CD (OIDC). |
+| **Policy** | A JSON document of `Allow`/`Deny` statements | Attached to identities, or to resources. |
+
+A policy statement says: **Effect** (Allow/Deny), **Action** (`s3:GetObject`), **Resource** (an ARN), and optional **Condition** (source IP, MFA present, tags, VPC endpoint).
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query"],
+      "Resource": "arn:aws:dynamodb:eu-west-1:123456789012:table/orders"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::orders-exports/*",
+      "Condition": { "StringEquals": { "aws:PrincipalTag/team": "orders" } }
+    }
+  ]
+}
+```
+
+### Kinds of policy
+
+- **Identity-based** — attached to a user, group or role: "this identity may do X".
+- **Resource-based** — attached to the resource itself (S3 bucket policy, SQS queue policy, KMS key policy, Lambda resource policy). It names a **Principal**, which is how you grant access to *another account* or a service.
+- **Permission boundaries** — the maximum an identity's policies can ever grant; used to let teams create their own roles safely.
+- **Service Control Policies (SCPs)** — set in AWS Organizations; guardrails on whole accounts ("nobody may leave eu-west-1", "nobody may disable CloudTrail"). They never grant, only limit.
+- **Session policies** — further restrict a single assumed-role session.
+
+## How a request is evaluated
+
+Everything starts as **implicitly denied**. AWS then gathers every applicable policy and applies a simple rule: **an explicit Deny anywhere wins; otherwise at least one Allow is required, and every guardrail (SCP, boundary, session policy) must also allow it.**
+
+<Diagram
+  caption="IAM policy evaluation for a request within one account. An explicit deny short-circuits everything; guardrails can only take permissions away."
+  chart={`flowchart LR
+    R["API request<br/>(principal, action, resource)"] --> D{"Explicit Deny<br/>in any policy?"}
+    D -- yes --> DENY["❌ Denied"]
+    D -- no --> G{"Allowed by SCPs,<br/>boundary and session policy?"}
+    G -- no --> DENY2["❌ Denied"]
+    G -- yes --> A{"Allow in identity or<br/>resource policy?"}
+    A -- no --> IMP["❌ Denied (implicit)"]
+    A -- yes --> OK["✅ Allowed"]`}
+  steps={[
+    { nodes: ["R"], text: "Every call is signed with credentials, so AWS knows the **principal**, the **action** and the target **resource ARN**. The starting point is deny." },
+    { nodes: ["R", "D", "DENY"], text: "First, any matching `\"Effect\": \"Deny\"` in any applicable policy ends the evaluation. Explicit deny always wins." },
+    { nodes: ["D", "G", "DENY2"], text: "Then the guardrails: Organization SCPs, permission boundaries and session policies must **all** permit the action. They never grant on their own." },
+    { nodes: ["G", "A", "IMP"], text: "Finally there must be at least one **Allow**, in an identity policy or a resource policy. No allow means an implicit deny." },
+    { nodes: ["A", "OK"], text: "Only now is the call allowed. Cross-account access needs an allow on **both** sides: the caller's identity policy and the resource policy (or a role trust)." },
+  ]}
+/>
+
+## Roles and temporary credentials (STS)
+
+A role has two policies: a **trust policy** (who may assume it) and **permission policies** (what it can do). Assuming it through **STS** returns temporary credentials (access key, secret, session token) that expire, typically after 1 hour.
+
+<Diagram
+  sequence
+  caption="A Lambda function or ECS task gets credentials by assuming its execution role. No secret ever lives in the code or the image."
+  chart={`sequenceDiagram
+    participant Code as Your code (SDK)
+    participant RT as Lambda / ECS runtime
+    participant STS as AWS STS
+    participant DDB as DynamoDB
+    RT->>STS: AssumeRole(orders-fn-role)
+    STS-->>RT: temp credentials (expire ~1h)
+    RT->>Code: credentials via env / metadata endpoint
+    Code->>DDB: PutItem, signed with SigV4
+    DDB->>DDB: evaluate role's policies
+    DDB-->>Code: 200 OK`}
+  notes={[
+    "The runtime assumes the role you configured. The role's **trust policy** must allow the service principal, e.g. `lambda.amazonaws.com`.",
+    "STS returns short-lived credentials: an access key, a secret and a **session token**.",
+    "The SDK's default credential provider chain finds them automatically. You never call STS yourself.",
+    "Each API call is signed with SigV4 using those temporary credentials.",
+    "DynamoDB asks IAM to evaluate the role's permission policies for `dynamodb:PutItem` on that table ARN.",
+    "Allowed. When the credentials near expiry, the SDK refreshes them transparently.",
+  ]}
+/>
+
+Where roles are used:
+
+- **Workloads** — EC2 instance profiles, ECS **task roles**, Lambda **execution roles**, EKS IRSA / Pod Identity.
+- **Cross-account** — account B creates a role trusting account A; A's principals call `sts:AssumeRole`.
+- **Humans** — IAM Identity Center (SSO) maps your corporate login to roles in each account.
+- **CI/CD** — GitHub Actions uses **OIDC federation** to assume a deploy role, with no stored AWS keys.
+
+```json
+// trust policy on a deploy role: only main-branch workflows in one repo
+{
+  "Effect": "Allow",
+  "Principal": { "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com" },
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": {
+    "StringEquals": { "token.actions.githubusercontent.com:sub": "repo:acme/orders-api:ref:refs/heads/main" }
+  }
+}
+```
+
+## Least privilege in practice
+
+- Start from **no access** and add specific actions on specific ARNs; avoid `"Action": "*"` and `"Resource": "*"`.
+- **One role per workload**, not one shared "app role".
+- Use **conditions** (`aws:SourceVpce`, `aws:PrincipalOrgID`, tags) to narrow further.
+- Use **IAM Access Analyzer** to generate policies from CloudTrail activity and find resources shared outside the account.
+- Prefer **roles over access keys**; if keys must exist, rotate them and alert on their use.
+- Separate environments into **different accounts** (dev, staging, prod) under AWS Organizations, so the account is the blast-radius boundary.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Access keys committed to Git or baked into a Docker image.
+- `AdministratorAccess` on a CI pipeline or an application role.
+- Forgetting that a resource policy alone can grant access, including to other accounts or the public (`"Principal": "*"`).
+- Confusing the trust policy (who can assume) with the permission policy (what it can do).
+- Using the root user for daily work, or without MFA.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do IAM roles work, and how does AWS decide whether a request is allowed?">
+
+IAM controls every AWS API call. Identities are users, groups and roles, and permissions are JSON policies with an effect, actions, resources and optional conditions. Policies can be identity-based, attached to who is calling, or resource-based, attached to things like S3 buckets and KMS keys. Evaluation starts with an implicit deny: any explicit deny wins outright, then guardrails like SCPs and permission boundaries must allow the action, and finally there must be at least one allow. A role has no long-term credentials. It has a trust policy saying who can assume it, and when something assumes it, STS hands out temporary credentials that expire. That's how workloads should get access: a Lambda execution role or ECS task role, with the SDK picking up credentials automatically, so there are no keys in code. Cross-account access is a role in the target account that trusts the source account. I apply least privilege with one role per workload, specific actions and ARNs, conditions, and Access Analyzer to tighten things over time.
+
+<Fragment slot="deeper">
+
+- **User vs role?** Users have long-lived credentials; roles hand out temporary ones via STS and are assumed by people, services or other accounts.
+- **What does an SCP do?** It caps what accounts in an Organization can do; it never grants permissions.
+- **How do you give CI access without keys?** OIDC federation: the CI provider's token is exchanged for a role session.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["IAM role", "An identity without long-term credentials, assumed to obtain temporary ones."],
+  ["Trust policy", "The resource policy on a role that says who may assume it."],
+  ["STS", "Security Token Service: issues temporary credentials (`AssumeRole`)."],
+  ["Explicit deny", "A `Deny` statement; it overrides any number of allows."],
+  ["Resource-based policy", "A policy on a resource (bucket, queue, key) naming allowed principals."],
+  ["SCP", "Service Control Policy: an Organization-level guardrail on accounts."],
+  ["Permission boundary", "The maximum permissions an identity's policies can grant."],
+  ["Least privilege", "Granting only the actions and resources a workload actually needs."],
+]} />

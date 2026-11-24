@@ -3,6 +3,8 @@
  * figure approaches the viewport, themed from the page's CSS tokens, and
  * re-rendered whenever the reader switches theme.
  */
+import { attachZoom, type ZoomController } from './zoom';
+
 type MermaidApi = typeof import('mermaid')['default'];
 
 interface Step { nodes?: string[]; text: string }
@@ -77,13 +79,26 @@ function themeVariables() {
       xAxisTickColor: css('--rule-strong'), yAxisTickColor: css('--rule-strong'),
       plotColorPalette: [css('--accent'), css('--js'), css('--pitfall'), css('--node'), css('--sd')].join(', '),
     },
+    // architecture-beta (AWS icon diagrams)
+    archEdgeColor: css('--muted'),
+    archEdgeArrowColor: css('--muted'),
+    archEdgeWidth: '2',
+    archGroupBorderColor: css('--rule-strong'),
+    archGroupBorderWidth: '1.5px',
     pie1: css('--js'), pie2: css('--node'), pie3: css('--ts'), pie4: css('--db'), pie5: css('--sd'),
   };
 }
 
 async function getMermaid() {
   if (!mermaidPromise) {
-    mermaidPromise = import('mermaid').then((m) => m.default);
+    mermaidPromise = import('mermaid').then((m) => {
+      // AWS service icons for architecture diagrams: service fn(aws:lambda)[Fn]
+      // fetched only when a diagram actually uses an aws: icon
+      m.default.registerIconPacks([
+        { name: 'aws', loader: () => import('./aws-icons.json').then((j) => j.default as any) },
+      ]);
+      return m.default;
+    });
   }
   const mermaid = await mermaidPromise;
   mermaid.initialize({
@@ -94,6 +109,14 @@ async function getMermaid() {
     flowchart: { curve: 'basis', padding: 14, nodeSpacing: 40, rankSpacing: 48, htmlLabels: true },
     sequence: { mirrorActors: false, actorMargin: 60, messageMargin: 34, boxMargin: 8, noteMargin: 10, useMaxWidth: true },
     state: { useMaxWidth: true },
+    // architecture-beta: smaller icons + more room between them so arrows
+    // have space to land on an icon's edge instead of crossing it; a fixed
+    // seed keeps the layout identical on every render and theme switch
+    architecture: {
+      iconSize: 60, padding: 34, fontSize: 12,
+      idealEdgeLengthMultiplier: 1.7, nodeSeparation: 90, edgeElasticity: 0.45,
+      randomize: false, seed: 7, useMaxWidth: true,
+    } as any,
   });
   return mermaid;
 }
@@ -108,6 +131,7 @@ const inline = (s: string) =>
 
 interface Controller { destroy(): void; state(): number; setState(i: number): void }
 const controllers = new WeakMap<HTMLElement, Controller>();
+const zooms = new WeakMap<HTMLElement, ZoomController>();
 
 async function renderFigure(fig: HTMLElement) {
   const src = fig.querySelector<HTMLElement>('.mmd-src')?.textContent ?? '';
@@ -115,6 +139,10 @@ async function renderFigure(fig: HTMLElement) {
   const prev = controllers.get(fig);
   const keep = prev ? prev.state() : -1;
   prev?.destroy();
+  const prevZoom = zooms.get(fig);
+  const keepZoom = prevZoom?.state();
+  prevZoom?.destroy();
+  zooms.delete(fig);
   try {
     const mermaid = await getMermaid();
     const { svg, bindFunctions } = await mermaid.render(`mmd-${++seq}`, src);
@@ -126,9 +154,13 @@ async function renderFigure(fig: HTMLElement) {
     bindFunctions?.(stage);
     const ctrl = attachPlayer(fig);
     if (ctrl) { controllers.set(fig, ctrl); if (keep >= 0) ctrl.setState(keep); }
+    const zoom = attachZoom(fig);
+    if (zoom) { zooms.set(fig, zoom); if (keepZoom) zoom.setState(keepZoom); }
   } catch (err) {
     console.warn('[diagram] failed to render', err, src);
     fig.dataset.error = String((err as Error)?.message ?? err).slice(0, 300);
+    fig.classList.remove('is-max');
+    document.documentElement.classList.remove('diagram-max');
     stage.innerHTML = `<pre class="mmd-error">${inline(src)}</pre>`;
     stage.classList.add('ready');
   }
@@ -172,22 +204,41 @@ function attachPlayer(fig: HTMLElement): Controller | null {
       if (did) addNode(did, el);
     });
     const edges = [...svg.querySelectorAll<SVGPathElement>('path.flowchart-link, path[data-id^="L_"]')];
+    // every node id that has a rendered element, longest first so that
+    // edge ids like L_api-gw_db_0 resolve to the most specific node name
+    const ids = [...nodeEls.keys()].sort((a, b) => b.length - a.length);
+    const edgeEnds = edges.map((p) => {
+      const id = p.getAttribute('data-id') || p.id || '';
+      for (const a of ids) for (const b of ids) {
+        if (new RegExp(`^L[_-]${escapeRe(a)}[_-]${escapeRe(b)}[_-]\\d+$`).test(id)) return [a, b] as const;
+      }
+      return null;
+    });
+    const STATES = ['is-on', 'is-current', 'is-done', 'is-next'];
+    const mark = (id: string, ...cls: string[]) => nodeEls.get(id)?.forEach((el) => {
+      (el.closest('.node, .cluster') ?? el).classList.add(...cls);
+    });
     apply = (i) => {
-      svg.querySelectorAll('.is-on, .is-current').forEach((el) => el.classList.remove('is-on', 'is-current'));
+      svg.querySelectorAll(STATES.map((c) => '.' + c).join(',')).forEach((el) => el.classList.remove(...STATES));
       if (i < 0) { fig.classList.remove('stepping'); return; }
       fig.classList.add('stepping');
       const on = new Set(steps[i].nodes ?? []);
       const before = new Set(i > 0 ? steps[i - 1].nodes ?? [] : []);
-      on.forEach((id) => nodeEls.get(id)?.forEach((el) => {
-        const g = el.closest('.node, .cluster') ?? el;
-        g.classList.add('is-on');
-        if (!before.has(id)) g.classList.add('is-current');
-      }));
-      edges.forEach((p) => {
-        const id = p.getAttribute('data-id') || p.id || '';
-        for (const a of on) for (const b of on) {
-          if (a !== b && new RegExp(`^L[_-]${escapeRe(a)}[_-]${escapeRe(b)}[_-]\\d+$`).test(id)) p.classList.add('is-on');
-        }
+      const done = new Set<string>();
+      for (let k = 0; k < i; k++) (steps[k].nodes ?? []).forEach((id) => { if (!on.has(id)) done.add(id); });
+      const next = new Set((steps[i + 1]?.nodes ?? []).filter((id) => !on.has(id)));
+      done.forEach((id) => mark(id, 'is-done'));
+      next.forEach((id) => mark(id, 'is-next'));
+      on.forEach((id) => mark(id, 'is-on', ...(before.has(id) ? [] : ['is-current'])));
+      const seen = (id: string) => on.has(id) || done.has(id);
+      edges.forEach((p, k) => {
+        const ends = edgeEnds[k];
+        if (!ends) return;
+        const [a, b] = ends;
+        if (on.has(a) && on.has(b)) p.classList.add('is-on');
+        else if (before.has(a) && on.has(b) && !before.has(b)) p.classList.add('is-on');
+        else if (seen(a) && seen(b)) p.classList.add('is-done');
+        else if (seen(a) && next.has(b)) p.classList.add('is-next');
       });
     };
   } else {
@@ -204,6 +255,7 @@ function attachPlayer(fig: HTMLElement): Controller | null {
       labels.forEach((l, k) => {
         l.classList.toggle('seq-hidden', i >= 0 && k > i);
         l.classList.toggle('seq-shown', i < 0 || k <= i);
+        l.classList.toggle('seq-current-label', k === i);
       });
     };
   }

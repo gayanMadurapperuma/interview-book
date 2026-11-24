@@ -1,0 +1,141 @@
+---
+title: "Observability and security operations"
+part: Integration & operations
+order: 12
+level: core
+summary: CloudWatch logs, metrics and alarms, X-Ray tracing, CloudTrail auditing, KMS and envelope encryption, Secrets Manager vs Parameter Store, and the guardrail services that catch mistakes.
+---
+
+Once something runs on AWS you need to **see** it (logs, metrics, traces, alarms), **audit** it (who changed what), and **protect** its data and secrets. This chapter covers the AWS services behind those answers: **CloudWatch**, **X-Ray**, **CloudTrail**, **KMS**, **Secrets Manager / Parameter Store**, and the detection services **GuardDuty**, **Config** and **Security Hub**.
+
+<Analogy>
+  Running a hotel. **CloudWatch** is the dashboard of room temperatures and the alarm panel at reception. **X-Ray** follows one guest's whole stay from check-in to checkout. **CloudTrail** is the CCTV log of every staff member opening any door. **KMS** is the master-key cabinet: it never hands out the master key, it only cuts room keys on request and records each one. **Secrets Manager** is the safe where the Wi-Fi password lives, changed automatically every month.
+</Analogy>
+
+## Why it matters
+
+"How do you know your service is healthy?", "how would you debug a slow request across services?", "how do you store DB passwords?" and "how is data encrypted?" come up in nearly every AWS interview.
+
+## Observability
+
+<Diagram
+  wide
+  caption="Telemetry flow: the service ships logs and metrics to CloudWatch, where alarms notify on-call through SNS. Traces go to X-Ray separately."
+  chart={`architecture-beta
+    service app(aws:ecs)[orders-api]
+    service cw(aws:cloudwatch)[CloudWatch logs + metrics]
+    service alarm(aws:sns)[Alarm topic]
+    service oncall(internet)[On-call / Slack]
+    junction up
+    service xray(aws:xray)[X-Ray traces]
+
+    app:R --> L:cw
+    cw:R --> L:alarm
+    alarm:R --> L:oncall
+    app:T -- B:up
+    up:R --> L:xray`}
+/>
+
+| Signal | AWS service | Notes |
+|---|---|---|
+| **Logs** | CloudWatch Logs | Lambda and ECS (`awslogs`) ship automatically. Log **structured JSON**; query with **Logs Insights**; set retention (the default is forever). |
+| **Metrics** | CloudWatch Metrics | Built-in service metrics plus custom metrics; the **Embedded Metric Format** turns JSON log lines into metrics cheaply. |
+| **Alarms** | CloudWatch Alarms | On a metric threshold or anomaly band, notifying SNS (→ email, Slack, PagerDuty) or triggering scaling. **Composite alarms** reduce noise. |
+| **Traces** | X-Ray / ADOT (OpenTelemetry) | Follow a request across API Gateway, Lambda, ECS and AWS SDK calls; find the slow hop. |
+| **Dashboards & synthetics** | CloudWatch Dashboards, Synthetics canaries, RUM | Health at a glance, scripted user journeys, real user monitoring. |
+
+Alarm on **symptoms users feel** — error rate, p99 latency, queue age, DLQ depth — rather than only CPU. Use **SLOs** (CloudWatch Application Signals) to decide when to page.
+
+```ts
+// structured logging that CloudWatch Logs Insights can query
+console.log(JSON.stringify({
+  level: 'info', msg: 'order placed',
+  orderId: '1044', durationMs: 84, requestId: ctx.awsRequestId,
+}));
+// fields @timestamp, orderId, durationMs | filter msg = "order placed" | stats pct(durationMs, 99)
+```
+
+## Auditing and detection
+
+- **CloudTrail** — records every AWS API call (who, what, when, from where). Enable an **organisation trail** to an S3 bucket in a separate log-archive account, with log file validation. It's the first place you look after an incident.
+- **AWS Config** — records resource configuration history and evaluates **rules** ("S3 buckets must block public access", "EBS volumes must be encrypted"), with optional auto-remediation.
+- **GuardDuty** — threat detection from CloudTrail, VPC flow logs and DNS logs (crypto-mining, credential exfiltration, unusual API calls).
+- **Security Hub** — aggregates findings and checks accounts against best-practice standards.
+- **Inspector** — scans EC2, ECR images and Lambda for vulnerabilities.
+
+## Encryption with KMS
+
+**KMS** manages encryption keys in HSMs. Keys never leave KMS unencrypted; every use is authorised by IAM and **key policies** and logged in CloudTrail. Most services integrate directly (S3 SSE-KMS, EBS, RDS, DynamoDB, Secrets Manager). Under the hood they use **envelope encryption**.
+
+<Diagram
+  sequence
+  caption="Envelope encryption: KMS only ever encrypts a small data key. Bulk data is encrypted locally with the data key, which is stored encrypted next to the data."
+  chart={`sequenceDiagram
+    participant App as App / AWS service
+    participant KMS as AWS KMS
+    participant Store as Storage (S3, EBS…)
+    App->>KMS: GenerateDataKey(keyId)
+    KMS-->>App: plaintext data key + encrypted data key
+    App->>App: encrypt data with plaintext key, then discard it
+    App->>Store: save ciphertext + encrypted data key
+    App->>KMS: Decrypt(encrypted data key)
+    KMS-->>App: plaintext data key (if IAM + key policy allow)`}
+  notes={[
+    "To encrypt, ask KMS for a fresh **data key** under your KMS key. The call is authorised and logged.",
+    "KMS returns the data key twice: in plaintext, and encrypted under the KMS key. The KMS key itself never leaves KMS.",
+    "Encrypt the data locally (fast, any size) with the plaintext data key, then wipe that key from memory.",
+    "Store the ciphertext together with the **encrypted** data key. Without KMS access, the blob is useless.",
+    "To read, send the encrypted data key to KMS. This is the control point: revoke access or disable the key and nothing can be decrypted.",
+    "KMS returns the plaintext data key, the app decrypts locally, and CloudTrail records who decrypted what, and when.",
+  ]}
+/>
+
+Key types: **AWS-owned** (free, invisible), **AWS-managed** (`aws/s3`, per service), and **customer-managed** keys (you control the key policy, rotation and cross-account grants — needed for sharing encrypted snapshots or strict audit).
+
+## Secrets
+
+| | Secrets Manager | SSM Parameter Store |
+|---|---|---|
+| Built for | Credentials: DB passwords, API keys | Configuration and simple secrets (`SecureString`) |
+| Rotation | **Built-in automatic rotation** (RDS, Aurora, Redshift, custom via Lambda) | None built in |
+| Cost | Per secret per month + API calls | Standard parameters free |
+| Extras | Cross-region replication, resource policies | Hierarchies (`/orders/prod/…`), versioning |
+
+Inject secrets at runtime — ECS `secrets`, the Lambda Parameters and Secrets extension, or SDK calls with caching — never in code, images or plain environment variables in IaC. Even better, avoid secrets: **IAM database authentication**, and roles instead of access keys.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Log groups with infinite retention (cost) or logging secrets and personal data.
+- Alarming only on CPU, so outages that don't load the CPU go unnoticed.
+- CloudTrail logs kept in the same account an attacker can tamper with.
+- Using one AWS-managed key for everything, so you can't share snapshots cross-account or scope access per dataset.
+- Hard-coded DB passwords that are never rotated.
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="How do you monitor a service on AWS, and how do you handle secrets and encryption?">
+
+For observability, the service writes structured JSON logs to CloudWatch Logs with sensible retention, which I query with Logs Insights. It emits business and latency metrics, often via the Embedded Metric Format, and is traced end to end with X-Ray or OpenTelemetry so I can find the slow hop across API Gateway, Lambda or ECS, and the database. Alarms are on user-facing symptoms — error rate, p99 latency, queue age, DLQ depth — and notify on-call through SNS. For audit, an organisation-wide CloudTrail writes to a locked-down log-archive account, with GuardDuty, Config rules and Security Hub catching threats and misconfigurations. Data is encrypted at rest with KMS using envelope encryption: KMS issues a data key, data is encrypted locally, and only the encrypted data key is stored, so every decryption needs a KMS call that's authorised and logged. Secrets like database passwords live in Secrets Manager with automatic rotation and are injected at runtime through the task or function role, never stored in code, images or plain environment variables.
+
+<Fragment slot="deeper">
+
+- **CloudTrail vs CloudWatch?** CloudTrail audits API calls (who did what); CloudWatch monitors operational telemetry.
+- **Why envelope encryption?** KMS calls are limited to small payloads; local encryption is fast, and key control stays central.
+- **Secrets Manager or Parameter Store?** Secrets Manager when you need rotation; Parameter Store for config and cheap simple secrets.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["CloudWatch", "Logs, metrics, alarms and dashboards for AWS resources and apps."],
+  ["X-Ray", "Distributed tracing across AWS services and application code."],
+  ["CloudTrail", "An audit log of every AWS API call in your accounts."],
+  ["KMS", "Managed encryption keys with IAM-controlled, audited use."],
+  ["Envelope encryption", "Encrypting data with a data key that is itself encrypted by a master key."],
+  ["Secrets Manager", "Stores and automatically rotates credentials."],
+  ["GuardDuty", "Managed threat detection from account and network activity."],
+]} />

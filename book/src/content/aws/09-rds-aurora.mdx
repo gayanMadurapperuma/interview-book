@@ -1,0 +1,140 @@
+---
+title: "RDS and Aurora: managed relational databases"
+part: Storage & data
+order: 9
+level: core
+summary: What "managed" really covers, Multi-AZ vs read replicas, how a failover works, Aurora's shared-storage design, RDS Proxy for serverless, and backups and point-in-time recovery.
+---
+
+**Amazon RDS** runs PostgreSQL, MySQL, MariaDB, SQL Server, Oracle and Db2 for you: provisioning, patching, backups, failover and monitoring are managed, while you still choose the instance size, schema, indexes and queries. **Aurora** is AWS's re-engineered MySQL/PostgreSQL-compatible engine with a distributed storage layer that makes replicas and failover faster. The classic interview question is the difference between **Multi-AZ** and **read replicas**.
+
+<Analogy>
+  A head chef with an understudy. In **Multi-AZ** the understudy shadows every move in a second kitchen, cooks nothing for customers, and steps in within a minute if the chef collapses — that's for availability. **Read replicas** are extra chefs who copy the menu a little behind and only serve plated dishes (reads) — that's for capacity. **Aurora** puts every chef on top of one shared, self-repairing pantry, so a new chef can start cooking almost immediately.
+</Analogy>
+
+## Why it matters
+
+Most Node.js backends sit on PostgreSQL or MySQL. You need to explain how the database survives an AZ failure, how to scale reads, how to restore to "five minutes before someone ran the bad migration", and why Lambda plus RDS needs extra care.
+
+## What "managed" covers
+
+| AWS handles | You still handle |
+|---|---|
+| Hardware, OS, engine installation and minor patches (in your maintenance window) | Schema, indexes, query performance |
+| Automated backups, snapshots, point-in-time restore | Choosing retention, testing restores |
+| Multi-AZ replication and automatic failover | Connection handling and retries in the app |
+| Monitoring (CloudWatch, Performance Insights) | Instance sizing, storage type, parameter groups |
+| Encryption at rest with KMS, TLS | Network placement, security groups, IAM auth or passwords |
+
+## Multi-AZ vs read replicas
+
+| | Multi-AZ (standby) | Read replicas |
+|---|---|---|
+| Purpose | **High availability** | **Read scaling** (and cross-region DR) |
+| Replication | **Synchronous** to a standby in another AZ | **Asynchronous** — replicas can lag |
+| Serves traffic? | Classic standby: no. Multi-AZ **cluster** (2 readable standbys): yes | Yes, read-only, via its own endpoint |
+| Failover | Automatic, ~60–120 s, same DNS endpoint | Manual promotion (becomes a standalone DB) |
+| Cross-region | No | Yes |
+
+<Diagram
+  caption="A Multi-AZ failover. The application keeps the same endpoint; DNS moves to the promoted standby."
+  chart={`flowchart LR
+    APP["App<br/>(db.example endpoint)"] --> P["Primary<br/>AZ a"]
+    P -- "sync replication" --> S["Standby<br/>AZ b"]
+    P --> X["AZ a fails ✗"]
+    X --> PR["Standby promoted<br/>to primary"]
+    PR --> DNS["Endpoint DNS<br/>now points to AZ b"]
+    DNS --> RC["App reconnects<br/>and retries"]`}
+  steps={[
+    { nodes: ["APP", "P"], text: "The app connects to the instance **endpoint**, a DNS name, never an IP. All reads and writes go to the primary." },
+    { nodes: ["P", "S"], text: "Every write is synchronously replicated to the standby in another AZ before it's acknowledged, so no committed data is lost on failover." },
+    { nodes: ["P", "X"], text: "The primary's AZ, instance or storage fails (or you reboot with failover, or patching happens)." },
+    { nodes: ["X", "PR"], text: "RDS detects the failure and promotes the standby. Typically 60–120 seconds for RDS, usually under 30 for Aurora." },
+    { nodes: ["PR", "DNS"], text: "The same endpoint's DNS record is updated to the new primary. Keep DNS TTLs short in the client." },
+    { nodes: ["DNS", "RC"], text: "Existing connections break. The app's pool must reconnect, and idempotent operations should be retried. RDS Proxy can shorten this further." },
+  ]}
+/>
+
+## Aurora
+
+Aurora separates compute from a **distributed storage volume** that keeps 6 copies of your data across 3 AZs and repairs itself.
+
+- **Writer** instance plus up to **15 readers** sharing the same storage, so replica lag is usually milliseconds and adding a reader doesn't copy data.
+- **Endpoints:** cluster (writer) endpoint, reader endpoint (load-balanced across readers), custom endpoints.
+- **Failover** promotes a reader, typically in under 30 seconds.
+- **Aurora Serverless v2** scales capacity in fine-grained ACUs with load — good for spiky or dev workloads.
+- **Global Database** replicates to other regions with typically under 1 s lag, for DR and local reads.
+- Storage grows automatically up to 128 TB; you pay for I/O (or choose I/O-Optimized).
+
+<Diagram
+  wide
+  caption="Lambda functions reach Aurora through RDS Proxy, which pools connections. The writer and readers share one storage volume replicated six ways across three AZs."
+  chart={`architecture-beta
+    service fns(aws:lambda)[Lambda fleet]
+    service proxy(aws:rds)[RDS Proxy]
+    junction split
+    junction splitR
+    group cluster(aws:aurora)[Aurora cluster]
+    service writer(aws:aurora)[Writer] in cluster
+    service reader(aws:aurora)[Reader] in cluster
+    junction j1 in cluster
+    junction j2 in cluster
+    service vol(disk)[Shared storage, 6 copies] in cluster
+
+    fns:R --> L:proxy
+    proxy:R -- L:split
+    split:R --> L:writer
+    split:B -- T:splitR
+    splitR:R --> L:reader
+    writer:R -- L:j1
+    j1:B -- T:j2
+    reader:R -- L:j2
+    j2:R --> L:vol`}
+/>
+
+## RDS Proxy and connections
+
+PostgreSQL and MySQL have hard connection limits, and each connection costs memory. Serverless and highly scaled container fleets can open thousands. **RDS Proxy** keeps a warm pool to the database and multiplexes many client connections over it, reduces failover time, and supports IAM authentication. In containers, also size each app instance's pool deliberately: `instances × pool size` must fit the DB's `max_connections`.
+
+## Backups and recovery
+
+- **Automated backups** — daily snapshot plus transaction logs, retained 1–35 days, enabling **point-in-time recovery** (to any second within retention). A restore always creates a **new** instance.
+- **Manual snapshots** — kept until deleted; copy across regions and accounts for DR.
+- **Aurora Backtrack** (MySQL) — rewind the cluster in place in minutes.
+- Encryption must be chosen at creation; to encrypt an existing DB, snapshot → copy encrypted → restore.
+
+<Callout type="pitfall" title="Common mistakes">
+
+- Saying read replicas give high availability — they are asynchronous and need manual promotion; Multi-AZ is for HA.
+- Hard-coding the instance IP or caching DNS forever, so the app never follows a failover.
+- Lambda functions connecting directly to RDS without a proxy or concurrency cap.
+- Never testing a restore, or not knowing that a restore creates a new endpoint.
+- Reading from replicas immediately after a write and showing stale data (read-your-writes).
+
+</Callout>
+
+## Explaining it in an interview
+
+<InterviewAnswer question="What's the difference between Multi-AZ and read replicas on RDS, and how would you make a database highly available and scalable?">
+
+Multi-AZ is for availability: RDS keeps a standby in another AZ that's synchronously replicated, so a committed write exists in both places, and if the primary fails RDS promotes the standby and flips the same DNS endpoint over, usually within a minute or two, without data loss. The app just needs to reconnect and retry. Read replicas are for scale: they replicate asynchronously, can lag, serve read-only traffic on their own endpoints, can live in other regions, and need manual promotion. For a serious workload I'd usually pick Aurora PostgreSQL: one writer and several readers share a six-way replicated storage volume across three AZs, so replicas lag by milliseconds and failover is typically under 30 seconds. Writes go to the cluster endpoint, reads that tolerate slight staleness to the reader endpoint. I'd put RDS Proxy in front if Lambda or a large fleet connects, rely on automated backups with point-in-time recovery and regular restore tests, and add Global Database or cross-region snapshot copies for regional DR.
+
+<Fragment slot="deeper">
+
+- **How long is RDS failover?** Typically 60–120 s; Aurora usually under 30 s; RDS Proxy can reduce perceived downtime.
+- **How do you scale writes?** Bigger instance first, then partition/shard, or move hot access patterns to DynamoDB.
+- **When Aurora Serverless v2?** Variable or unpredictable load, dev/test, multi-tenant with idle periods.
+
+</Fragment>
+</InterviewAnswer>
+
+## Key terms
+
+<KeyTerms terms={[
+  ["Multi-AZ", "A synchronously replicated standby in another AZ with automatic failover."],
+  ["Read replica", "An asynchronously replicated, read-only copy used to scale reads."],
+  ["Aurora", "AWS's MySQL/PostgreSQL-compatible engine on a shared, distributed storage layer."],
+  ["Reader endpoint", "An Aurora DNS name load-balancing connections across readers."],
+  ["RDS Proxy", "A managed connection pooler in front of RDS/Aurora."],
+  ["PITR", "Point-in-time recovery: restore to any second within the backup retention period."],
+]} />

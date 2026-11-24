@@ -1,4 +1,5 @@
-# Builds the book (Astro) and deploys it together with the classic reference page to GitHub Pages
+# Builds The Interview Book (Astro, in book/) and deploys it to GitHub Pages at the site root.
+# The base path comes from configure-pages, so it follows the repo name (or a custom domain).
 name: Deploy static content to Pages
 
 on:
@@ -25,6 +26,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -42,21 +47,15 @@ jobs:
 
       - name: Build the book
         working-directory: book
+        env:
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          SITE_URL: ${{ steps.pages.outputs.origin }}
         run: npm run build
-
-      - name: Assemble site
-        run: |
-          mkdir -p _site/book
-          cp index.html _site/
-          cp -R book/dist/. _site/book/
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '_site'
+          path: 'book/dist'
 
       - name: Deploy to GitHub Pages
         id: deployment
