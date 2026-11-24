@@ -109,10 +109,11 @@
 .kind-stack .chip.is-top { border-color: var(--tone); box-shadow: 0 0 0 2px color-mix(in srgb, var(--tone) 18%, transparent); }
 .kind-queue .chip.is-front { border-color: var(--tone); }
 .kind-queue .chip.is-front::before {
-  content: 'next'; position: absolute; transform: translateY(-17px);
+  content: 'next'; position: absolute;
+  bottom: 100%; left: 2px; margin-bottom: 3px; line-height: 1;
   font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--tone);
 }
-.kind-queue { padding-top: 10px; }
+.kind-queue { padding-top: 14px; }
 .chip.tone-hot { border-color: var(--tip); background: color-mix(in srgb, var(--tip) 16%, var(--bg-raised)); }
 .chip.tone-bad { border-color: var(--pitfall); background: color-mix(in srgb, var(--pitfall) 14%, var(--bg-raised)); }
 .chip.tone-bad .chip-label { color: var(--pitfall); }
