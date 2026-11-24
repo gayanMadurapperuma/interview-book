@@ -10,6 +10,27 @@
  *  ]} />                                                flowchart: highlight node groups
  *  <Diagram sequence chart={`sequenceDiagram ...`} notes={['...','...']} />
  *                                                       sequence: reveal messages one by one
+ *  <Diagram wide chart={`architecture-beta ...`} />     AWS icon diagram (static)
+ *
+ * Architecture diagrams — icons: aws:<service> (lambda, s3, dynamodb, rds, elb,
+ * ec2, ecs, fargate, api-gateway, cloudfront, sqs, sns, eventbridge, iam, kms…,
+ * see src/scripts/aws-icons.json) plus Mermaid's cloud, database, disk,
+ * internet, server. Layout rules that keep arrows clean:
+ *   1. Pair opposite sides only: a:R --> L:b (horizontal), a:B --> T:b (vertical).
+ *   2. Labels sit under icons, so never route an edge out of a service's B side
+ *      into one below it. Go sideways into a junction and down from there.
+ *   3. Fan-out / fan-in / replication goes through junctions (a "bracket"):
+ *      a:R -- L:j1, j1:T -- B:j2, j2:R --> L:b ...
+ *   4. Flow reads left to right. Keep to about 10 services per diagram.
+ *   5. Every service must sit inside the same outer group as its neighbours. A
+ *      lone service outside the group can get flung to the edge of the layout.
+ *   6. Links *between* two groups (e.g. cross-region replication) don't align
+ *      in architecture-beta. Use a flowchart with icon nodes instead, and
+ *      connect edges to the subgraphs, not to nodes inside them:
+ *        flowchart TB
+ *          db@{ icon: "aws:aurora", form: "square", label: "Aurora", pos: "b", h: 56 }
+ *          subgraph eu[...] direction LR ... end
+ *          eu -. "replication" .-> us
  */
 interface Step { nodes?: string[]; text: string }
 interface Props {
@@ -26,8 +47,21 @@ const mode = steps?.length ? 'steps' : sequence ? 'sequence' : 'static';
 const payload = JSON.stringify({ steps: steps ?? [], notes: notes ?? [] });
 const interactive = mode !== 'static';
 ---
-<figure class:list={['diagram', { wide, flow }]} data-mode={mode} data-payload={payload}>
+<figure class:list={['diagram', { wide, flow }]} data-mode={mode} data-payload={payload} tabindex="-1">
   <pre class="mmd-src" hidden>{chart.trim()}</pre>
+  <div class="mmd-tools" role="toolbar" aria-label="Diagram zoom" data-pagefind-ignore>
+    <button class="mz-btn mz-out" type="button" aria-label="Zoom out" title="Zoom out (−)">
+      <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 6h7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </button>
+    <button class="mz-btn mz-reset" type="button" aria-label="Reset zoom" title="Reset zoom (0)">100%</button>
+    <button class="mz-btn mz-in" type="button" aria-label="Zoom in" title="Zoom in (+)">
+      <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 6h7M6 2.5v7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </button>
+    <button class="mz-btn mz-max" type="button" aria-label="Full screen" aria-pressed="false" title="Full screen (F)">
+      <svg class="i-max" width="12" height="12" viewBox="0 0 12 12"><path d="M1.5 4.5v-3h3M7.5 1.5h3v3M10.5 7.5v3h-3M4.5 10.5h-3v-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <svg class="i-min" width="12" height="12" viewBox="0 0 12 12"><path d="M4.5 1.5v3h-3M10.5 4.5h-3v-3M7.5 10.5v-3h3M1.5 7.5h3v3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
   <div class="mmd-stage" aria-hidden="true">
     <div class="mmd-skeleton"><span></span><span></span><span></span></div>
   </div>
@@ -44,6 +78,13 @@ const interactive = mode !== 'static';
         <svg width="12" height="12" viewBox="0 0 12 12"><path d="M4.5 2.5 8 6 4.5 9.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
       <span class="mp-count"></span>
+      {mode === 'steps' && (
+        <span class="mp-legend" aria-hidden="true">
+          <span class="lg-done"><i></i>done</span>
+          <span class="lg-now"><i></i>now</span>
+          <span class="lg-next"><i></i>next</span>
+        </span>
+      )}
       <p class="mp-text" aria-live="polite"></p>
     </div>
   )}
@@ -64,11 +105,59 @@ const interactive = mode !== 'static';
     border: 1px solid var(--rule);
     border-radius: 8px;
     font-family: var(--font-ui);
+    position: relative;
   }
+  .diagram:focus { outline: none; }
+  .diagram:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .diagram.wide { max-width: min(100%, 980px); }
   .mmd-stage { display: flex; justify-content: center; overflow-x: auto; min-height: 120px; }
   .mmd-stage svg { max-width: 100%; max-height: 540px; height: auto; font-family: var(--font-ui) !important; }
   .mmd-stage.ready { min-height: 0; }
+
+  /* ---- zoom / pan ---- */
+  .diagram.zoomable .mmd-stage { position: relative; overflow: hidden; touch-action: pan-x pan-y; }
+  .diagram.zoomable.zoomed .mmd-stage, .diagram.is-max .mmd-stage { touch-action: none; cursor: grab; }
+  .diagram.grabbing .mmd-stage { cursor: grabbing; }
+  .diagram.grabbing .mmd-stage * { user-select: none; }
+  .mmd-pan { display: flex; justify-content: center; width: 100%; transform-origin: 0 0; will-change: transform; }
+  .mmd-pan.animate { transition: transform 0.2s var(--ease); }
+
+  .mmd-tools {
+    position: absolute; top: 8px; right: 8px; z-index: 2;
+    display: none; gap: 4px; align-items: center;
+    padding: 3px; border: 1px solid var(--rule); border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
+    backdrop-filter: blur(4px);
+    opacity: 0.55; transition: opacity 0.15s;
+  }
+  .diagram.zoomable .mmd-tools { display: flex; }
+  .diagram:hover .mmd-tools, .diagram:focus-within .mmd-tools,
+  .diagram.zoomed .mmd-tools, .diagram.is-max .mmd-tools { opacity: 1; }
+  @media (hover: none) { .mmd-tools { opacity: 1; } }
+  .mz-btn {
+    min-width: 26px; height: 26px; padding: 0 6px; display: grid; place-items: center;
+    border: 1px solid transparent; border-radius: 6px; background: none; color: var(--ink);
+    font: 600 11px/1 var(--font-ui); font-variant-numeric: tabular-nums; cursor: pointer;
+  }
+  .mz-btn:hover:not(:disabled) { border-color: var(--rule-strong); background: var(--surface); }
+  .mz-btn:disabled { opacity: 0.35; cursor: default; }
+  .mz-reset { min-width: 44px; color: var(--muted); }
+  .mz-max .i-min, .diagram.is-max .mz-max .i-max { display: none; }
+  .diagram.is-max .mz-max .i-min { display: block; }
+
+  /* ---- full screen overlay ---- */
+  html.diagram-max { overflow: hidden; }
+  .diagram.is-max, .diagram.wide.is-max {
+    position: fixed; inset: 0; z-index: 9999;
+    margin: 0; max-width: none; border: 0; border-radius: 0;
+    display: flex; flex-direction: column;
+    padding: 52px 20px 14px;
+  }
+  .diagram.is-max .mmd-tools { position: fixed; top: 12px; right: 16px; }
+  .diagram.is-max .mmd-stage { flex: 1 1 auto; min-height: 0; }
+  .diagram.is-max .mmd-pan { height: 100%; }
+  .diagram.is-max .mmd-pan > svg { width: 100% !important; height: 100% !important; max-width: none !important; max-height: none !important; }
+  @media (prefers-reduced-motion: reduce) { .mmd-pan.animate { transition: none; } }
 
   .mmd-skeleton { display: flex; gap: 22px; align-items: center; padding: 30px 0; }
   .mmd-skeleton span { width: 92px; height: 38px; border-radius: 6px; background: var(--surface); animation: sk 1.4s ease-in-out infinite; }
@@ -91,36 +180,82 @@ const interactive = mode !== 'static';
   }
   @keyframes mmd-flow { to { stroke-dashoffset: -22; } }
 
-  /* step mode: everything dims, the active group lights up */
-  .mmd-stage .node, .mmd-stage .edgePath, .mmd-stage .flowchart-link, .mmd-stage .edgeLabel, .mmd-stage .cluster {
-    transition: opacity 0.35s var(--ease), filter 0.35s var(--ease);
+  /* ---- step mode ----
+     Nodes are styled by state (upcoming / next / done / now) using theme
+     tokens only. Nothing is faded with opacity, so every label stays
+     readable in paper, sepia and night alike. */
+  .diagram { --st-on: var(--subj, var(--accent)); --st-on-bg: var(--subj-bg, var(--accent-soft)); --st-up-ink: color-mix(in srgb, var(--muted) 55%, var(--text)); }
+  .mmd-stage .node :is(rect, polygon, circle, ellipse, path),
+  .mmd-stage .cluster rect,
+  .mmd-stage .flowchart-link,
+  .mmd-stage .node :is(.nodeLabel, .nodeLabel *, text) {
+    transition: fill 0.3s var(--ease), stroke 0.3s var(--ease), stroke-width 0.3s var(--ease), color 0.3s var(--ease), filter 0.3s var(--ease);
   }
-  .diagram[data-mode='steps'].stepping .mmd-stage .cluster:not(.is-on) { opacity: 0.55; }
-  .diagram[data-mode='steps'].stepping .mmd-stage .node:not(.is-on),
-  .diagram[data-mode='steps'].stepping .mmd-stage .flowchart-link:not(.is-on) { opacity: 0.22; }
-  .diagram[data-mode='steps'] .mmd-stage .node.is-on rect,
-  .diagram[data-mode='steps'] .mmd-stage .node.is-on polygon,
-  .diagram[data-mode='steps'] .mmd-stage .node.is-on circle,
-  .diagram[data-mode='steps'] .mmd-stage .node.is-on path {
-    stroke: var(--subj, var(--accent)) !important;
-    stroke-width: 2px !important;
+  /* upcoming (default while stepping) */
+  .diagram.stepping .mmd-stage .node :is(rect, polygon, circle, ellipse, path) {
+    fill: var(--bg) !important; stroke: var(--rule-strong) !important;
+    stroke-width: 1.2px !important; stroke-dasharray: 4 3;
   }
-  .diagram[data-mode='steps'] .mmd-stage .node.is-current { filter: drop-shadow(0 0 6px color-mix(in srgb, var(--subj, var(--accent)) 45%, transparent)); }
-  .diagram[data-mode='steps'] .mmd-stage .flowchart-link.is-on {
-    stroke: var(--subj, var(--accent)) !important;
+  .diagram.stepping .mmd-stage .node :is(.nodeLabel, .nodeLabel *) { color: var(--st-up-ink) !important; }
+  .diagram.stepping .mmd-stage .node text { fill: var(--st-up-ink) !important; }
+  .diagram.stepping .mmd-stage .cluster:not(.is-on) rect { stroke-dasharray: 4 3; }
+  .diagram.stepping .mmd-stage .flowchart-link { stroke: var(--rule-strong) !important; }
+  .diagram.stepping .mmd-stage .edgeLabel :is(span, p, div) { color: var(--muted) !important; }
+
+  /* next: what is about to happen */
+  .diagram.stepping .mmd-stage .node.is-next :is(rect, polygon, circle, ellipse, path) {
+    stroke: var(--st-on) !important; stroke-width: 1.5px !important; stroke-dasharray: 5 3;
+  }
+  .diagram.stepping .mmd-stage .node.is-next :is(.nodeLabel, .nodeLabel *) { color: var(--text) !important; }
+  .diagram.stepping .mmd-stage .node.is-next text { fill: var(--text) !important; }
+  .diagram.stepping .mmd-stage .flowchart-link.is-next { stroke: var(--st-on) !important; stroke-dasharray: 3 4; }
+
+  /* done: already happened */
+  .diagram.stepping .mmd-stage .node.is-done :is(rect, polygon, circle, ellipse, path) {
+    fill: var(--surface) !important; stroke: color-mix(in srgb, var(--st-on) 65%, var(--rule-strong)) !important;
+    stroke-width: 1.5px !important; stroke-dasharray: none;
+  }
+  .diagram.stepping .mmd-stage .node.is-done :is(.nodeLabel, .nodeLabel *) { color: var(--ink) !important; }
+  .diagram.stepping .mmd-stage .node.is-done text { fill: var(--ink) !important; }
+  .diagram.stepping .mmd-stage .flowchart-link.is-done { stroke: color-mix(in srgb, var(--st-on) 60%, var(--rule-strong)) !important; }
+
+  /* now: the current step */
+  .diagram.stepping .mmd-stage .node.is-on :is(rect, polygon, circle, ellipse, path) {
+    fill: var(--st-on-bg) !important; stroke: var(--st-on) !important;
+    stroke-width: 2.5px !important; stroke-dasharray: none;
+  }
+  .diagram.stepping .mmd-stage .node.is-on :is(.nodeLabel, .nodeLabel *) { color: var(--ink) !important; font-weight: 600; }
+  .diagram.stepping .mmd-stage .node.is-on text { fill: var(--ink) !important; font-weight: 600; }
+  .diagram.stepping .mmd-stage .cluster.is-on rect { stroke: var(--st-on) !important; stroke-width: 2px !important; }
+  .diagram.stepping .mmd-stage .node.is-current { filter: drop-shadow(0 0 7px color-mix(in srgb, var(--st-on) 50%, transparent)); }
+  .diagram.stepping .mmd-stage .flowchart-link.is-on {
+    stroke: var(--st-on) !important; stroke-width: 2px !important;
     stroke-dasharray: 6 5; animation: mmd-flow 1.1s linear infinite;
   }
 
-  /* sequence mode: messages appear one at a time */
-  .diagram[data-mode='sequence'] .seq-hidden { opacity: 0; }
-  .diagram[data-mode='sequence'] .seq-shown { opacity: 1; transition: opacity 0.4s var(--ease); }
-  .diagram[data-mode='sequence'] .seq-current { stroke: var(--subj, var(--accent)) !important; fill: var(--subj, var(--accent)) !important; }
-  .diagram[data-mode='sequence'] line.seq-current, .diagram[data-mode='sequence'] path.seq-current { fill: none !important; stroke-width: 2px !important; }
+  /* ---- sequence mode: every message stays readable, the current one is lit ---- */
+  .diagram[data-mode='sequence'] :is(.seq-hidden, .seq-shown) { transition: stroke 0.3s var(--ease), fill 0.3s var(--ease); }
+  .diagram[data-mode='sequence'] :is(line, path).seq-hidden { stroke: var(--rule-strong) !important; stroke-dasharray: 3 4 !important; }
+  .diagram[data-mode='sequence'] text.seq-hidden { fill: var(--muted) !important; }
+  .diagram[data-mode='sequence'] :is(line, path).seq-shown { stroke: var(--muted) !important; }
+  .diagram[data-mode='sequence'] text.seq-shown { fill: var(--ink) !important; }
+  .diagram[data-mode='sequence'] .seq-current { stroke: var(--st-on) !important; fill: var(--st-on) !important; }
+  .diagram[data-mode='sequence'] :is(line, path).seq-current { fill: none !important; stroke-width: 2.5px !important; }
+  .diagram[data-mode='sequence'] text.seq-current-label { fill: var(--st-on) !important; font-weight: 600; }
+
+  /* legend */
+  .mp-legend { grid-area: legend; display: none; gap: 10px; align-items: center; justify-self: end; font-size: 11.5px; color: var(--muted); }
+  .diagram.stepping .mp-legend { display: flex; }
+  .mp-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .mp-legend i { width: 14px; height: 9px; border-radius: 2px; box-sizing: border-box; }
+  .mp-legend .lg-done i { background: var(--surface); border: 1.5px solid color-mix(in srgb, var(--st-on) 65%, var(--rule-strong)); }
+  .mp-legend .lg-now i { background: var(--st-on-bg); border: 2px solid var(--st-on); }
+  .mp-legend .lg-next i { background: var(--bg); border: 1.5px dashed var(--st-on); }
 
   .mmd-player {
     display: grid;
     grid-template-columns: auto auto auto auto 1fr;
-    grid-template-areas: 'play prev next count .' 'text text text text text';
+    grid-template-areas: 'play prev next count legend' 'text text text text text';
     align-items: center; gap: 6px;
     margin-top: 0.9em; padding-top: 0.8em; border-top: 1px dashed var(--rule);
   }
